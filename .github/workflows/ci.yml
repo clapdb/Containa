@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  gcc-build:
+    runs-on: ubuntu-latest
+    name: GCC Build and Test
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+
+    - name: Configure CMake (Debug)
+      run: |
+        mkdir -p build.debug
+        cd build.debug
+        cmake .. -DCMAKE_BUILD_TYPE=Debug
+
+    - name: Build (Debug)
+      run: |
+        cd build.debug
+        cmake --build . -j$(nproc)
+
+    - name: Run Tests (Debug)
+      run: |
+        cd build.debug
+        ctest --output-on-failure
+
+    - name: Configure CMake (Release)
+      run: |
+        mkdir -p build.release
+        cd build.release
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build (Release)
+      run: |
+        cd build.release
+        cmake --build . -j$(nproc)
+
+    - name: Run Tests (Release)
+      run: |
+        cd build.release
+        ctest --output-on-failure
+
+  clang-build:
+    runs-on: ubuntu-latest
+    name: Clang Build and Test
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
+
+    - name: Configure CMake with Clang (Debug)
+      run: |
+        mkdir -p build.clang.debug
+        cd build.clang.debug
+        cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_CXX_COMPILER=clang++ \
+                 -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+
+    - name: Build with Clang (Debug)
+      run: |
+        cd build.clang.debug
+        cmake --build . -j$(nproc)
+
+    - name: Run Tests with Clang (Debug)
+      run: |
+        cd build.clang.debug
+        ctest --output-on-failure
+
+    - name: Configure CMake with Clang (Release)
+      run: |
+        mkdir -p build.clang.release
+        cd build.clang.release
+        cmake .. -DCMAKE_BUILD_TYPE=Release \
+                 -DCMAKE_CXX_COMPILER=clang++ \
+                 -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+
+    - name: Build with Clang (Release)
+      run: |
+        cd build.clang.release
+        cmake --build . -j$(nproc)
+
+    - name: Run Tests with Clang (Release)
+      run: |
+        cd build.clang.release
+        ctest --output-on-failure
+
+  benchmark:
+    runs-on: ubuntu-latest
+    name: Run Benchmarks
+    needs: [gcc-build, clang-build]
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+
+    - name: Configure CMake (Release)
+      run: |
+        mkdir -p build.release
+        cd build.release
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build Benchmarks
+      run: |
+        cd build.release
+        cmake --build . --target containa_bench -j$(nproc)
+
+    - name: Run Benchmarks
+      run: |
+        cd build.release
+        ./bench/containa_bench
