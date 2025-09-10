@@ -103,33 +103,3 @@ jobs:
         cd build.clang.release
         ctest --output-on-failure
 
-  benchmark:
-    runs-on: ubuntu-latest
-    name: Run Benchmarks
-    needs: [gcc-build, clang-build]
-    
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake build-essential
-
-    - name: Configure CMake (Release)
-      run: |
-        mkdir -p build.release
-        cd build.release
-        cmake .. -DCMAKE_BUILD_TYPE=Release
-
-    - name: Build Benchmarks
-      run: |
-        cd build.release
-        cmake --build . --target containa_bench -j$(nproc)
-
-    - name: Run Benchmarks
-      run: |
-        cd build.release
-        ./bench/containa_bench
