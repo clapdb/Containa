@@ -119,7 +119,11 @@ class just_copy
         memcpy(buf, other.buf, 1024);
         return *this;
     }
-    just_copy(just_copy&&) = delete;
+    // Provide move constructor that behaves like copy for libc++ compatibility
+    just_copy(just_copy&& other) noexcept : value(other.value), buf(malloc(1024)) {
+        memcpy(buf, other.buf, 1024);
+    }
+    just_copy& operator=(just_copy&&) = delete;
     ~just_copy() { free(buf); }
 };
 
