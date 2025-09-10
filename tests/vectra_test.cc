@@ -8,7 +8,6 @@
 #include <span>
 #include <vector>
 
-
 namespace stdb::container {
 // NOLINTBEGIN
 
@@ -119,7 +118,7 @@ TEST_CASE("Hilbert::stdb_vector::int") {
 
     SUBCASE("element access") {
         const stdb::container::vectra<int> input = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
-                                                         11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+                                                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
         const vectra<int>& vec = input;
         CHECK_EQ(*input.data(), 1);
         CHECK_EQ(*vec.data(), 1);
@@ -903,7 +902,6 @@ TEST_CASE("Hilbert::stdb_vector::int") {
     }
 }
 
-
 class non_movable
 {
    private:
@@ -1311,7 +1309,6 @@ TEST_CASE("vector of bool works well") {
     CHECK_EQ(v.size(), 11);
     CHECK_EQ(v[10], false);
 }
-
 
 }  // namespace stdb::container
 
