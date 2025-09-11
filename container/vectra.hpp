@@ -13,7 +13,6 @@
 #include <type_traits>
 #include <utility>
 
-
 #ifndef Assert
 #include <cassert>
 #define Assert(expr, msg) assert((expr) && (msg))
@@ -75,7 +74,7 @@ template <typename T>
 }
 
 template <typename T>
-    requires std::is_object_v<T>
+requires std::is_object_v<T>
 [[gnu::always_inline]] inline void construct_range_with_cref(T* __restrict__ first, T* __restrict__ last,
                                                              const T& value) {
     Assert(first != nullptr and last != nullptr, "first and last can not be nullptr");
@@ -109,7 +108,7 @@ template <typename T>
 }
 
 template <typename T>
-    requires std::is_trivially_copyable_v<T> or std::is_nothrow_move_constructible_v<T>
+requires std::is_trivially_copyable_v<T> or std::is_nothrow_move_constructible_v<T>
 [[gnu::always_inline]] inline void copy_value(T* __restrict__ dst, T value) {
     Assert(dst != nullptr, "dst can not be nullptr");
     if constexpr (IsRelocatable<T>) {
@@ -121,7 +120,7 @@ template <typename T>
 }
 
 template <typename T>
-    requires std::is_object_v<T>
+requires std::is_object_v<T>
 [[gnu::always_inline]] inline void copy_cref(T* __restrict__ dst, const T& value) {
     Assert(dst != nullptr, "dst can not be nullptr");
     if constexpr (IsRelocatable<T>) {
@@ -741,7 +740,7 @@ class vectra : public core<T>
         IteratorT(const IteratorT&) noexcept = default;
 
         template <bool OtherIterator>
-            requires(!OtherIterator && Const)
+        requires(!OtherIterator && Const)
         IteratorT(IteratorT<OtherIterator> rhs) noexcept  // NOLINT(google-explicit-constructor)
             : _ptr(rhs.operator->()) {}
 
@@ -901,7 +900,7 @@ class vectra : public core<T>
      * Modifiers sections
      */
     template <Safety safety = Safety::Safe, typename U = T>
-        requires std::is_object_v<U>
+    requires std::is_object_v<U>
     void push_back(const value_type& value) {
         if constexpr (safety == Safety::Safe) {
             if (!this->full()) [[likely]] {
@@ -916,7 +915,7 @@ class vectra : public core<T>
     }
 
     template <Safety safety = Safety::Safe, typename U = T>
-        requires std::is_trivial_v<U> || std::is_move_constructible_v<U>
+    requires std::is_trivial_v<U> || std::is_move_constructible_v<U>
     void push_back(value_type&& value) {
         if constexpr (safety == Safety::Safe) {
             if (!this->full()) [[likely]] {
@@ -1066,7 +1065,7 @@ class vectra : public core<T>
      * just like erase, but use a Pred function to test if the element should be erased
      */
     template <class Pred>
-        requires std::predicate<Pred, const T&> || std::predicate<Pred, T&> || std::predicate<Pred, T>
+    requires std::predicate<Pred, const T&> || std::predicate<Pred, T&> || std::predicate<Pred, T>
     auto erase_if(Pred pred) -> size_type {  // NOLINT
         if constexpr (IsRelocatable<T>) {
             size_t erased = 0;
@@ -1262,7 +1261,7 @@ class vectra : public core<T>
     }
 
     template <Safety safety = Safety::Safe, class InputIt>
-        requires std::input_iterator<InputIt>
+    requires std::input_iterator<InputIt>
     constexpr auto insert(const_iterator pos, InputIt first, InputIt last) -> iterator {
         int64_t count = last - first;
         if (count == 0) [[unlikely]] {
@@ -1294,8 +1293,8 @@ class vectra : public core<T>
     }
 
     template <Safety safety = Safety::Safe>
-    [[gnu::always_inline]] constexpr inline auto insert(const_iterator pos, std::initializer_list<T> ilist)
-      -> iterator {
+    [[gnu::always_inline]]
+    constexpr inline auto insert(const_iterator pos, std::initializer_list<T> ilist) -> iterator {
         return insert<safety>(pos, ilist.begin(), ilist.end());
     }
 
