@@ -1,0 +1,100 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-latest
+    name: Clang-Tidy Analysis
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 20
+        sudo apt-get install -y cmake clang-20 clang-tidy-20
+        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-20 100
+
+    - name: Configure CMake
+      run: |
+        mkdir -p build.analysis
+        cd build.analysis
+        cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+    - name: Run clang-tidy on core library
+      run: |
+        cd build.analysis
+        clang-tidy ../container/vectra.hpp \
+          -p . \
+          --checks='-*,readability-*,performance-*,modernize-*,bugprone-*' \
+          --warnings-as-errors=false
+
+    - name: Run clang-tidy on tests
+      run: |
+        cd build.analysis
+        clang-tidy ../tests/vectra_test.cc \
+          -p . \
+          --checks='-*,readability-*,performance-*,modernize-*,bugprone-*' \
+          --warnings-as-errors=false
+
+
+  format-check:
+    runs-on: ubuntu-latest
+    name: Format Check
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install clang-format
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+
+    - name: Check formatting
+      run: |
+        find . -name "*.hpp" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" | \
+        grep -v -E "(doctest|nanobench|build\.|third_party|external)" | \
+        xargs clang-format --dry-run --Werror --style=file
+
+  memory-sanitizer:
+    runs-on: ubuntu-latest
+    name: Memory Sanitizer
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
+
+    - name: Configure CMake with sanitizers
+      run: |
+        mkdir -p build.sanitizer
+        cd build.sanitizer
+        cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_CXX_COMPILER=clang++ \
+                 -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fno-omit-frame-pointer"
+
+    - name: Build with sanitizers
+      run: |
+        cd build.sanitizer
+        cmake --build . -j$(nproc)
+
+    - name: Run tests with sanitizers
+      run: |
+        cd build.sanitizer
+        ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ctest --output-on-failure
