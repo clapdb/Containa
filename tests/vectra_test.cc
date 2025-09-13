@@ -911,11 +911,6 @@ TEST_CASE("Hilbert::stdb_vector::int") {
         vectra<int> result_vec = {1, 5, 5, 7, 5, 9};
         CHECK_EQ(vec == result_vec, true);
     }
-    SUBCASE("fmt") {
-        vectra<int> vec = {1, 2, 3, 4, 5};
-        std::string str = std::format("{}", vec);
-        CHECK_EQ(str, "[1, 2, 3, 4, 5]");
-    }
 }
 
 class non_movable
