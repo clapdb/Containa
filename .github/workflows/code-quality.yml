@@ -12,7 +12,7 @@ jobs:
     name: Clang-Tidy Analysis
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -54,7 +54,7 @@ jobs:
     name: Format Check
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install clang-format
       run: |
@@ -72,7 +72,7 @@ jobs:
     name: Memory Sanitizer
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
