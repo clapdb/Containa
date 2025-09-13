@@ -20,7 +20,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <format>
 #include <iterator>
 #include <limits>
 #include <new>
@@ -1440,21 +1439,4 @@ template <class T, class Predicate>
 constexpr auto erase_if(stdb::container::vectra<T>& vec, Predicate pred) -> std::size_t {
     return vec.erase_if(pred);
 }
-
-template <typename T>
-struct formatter<stdb::container::vectra<T>> : std::formatter<std::string>
-{
-    auto format(const stdb::container::vectra<T>& vec, std::format_context& ctx) const {
-        std::string result = "[";
-        for (std::size_t i = 0; i < vec.size(); ++i) {
-            if (i > 0) {
-                result += ", ";
-            }
-            result += std::format("{}", vec[i]);
-        }
-        result += "]";
-        return std::formatter<std::string>::format(result, ctx);
-    }
-};
-
 }  // namespace std
