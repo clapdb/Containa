@@ -20,6 +20,23 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Sanitizer options
+option(ENABLE_ASAN "Enable AddressSanitizer for memory leak and error detection" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+
+# Configure sanitizer flags
+if(ENABLE_ASAN)
+    list(APPEND SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer)
+    list(APPEND SANITIZER_LINK_FLAGS -fsanitize=address)
+    message(STATUS "AddressSanitizer enabled")
+endif()
+
+if(ENABLE_UBSAN)
+    list(APPEND SANITIZER_FLAGS -fsanitize=undefined -fno-omit-frame-pointer)
+    list(APPEND SANITIZER_LINK_FLAGS -fsanitize=undefined)
+    message(STATUS "UndefinedBehaviorSanitizer enabled")
+endif()
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/)
 
 # Header-only library target
