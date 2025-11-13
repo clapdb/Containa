@@ -1322,7 +1322,8 @@ TEST_CASE("vector of bool works well") {
     CHECK_EQ(v[10], false);
 }
 
-struct move_struct {
+struct move_struct
+{
     std::string str1;
     std::string str2;
     std::unordered_map<int, std::string> map1;
@@ -1343,15 +1344,14 @@ static_assert(std::is_move_constructible_v<move_struct>, "move_struct should be 
 static_assert(std::is_nothrow_move_constructible_v<move_struct>, "move_struct should be nothrow move constructible");
 
 // Test struct to verify line 231 branch execution and memory leak detection
-struct heap_tracked_struct {
+struct heap_tracked_struct
+{
     std::string* data;
     std::vector<int> vec_data;
     static inline int allocation_count = 0;
     static inline int deallocation_count = 0;
 
-    heap_tracked_struct() : data(new std::string("default")), vec_data({1, 2, 3, 4, 5}) {
-        ++allocation_count;
-    }
+    heap_tracked_struct() : data(new std::string("default")), vec_data({1, 2, 3, 4, 5}) { ++allocation_count; }
 
     explicit heap_tracked_struct(std::string s) : data(new std::string(std::move(s))), vec_data({1, 2, 3, 4, 5}) {
         ++allocation_count;
@@ -1360,8 +1360,7 @@ struct heap_tracked_struct {
     heap_tracked_struct(const heap_tracked_struct&) = delete;
     heap_tracked_struct& operator=(const heap_tracked_struct&) = delete;
 
-    heap_tracked_struct(heap_tracked_struct&& other) noexcept
-        : data(other.data), vec_data(std::move(other.vec_data)) {
+    heap_tracked_struct(heap_tracked_struct&& other) noexcept : data(other.data), vec_data(std::move(other.vec_data)) {
         other.data = nullptr;
     }
 
@@ -1524,10 +1523,10 @@ TEST_CASE("Hilbert::stdb_vector::move_struct::erase_branch_231_coverage") {
             CHECK_EQ(vec.size(), 50);
 
             // Erase in various patterns
-            vec.erase(vec.begin() + 5, vec.begin() + 15);   // Range erase
-            vec.erase(vec.begin());                          // Front erase
-            vec.erase(vec.end() - 1);                        // Back erase
-            vec.erase(vec.begin() + 10, vec.end());          // Erase to end
+            vec.erase(vec.begin() + 5, vec.begin() + 15);  // Range erase
+            vec.erase(vec.begin());                        // Front erase
+            vec.erase(vec.end() - 1);                      // Back erase
+            vec.erase(vec.begin() + 10, vec.end());        // Erase to end
 
             vec.clear();
         }
@@ -1717,7 +1716,6 @@ TEST_CASE("Hilbert::stdb_vector::move_struct::erase") {
         CHECK_EQ(vec[5].str1, "prefix_20");
     }
 }
-
 
 }  // namespace stdb::container
 
