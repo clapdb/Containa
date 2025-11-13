@@ -22,6 +22,7 @@
 #include <iostream>
 #include <set>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace stdb::container {
@@ -1320,6 +1321,403 @@ TEST_CASE("vector of bool works well") {
     CHECK_EQ(v.size(), 11);
     CHECK_EQ(v[10], false);
 }
+
+struct move_struct {
+    std::string str1;
+    std::string str2;
+    std::unordered_map<int, std::string> map1;
+
+    move_struct() = default;
+    move_struct(std::string s1, std::string s2) : str1(std::move(s1)), str2(std::move(s2)) {}
+    move_struct(std::string s1, std::string s2, std::unordered_map<int, std::string> m)
+        : str1(std::move(s1)), str2(std::move(s2)), map1(std::move(m)) {}
+
+    bool operator==(const move_struct& other) const {
+        return str1 == other.str1 && str2 == other.str2 && map1 == other.map1;
+    }
+};
+
+// Verify move_struct properties to ensure line 231 branch in vectra.hpp is taken
+static_assert(!IsRelocatable<move_struct>, "move_struct should NOT be relocatable (contains std::string)");
+static_assert(std::is_move_constructible_v<move_struct>, "move_struct should be move constructible");
+static_assert(std::is_nothrow_move_constructible_v<move_struct>, "move_struct should be nothrow move constructible");
+
+// Test struct to verify line 231 branch execution and memory leak detection
+struct heap_tracked_struct {
+    std::string* data;
+    std::vector<int> vec_data;
+    static inline int allocation_count = 0;
+    static inline int deallocation_count = 0;
+
+    heap_tracked_struct() : data(new std::string("default")), vec_data({1, 2, 3, 4, 5}) {
+        ++allocation_count;
+    }
+
+    explicit heap_tracked_struct(std::string s) : data(new std::string(std::move(s))), vec_data({1, 2, 3, 4, 5}) {
+        ++allocation_count;
+    }
+
+    heap_tracked_struct(const heap_tracked_struct&) = delete;
+    heap_tracked_struct& operator=(const heap_tracked_struct&) = delete;
+
+    heap_tracked_struct(heap_tracked_struct&& other) noexcept
+        : data(other.data), vec_data(std::move(other.vec_data)) {
+        other.data = nullptr;
+    }
+
+    heap_tracked_struct& operator=(heap_tracked_struct&& other) noexcept {
+        if (this != &other) {
+            delete data;
+            data = other.data;
+            vec_data = std::move(other.vec_data);
+            other.data = nullptr;
+        }
+        return *this;
+    }
+
+    ~heap_tracked_struct() {
+        if (data) {
+            delete data;
+            ++deallocation_count;
+        }
+    }
+
+    bool operator==(const heap_tracked_struct& other) const {
+        if (data && other.data) {
+            return *data == *other.data && vec_data == other.vec_data;
+        }
+        return data == other.data;
+    }
+
+    static void reset_counters() {
+        allocation_count = 0;
+        deallocation_count = 0;
+    }
+
+    static bool check_no_leaks() { return allocation_count == deallocation_count; }
+};
+
+// Verify heap_tracked_struct triggers the move_range_forward branch at line 231
+static_assert(!IsRelocatable<heap_tracked_struct>, "heap_tracked_struct should NOT be relocatable");
+static_assert(std::is_move_constructible_v<heap_tracked_struct>, "heap_tracked_struct should be move constructible");
+static_assert(std::is_nothrow_move_constructible_v<heap_tracked_struct>,
+              "heap_tracked_struct should be nothrow move constructible");
+
+TEST_CASE("Hilbert::stdb_vector::move_struct::erase_branch_231_coverage") {
+    SUBCASE("erase_triggers_move_range_forward_no_leak") {
+        // This test specifically targets line 231 in vectra.hpp
+        // When erasing from a non-relocatable but move-constructible type,
+        // move_range_forward is called, which executes the branch at line 231
+        heap_tracked_struct::reset_counters();
+
+        {
+            vectra<heap_tracked_struct> vec;
+
+            // Create elements with heap allocations
+            for (int i = 0; i < 100; ++i) {
+                vec.emplace_back("element_" + std::to_string(i));
+            }
+
+            CHECK_EQ(vec.size(), 100);
+            CHECK_EQ(heap_tracked_struct::allocation_count, 100);
+
+            // Erase from beginning - triggers move_range_forward
+            vec.erase(vec.begin());
+            CHECK_EQ(vec.size(), 99);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 1);
+            CHECK_EQ(*vec.front().data, "element_1");
+
+            // Erase from middle - triggers move_range_forward
+            vec.erase(vec.begin() + 50);
+            CHECK_EQ(vec.size(), 98);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 2);
+
+            // Erase range in middle - triggers move_range_forward
+            vec.erase(vec.begin() + 10, vec.begin() + 20);
+            CHECK_EQ(vec.size(), 88);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 12);
+
+            // Erase range from beginning - triggers move_range_forward
+            vec.erase(vec.begin(), vec.begin() + 10);
+            CHECK_EQ(vec.size(), 78);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 22);
+
+            // Clear remaining elements
+            vec.clear();
+            CHECK_EQ(vec.size(), 0);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 100);
+        }
+
+        // Verify no memory leaks
+        CHECK(heap_tracked_struct::check_no_leaks());
+    }
+
+    SUBCASE("insert_and_erase_stress_test_no_leak") {
+        heap_tracked_struct::reset_counters();
+
+        {
+            vectra<heap_tracked_struct> vec;
+
+            // Stress test: multiple insert/erase cycles
+            for (int cycle = 0; cycle < 10; ++cycle) {
+                // Insert 50 elements
+                for (int i = 0; i < 50; ++i) {
+                    vec.emplace_back("cycle_" + std::to_string(cycle) + "_elem_" + std::to_string(i));
+                }
+
+                // Erase every other element from the middle
+                for (int i = 0; i < 25; ++i) {
+                    if (!vec.empty() && vec.size() > 10) {
+                        vec.erase(vec.begin() + 5);
+                    }
+                }
+            }
+
+            // Final cleanup
+            vec.clear();
+        }
+
+        // Verify no memory leaks
+        CHECK(heap_tracked_struct::check_no_leaks());
+    }
+
+    SUBCASE("erase_with_reallocation_no_leak") {
+        heap_tracked_struct::reset_counters();
+
+        {
+            vectra<heap_tracked_struct> vec;
+            vec.reserve(10);
+
+            // Fill beyond reserved capacity to trigger reallocation
+            for (int i = 0; i < 100; ++i) {
+                vec.emplace_back("item_" + std::to_string(i));
+            }
+
+            CHECK_EQ(vec.size(), 100);
+
+            // Erase elements while maintaining large size
+            for (int i = 0; i < 50; ++i) {
+                vec.erase(vec.begin() + (vec.size() / 2));
+            }
+
+            CHECK_EQ(vec.size(), 50);
+            vec.clear();
+        }
+
+        // Verify no memory leaks
+        CHECK(heap_tracked_struct::check_no_leaks());
+    }
+
+    SUBCASE("erase_complex_data_structures_no_leak") {
+        heap_tracked_struct::reset_counters();
+
+        {
+            vectra<heap_tracked_struct> vec;
+
+            // Create elements with varying data sizes
+            for (int i = 0; i < 50; ++i) {
+                std::string large_string(1000 * (i % 10 + 1), 'x');
+                large_string += "_" + std::to_string(i);
+                vec.emplace_back(std::move(large_string));
+            }
+
+            CHECK_EQ(vec.size(), 50);
+
+            // Erase in various patterns
+            vec.erase(vec.begin() + 5, vec.begin() + 15);   // Range erase
+            vec.erase(vec.begin());                          // Front erase
+            vec.erase(vec.end() - 1);                        // Back erase
+            vec.erase(vec.begin() + 10, vec.end());          // Erase to end
+
+            vec.clear();
+        }
+
+        // Verify no memory leaks
+        CHECK(heap_tracked_struct::check_no_leaks());
+    }
+
+    SUBCASE("verify_move_constructor_called_during_erase") {
+        // This test verifies that the move constructor path (line 231-237 in vectra.hpp)
+        // is executed during erase operations on non-relocatable types
+
+        heap_tracked_struct::reset_counters();
+
+        {
+            vectra<heap_tracked_struct> vec;
+
+            // Populate vector with identifiable elements
+            for (int i = 0; i < 10; ++i) {
+                vec.emplace_back("elem_" + std::to_string(i));
+            }
+
+            CHECK_EQ(vec.size(), 10);
+            CHECK_EQ(heap_tracked_struct::allocation_count, 10);
+
+            // Verify initial state
+            CHECK_EQ(*vec[0].data, "elem_0");
+            CHECK_EQ(*vec[5].data, "elem_5");
+            CHECK_EQ(*vec[9].data, "elem_9");
+
+            // Erase element at position 2
+            // This triggers move_range_forward which calls move constructor
+            // for elements [3..9] to positions [2..8]
+            vec.erase(vec.begin() + 2);
+
+            CHECK_EQ(vec.size(), 9);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 1);
+
+            // Verify elements were moved correctly (move constructor was called)
+            CHECK_EQ(*vec[0].data, "elem_0");
+            CHECK_EQ(*vec[1].data, "elem_1");
+            CHECK_EQ(*vec[2].data, "elem_3");  // elem_3 moved to position 2
+            CHECK_EQ(*vec[3].data, "elem_4");  // elem_4 moved to position 3
+            CHECK_EQ(*vec[8].data, "elem_9");  // elem_9 moved to position 8
+
+            // Erase range [4..6] (3 elements)
+            // This triggers move_range_forward for elements [7..8]
+            vec.erase(vec.begin() + 4, vec.begin() + 7);
+
+            CHECK_EQ(vec.size(), 6);
+            CHECK_EQ(heap_tracked_struct::deallocation_count, 4);
+
+            // Verify remaining elements
+            CHECK_EQ(*vec[0].data, "elem_0");
+            CHECK_EQ(*vec[1].data, "elem_1");
+            CHECK_EQ(*vec[2].data, "elem_3");
+            CHECK_EQ(*vec[3].data, "elem_4");
+            CHECK_EQ(*vec[4].data, "elem_8");  // elem_8 moved forward
+            CHECK_EQ(*vec[5].data, "elem_9");  // elem_9 moved forward
+
+            vec.clear();
+        }
+
+        // Final verification: all allocations cleaned up
+        CHECK(heap_tracked_struct::check_no_leaks());
+        CHECK_EQ(heap_tracked_struct::allocation_count, 10);
+        CHECK_EQ(heap_tracked_struct::deallocation_count, 10);
+    }
+}
+
+TEST_CASE("Hilbert::stdb_vector::move_struct::erase") {
+    SUBCASE("erase_single_element_by_position") {
+        vectra<move_struct> vec;
+        vec.emplace_back("a1", "a2");
+        vec.emplace_back("b1", "b2");
+        vec.emplace_back("c1", "c2");
+        vec.emplace_back("d1", "d2");
+        vec.emplace_back("e1", "e2");
+
+        CHECK_EQ(vec.size(), 5);
+
+        // Erase from beginning
+        auto it = vec.erase(vec.begin());
+        CHECK_EQ(it, vec.begin());
+        CHECK_EQ(vec.size(), 4);
+        CHECK_EQ(vec.front().str1, "b1");
+        CHECK_EQ(vec.back().str1, "e1");
+
+        // Erase from middle
+        it = vec.erase(vec.begin() + 1);
+        CHECK_EQ(it, vec.begin() + 1);
+        CHECK_EQ(vec.size(), 3);
+        CHECK_EQ(vec[1].str1, "d1");
+
+        // Erase from end
+        it = vec.erase(vec.end() - 1);
+        CHECK_EQ(it, vec.end());
+        CHECK_EQ(vec.size(), 2);
+        CHECK_EQ(vec.back().str1, "d1");
+    }
+
+    SUBCASE("erase_range") {
+        vectra<move_struct> vec;
+        for (int i = 0; i < 10; ++i) {
+            vec.emplace_back("str1_" + std::to_string(i), "str2_" + std::to_string(i));
+        }
+        CHECK_EQ(vec.size(), 10);
+
+        // Erase range in middle (positions 2, 3, 4)
+        vec.erase(vec.begin() + 2, vec.begin() + 5);
+        CHECK_EQ(vec.size(), 7);
+        CHECK_EQ(vec[0].str1, "str1_0");
+        CHECK_EQ(vec[1].str1, "str1_1");
+        CHECK_EQ(vec[2].str1, "str1_5");
+        CHECK_EQ(vec[3].str1, "str1_6");
+
+        // Erase range from beginning
+        vec.erase(vec.begin(), vec.begin() + 2);
+        CHECK_EQ(vec.size(), 5);
+        CHECK_EQ(vec.front().str1, "str1_5");
+        CHECK_EQ(vec[0].str1, "str1_5");
+        CHECK_EQ(vec[1].str1, "str1_6");
+
+        // Erase range to end
+        vec.erase(vec.begin() + 2, vec.end());
+        CHECK_EQ(vec.size(), 2);
+        CHECK_EQ(vec[0].str1, "str1_5");
+        CHECK_EQ(vec[1].str1, "str1_6");
+        CHECK_EQ(vec.back().str1, "str1_6");
+
+        // Erase all elements
+        vec.erase(vec.begin(), vec.end());
+        CHECK_EQ(vec.size(), 0);
+        CHECK_EQ(vec.empty(), true);
+    }
+
+    SUBCASE("erase_with_map_data") {
+        vectra<move_struct> vec;
+
+        std::unordered_map<int, std::string> map1 = {{1, "one"}, {2, "two"}};
+        std::unordered_map<int, std::string> map2 = {{3, "three"}, {4, "four"}};
+        std::unordered_map<int, std::string> map3 = {{5, "five"}, {6, "six"}};
+
+        vec.emplace_back("a", "A", map1);
+        vec.emplace_back("b", "B", map2);
+        vec.emplace_back("c", "C", map3);
+
+        CHECK_EQ(vec.size(), 3);
+        CHECK_EQ(vec[0].map1.size(), 2);
+        CHECK_EQ(vec[1].map1.size(), 2);
+        CHECK_EQ(vec[2].map1.size(), 2);
+
+        // Erase middle element with map
+        auto it = vec.erase(vec.begin() + 1);
+        CHECK_EQ(vec.size(), 2);
+        CHECK_EQ(vec[0].str1, "a");
+        CHECK_EQ(vec[1].str1, "c");
+        CHECK_EQ(vec[0].map1.at(1), "one");
+        CHECK_EQ(vec[1].map1.at(5), "five");
+
+        // Erase remaining
+        vec.erase(vec.begin(), vec.end());
+        CHECK_EQ(vec.empty(), true);
+    }
+
+    SUBCASE("erase_after_reserve") {
+        vectra<move_struct> vec;
+        vec.reserve(100);
+
+        for (int i = 0; i < 50; ++i) {
+            vec.emplace_back("prefix_" + std::to_string(i), "suffix_" + std::to_string(i));
+        }
+
+        CHECK_EQ(vec.size(), 50);
+        CHECK_EQ(vec.capacity(), 100);
+
+        // Erase multiple ranges
+        vec.erase(vec.begin() + 10, vec.begin() + 20);
+        CHECK_EQ(vec.size(), 40);
+        CHECK_EQ(vec.capacity(), 100);
+
+        vec.erase(vec.begin() + 5, vec.begin() + 10);
+        CHECK_EQ(vec.size(), 35);
+        CHECK_EQ(vec.capacity(), 100);
+
+        CHECK_EQ(vec[4].str1, "prefix_4");
+        CHECK_EQ(vec[5].str1, "prefix_20");
+    }
+}
+
 
 }  // namespace stdb::container
 
