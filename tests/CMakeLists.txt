@@ -17,4 +17,11 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -Wno-error=
 #target_include_directories(memory_test PRIVATE ${MEMORY_SOURCE_DIR}/)
 
 target_compile_options(containa_test PRIVATE ${TEST_FLAGS})
+
+# Apply sanitizer flags if enabled
+if(ENABLE_ASAN OR ENABLE_UBSAN)
+    target_compile_options(containa_test PRIVATE ${SANITIZER_FLAGS})
+    target_link_options(containa_test PRIVATE ${SANITIZER_LINK_FLAGS})
+endif()
+
 target_link_libraries(containa_test dl doctest)
