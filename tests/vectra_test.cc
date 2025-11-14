@@ -1160,7 +1160,6 @@ static_assert(!IsZeroInitable<std::string>, "std::string should not be zero copy
 
 TEST_CASE_TEMPLATE("Hilbert::iterator test", T, vectra<int>::iterator, vectra<int>::const_iterator) {
     T it;
-    it.~T();
     T it2 = T();
     CHECK_EQ(it, it2);
     CHECK_EQ(it == it2, true);
@@ -1336,6 +1335,83 @@ struct move_struct
     bool operator==(const move_struct& other) const {
         return str1 == other.str1 && str2 == other.str2 && map1 == other.map1;
     }
+};
+
+// Struct that allocates new heap memory in the moved-from object
+// Move operation: new object steals resources, moved-from object allocates fresh memory
+struct persistent_ownership_struct
+{
+    int* data;
+    std::vector<int> vec_data;
+    static inline int allocation_count = 0;
+    static inline int deallocation_count = 0;
+    static inline int move_count = 0;
+
+    persistent_ownership_struct() : data(new int(0)), vec_data({1, 2, 3}) { ++allocation_count; }
+
+    explicit persistent_ownership_struct(int value) : data(new int(value)), vec_data({value, value + 1, value + 2}) {
+        ++allocation_count;
+    }
+
+    persistent_ownership_struct(int value, std::vector<int> v) : data(new int(value)), vec_data(std::move(v)) {
+        ++allocation_count;
+    }
+
+    persistent_ownership_struct(const persistent_ownership_struct& other)
+        : data(new int(*other.data)), vec_data(other.vec_data) {
+        ++allocation_count;
+    }
+
+    persistent_ownership_struct& operator=(const persistent_ownership_struct& other) {
+        if (this != &other) {
+            delete data;
+            data = new int(*other.data);
+            vec_data = other.vec_data;
+        }
+        return *this;
+    }
+
+    // Move constructor: steal resources from other, then give other fresh memory
+    persistent_ownership_struct(persistent_ownership_struct&& other) noexcept
+        : data(other.data),                    // Steal the pointer
+          vec_data(std::move(other.vec_data))  // Steal the vector
+    {
+        ++move_count;
+        // Moved-from object gets new heap memory instead of nullptr
+        other.data = new int(0);  // Allocate fresh memory for moved-from object
+        ++allocation_count;       // Track the new allocation
+    }
+
+    persistent_ownership_struct& operator=(persistent_ownership_struct&& other) noexcept {
+        if (this != &other) {
+            delete data;
+            data = other.data;                     // Steal the pointer
+            vec_data = std::move(other.vec_data);  // Steal the vector
+
+            // Moved-from object gets new heap memory
+            other.data = new int(0);
+            ++allocation_count;
+            ++move_count;
+        }
+        return *this;
+    }
+
+    ~persistent_ownership_struct() {
+        delete data;
+        ++deallocation_count;
+    }
+
+    bool operator==(const persistent_ownership_struct& other) const {
+        return *data == *other.data && vec_data == other.vec_data;
+    }
+
+    static void reset_counters() {
+        allocation_count = 0;
+        deallocation_count = 0;
+        move_count = 0;
+    }
+
+    static bool check_no_leaks() { return allocation_count == deallocation_count; }
 };
 
 // Verify move_struct properties to ensure line 231 branch in vectra.hpp is taken
@@ -1597,6 +1673,76 @@ TEST_CASE("Hilbert::stdb_vector::move_struct::erase_branch_231_coverage") {
     }
 }
 
+TEST_CASE("Hilbert::stdb_vector::persistent_ownership_struct::cleanup") {
+    SUBCASE("verify_cleanup_after_move_operations") {
+        persistent_ownership_struct::reset_counters();
+
+        {
+            vectra<persistent_ownership_struct> vec;
+
+            // Add 10 elements
+            for (int i = 0; i < 10; ++i) {
+                vec.emplace_back(i);
+            }
+
+            CHECK_EQ(vec.size(), 10);
+            int allocations_after_insert = persistent_ownership_struct::allocation_count;
+            int deallocations_after_insert = persistent_ownership_struct::deallocation_count;
+
+            // Erase from middle - this triggers move_range_forward with cleanup
+            vec.erase(vec.begin() + 2);
+
+            CHECK_EQ(vec.size(), 9);
+            // After erase, moved-from objects should be cleaned up
+            CHECK_GT(persistent_ownership_struct::deallocation_count, deallocations_after_insert);
+
+            // Erase range - triggers more move operations with cleanup
+            vec.erase(vec.begin() + 1, vec.begin() + 4);
+
+            CHECK_EQ(vec.size(), 6);
+
+            // Insert in middle - triggers move_backward with cleanup
+            vec.emplace(vec.begin() + 2, 100);
+
+            CHECK_EQ(vec.size(), 7);
+
+            // Clear all
+            vec.clear();
+            CHECK_EQ(vec.size(), 0);
+        }
+
+        // Verify no memory leaks
+        CHECK(persistent_ownership_struct::check_no_leaks());
+    }
+
+    SUBCASE("verify_cleanup_during_reallocation") {
+        persistent_ownership_struct::reset_counters();
+
+        {
+            vectra<persistent_ownership_struct> vec;
+            vec.reserve(5);
+
+            for (int i = 0; i < 5; ++i) {
+                vec.emplace_back(i);
+            }
+
+            CHECK_EQ(vec.size(), 5);
+            CHECK_EQ(vec.capacity(), 5);
+
+            // Force reallocation - triggers move_range_without_overlap with cleanup
+            vec.push_back(persistent_ownership_struct(100));
+
+            CHECK_GT(vec.capacity(), 5);
+            CHECK_EQ(vec.size(), 6);
+
+            vec.clear();
+        }
+
+        // Verify no memory leaks after reallocation
+        CHECK(persistent_ownership_struct::check_no_leaks());
+    }
+}
+
 TEST_CASE("Hilbert::stdb_vector::move_struct::erase") {
     SUBCASE("erase_single_element_by_position") {
         vectra<move_struct> vec;
@@ -1727,9 +1873,18 @@ template <>
 struct ZeroInitable<container::normal_class_with_traits> : std::true_type
 {};
 
+// persistent_ownership_struct explicitly needs cleanup (already true by default)
+template <>
+struct NeedCleanUp<container::persistent_ownership_struct> : std::true_type
+{};
+
 namespace container {
 static_assert(IsRelocatable<normal_class_with_traits>, "normal_class_with_traits should be relocatable");
 static_assert(IsZeroInitable<normal_class_with_traits>, "normal_class_with_traits should be zero copyable");
+
+// Verify persistent_ownership_struct has the expected traits
+static_assert(NeedsCleanUp<persistent_ownership_struct>, "persistent_ownership_struct needs cleanup after move");
+static_assert(!IsRelocatable<persistent_ownership_struct>, "persistent_ownership_struct is not relocatable");
 
 }  // namespace container
 }  // namespace stdb
