@@ -43,6 +43,14 @@ template <typename T>
 struct ZeroInitable : std::false_type
 {};
 
+// Trait to mark types that need cleanup even after being moved-from.
+// Types where move operations allocate new resources for the moved-from object,
+// ensuring it maintains valid heap ownership and requires proper destruction.
+// Default: true (safer - assume moved-from objects need cleanup)
+template <typename T>
+struct NeedCleanUp : std::true_type
+{};
+
 }  // namespace stdb
 
 namespace stdb::container {
@@ -54,6 +62,9 @@ concept IsRelocatable =
 template <typename T>
 concept IsZeroInitable =
   std::is_trivially_default_constructible_v<T> || not std::is_class<T>::value || ZeroInitable<T>::value;
+
+template <typename T>
+concept NeedsCleanUp = NeedCleanUp<T>::value && !std::is_trivially_destructible_v<T>;
 
 enum class Safety : bool
 {
@@ -206,6 +217,11 @@ template <typename T>
     } else if constexpr (std::is_move_constructible_v<T>) {
         for (; src != src_end; ++src, ++dst) {
             new (dst) T(std::move(*src));
+            // If moved-from objects need cleanup (e.g., persistent_ownership_struct),
+            // we must destruct them to release their newly-allocated resources
+            if constexpr (NeedsCleanUp<T>) {
+                src->~T();
+            }
         }
         return dst;
     } else {
@@ -234,8 +250,12 @@ template <typename T>
         // call move constructor
         for (; src != src_end; ++src, ++dst) {
             new (dst) T(std::move(*src));
+            // If moved-from objects need cleanup (e.g., persistent_ownership_struct),
+            // we must destruct them to release their newly-allocated resources
+            if constexpr (NeedsCleanUp<T>) {
+                src->~T();
+            }
         }
-
     } else {
         static_assert(std::is_copy_constructible_v<T>);
         // call copy constructor and dstr
@@ -471,7 +491,7 @@ class core
         move_range_forward(const_cast<T*>(dst), const_cast<T*>(src), _finish);  // NOLINT
     }
 
-    // move [src, end()) to dst start range from end to front
+    // move [src, _finish) to [dst, dst + (_finish - src))
     void move_backward(T* __restrict__ dst, T* __restrict__ src) {
         Assert(dst != nullptr && src != nullptr, "dst and src can not be nullptr");
         // if src == _finish or src == _finish -1, just use move_forward
@@ -479,24 +499,36 @@ class core
         // if dst == src, no need to move
         Assert(dst != src, "move_backward should not be called with same dst and src");
 
-        T* dst_end = dst + (_finish - 1 - src);
+        // Calculate end positions: number of elements is (_finish - src)
+        std::size_t count = _finish - src;
+        T* dst_end = dst + count - 1;
+        T* src_end = _finish - 1;
+
         if constexpr (IsRelocatable<T>) {
             // trivially backward move
-            for (T* src_end = _finish - 1; src_end >= src;) [[likely]] {
+            for (std::size_t i = 0; i < count; ++i) {
                 *(dst_end--) = *(src_end--);
             }
         } else if constexpr (std::is_move_constructible_v<T>) {
             // do not support throwable move constructor.
             static_assert(std::is_nothrow_move_constructible_v<T>);
             // backward move
-            for (T* src_end = _finish - 1; src_end >= src;) [[likely]] {
-                new (dst_end--) T(std::move(*(src_end--)));
+            while (src_end >= src) {
+                T* current_src = src_end--;
+                new (dst_end--) T(std::move(*current_src));
+                // If moved-from objects need cleanup (e.g., persistent_ownership_struct),
+                // we must destruct them to release their newly-allocated resources
+                if constexpr (NeedsCleanUp<T>) {
+                    current_src->~T();
+                }
             }
         } else {
             // backward copy
-            for (T* src_end = _finish - 1; src_end >= src; --dst_end, --src_end) [[likely]] {
+            while (src_end >= src) {
                 new (dst_end) T(*src_end);
                 src_end->~T();
+                --dst_end;
+                --src_end;
             }
         }
     }
