@@ -33,6 +33,18 @@
 #define Assert(expr, msg) assert((expr) && (msg))
 #endif
 
+// Cross-compiler assume hint for optimization
+#if defined(__clang__)
+#define VECTRA_ASSUME(expr) __builtin_assume(expr)
+#elif defined(__GNUC__)
+#define VECTRA_ASSUME(expr)                   \
+    do {                                      \
+        if (!(expr)) __builtin_unreachable(); \
+    } while (0)
+#else
+#define VECTRA_ASSUME(expr) ((void)0)
+#endif
+
 namespace stdb {
 
 template <typename T>
@@ -950,14 +962,21 @@ class vectra : public core<T>
     requires std::is_object_v<U>
     void push_back(const value_type& value) {
         if constexpr (safety == Safety::Safe) {
-            if (!this->full()) [[likely]] {
-                copy_cref(this->_finish++, std::forward<const value_type&>(value));
+            T* const finish = this->_finish;
+            T* const edge = this->_edge;
+            if (finish != edge) [[likely]] {
+                copy_cref(finish, value);
+                this->_finish = finish + 1;
             } else {
-                this->realloc_and_emplace_back(compute_next_capacity(), std::forward<const_reference>(value));
+                this->realloc_and_emplace_back(compute_next_capacity(), value);
             }
         } else {
-            Assert(not this->full(), "push_back should not be called with full vector");
-            copy_cref(this->_finish++, std::forward<const_reference&>(value));
+            T* const finish = this->_finish;
+            Assert(finish != this->_edge, "push_back should not be called with full vector");
+            // Hint: after reserve, finish < edge is guaranteed
+            VECTRA_ASSUME(finish < this->_edge);
+            copy_cref(finish, value);
+            this->_finish = finish + 1;
         }
     }
 
@@ -965,28 +984,40 @@ class vectra : public core<T>
     requires std::is_trivial_v<U> || std::is_move_constructible_v<U>
     void push_back(value_type&& value) {
         if constexpr (safety == Safety::Safe) {
-            if (!this->full()) [[likely]] {
-                copy_value(this->_finish++, std::forward<value_type&&>(value));
+            T* const finish = this->_finish;
+            T* const edge = this->_edge;
+            if (finish != edge) [[likely]] {
+                copy_value(finish, std::move(value));
+                this->_finish = finish + 1;
             } else {
-                this->realloc_and_emplace_back(compute_next_capacity(), std::forward<rvalue_reference>(value));
+                this->realloc_and_emplace_back(compute_next_capacity(), std::move(value));
             }
         } else {
-            Assert(not this->full(), "push_back should not be called with full vector");
-            copy_value(this->_finish++, std::forward<rvalue_reference>(value));
+            T* const finish = this->_finish;
+            Assert(finish != this->_edge, "push_back should not be called with full vector");
+            VECTRA_ASSUME(finish < this->_edge);
+            copy_value(finish, std::move(value));
+            this->_finish = finish + 1;
         }
     }
 
     template <Safety safety = Safety::Safe, typename... Args>
     auto emplace_back(Args&&... args) -> reference {
         if constexpr (safety == Safety::Safe) {
-            if (!this->full()) [[likely]] {
-                this->construct_at(this->_finish++, std::forward<Args>(args)...);
+            T* const finish = this->_finish;
+            T* const edge = this->_edge;
+            if (finish != edge) [[likely]] {
+                this->construct_at(finish, std::forward<Args>(args)...);
+                this->_finish = finish + 1;
             } else {
                 this->realloc_and_emplace_back(compute_next_capacity(), std::forward<Args>(args)...);
             }
         } else {
-            Assert(not this->full(), "emplace_back should not be called with full vector");
-            this->construct_at(this->_finish++, std::forward<Args>(args)...);
+            T* const finish = this->_finish;
+            Assert(finish != this->_edge, "emplace_back should not be called with full vector");
+            VECTRA_ASSUME(finish < this->_edge);
+            this->construct_at(finish, std::forward<Args>(args)...);
+            this->_finish = finish + 1;
         }
         return *(this->_finish - 1);
     }
