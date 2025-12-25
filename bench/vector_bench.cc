@@ -16,10 +16,15 @@
  */
 
 #define ANKERL_NANOBENCH_IMPLEMENT
+#include <deque>
 #include <iostream>
 #include <vector>
 
 #include "../nanobench/src/include/nanobench.h"
+#include "container/devectra.hpp"
+#include "container/ring_buffer.hpp"
+#include "container/small_vectra.hpp"
+#include "container/static_vectra.hpp"
 #include "container/vectra.hpp"
 
 namespace stdb::container {
@@ -81,6 +86,58 @@ void push_back_unsafe() {
         vec.template push_back<Safety::Unsafe>(i);
     }
     ankerl::nanobench::doNotOptimizeAway(vec);
+}
+
+// small_vectra benchmarks - for small sizes (inline storage)
+constexpr size_t small_times = 16;  // Fits in inline storage
+
+template <typename T, size_t N>
+void push_back_small_vectra_inline() {
+    small_vectra<T, N> vec;
+    for (size_t i = 0; i < N; ++i) {
+        vec.push_back(static_cast<T>(i));
+    }
+    ankerl::nanobench::doNotOptimizeAway(vec);
+}
+
+template <typename T, size_t N>
+void push_back_small_vectra_overflow() {
+    small_vectra<T, N> vec;
+    for (size_t i = 0; i < N * 4; ++i) {
+        vec.push_back(static_cast<T>(i));
+    }
+    ankerl::nanobench::doNotOptimizeAway(vec);
+}
+
+template <typename T, size_t N>
+void push_back_std_vector_small() {
+    std::vector<T> vec;
+    for (size_t i = 0; i < N; ++i) {
+        vec.push_back(static_cast<T>(i));
+    }
+    ankerl::nanobench::doNotOptimizeAway(vec);
+}
+
+template <typename T, size_t N>
+void create_destroy_small_vectra() {
+    for (size_t iter = 0; iter < 1000; ++iter) {
+        small_vectra<T, N> vec;
+        for (size_t i = 0; i < N; ++i) {
+            vec.push_back(static_cast<T>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(vec);
+    }
+}
+
+template <typename T, size_t N>
+void create_destroy_std_vector() {
+    for (size_t iter = 0; iter < 1000; ++iter) {
+        std::vector<T> vec;
+        for (size_t i = 0; i < N; ++i) {
+            vec.push_back(static_cast<T>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(vec);
+    }
 }
 
 template <typename T>
@@ -458,6 +515,244 @@ int main() {
         vec.reserve(times);
         vec.fill<Safety::Unsafe>(&filler);
         ankerl::nanobench::doNotOptimizeAway(vec);
+    });
+
+    // === SMALL_VECTRA BENCHMARKS ===
+    std::cout << "\n=== small_vectra Performance (Inline Storage) ===\n";
+
+    // Compare small_vectra vs std::vector for small sizes (stays inline)
+    bench.run("push_back std::vector<int64_t> (16 elements)", []() { push_back_std_vector_small<int64_t, 16>(); });
+    bench.run("push_back small_vectra<int64_t,16> (inline)", []() { push_back_small_vectra_inline<int64_t, 16>(); });
+
+    bench.run("push_back std::vector<int32_t> (16 elements)", []() { push_back_std_vector_small<int32_t, 16>(); });
+    bench.run("push_back small_vectra<int32_t,16> (inline)", []() { push_back_small_vectra_inline<int32_t, 16>(); });
+
+    bench.run("push_back std::vector<int64_t> (8 elements)", []() { push_back_std_vector_small<int64_t, 8>(); });
+    bench.run("push_back small_vectra<int64_t,8> (inline)", []() { push_back_small_vectra_inline<int64_t, 8>(); });
+
+    // Test overflow behavior (inline -> heap transition)
+    std::cout << "\n=== small_vectra Overflow Performance ===\n";
+    bench.run("push_back small_vectra<int64_t,8> overflow to 32",
+              []() { push_back_small_vectra_overflow<int64_t, 8>(); });
+    bench.run("push_back std::vector<int64_t> (32 elements)", []() { push_back_std_vector_small<int64_t, 32>(); });
+
+    // Create/destroy cycle comparison (shows allocation savings)
+    std::cout << "\n=== small_vectra Create/Destroy Cycle (1000x) ===\n";
+    bench.run("create/destroy std::vector<int64_t> 8 elem x1000", []() { create_destroy_std_vector<int64_t, 8>(); });
+    bench.run("create/destroy small_vectra<int64_t,8> x1000", []() { create_destroy_small_vectra<int64_t, 8>(); });
+
+    bench.run("create/destroy std::vector<int32_t> 16 elem x1000", []() { create_destroy_std_vector<int32_t, 16>(); });
+    bench.run("create/destroy small_vectra<int32_t,16> x1000", []() { create_destroy_small_vectra<int32_t, 16>(); });
+
+    // === DEVECTRA BENCHMARKS ===
+    std::cout << "\n=== devectra vs std::deque - push_front Performance ===\n";
+
+    // push_front comparison - this is where devectra should shine vs vector
+    bench.run("push_front std::deque<int64_t> (64K)", []() {
+        std::deque<int64_t> dq;
+        for (size_t i = 0; i < times; ++i) {
+            dq.push_front(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dq);
+    });
+    bench.run("push_front devectra<int64_t> (64K)", []() {
+        devectra<int64_t> dv;
+        dv.reserve_front(times);
+        for (size_t i = 0; i < times; ++i) {
+            dv.push_front(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+    bench.run("push_front devectra<int64_t> no reserve (64K)", []() {
+        devectra<int64_t> dv;
+        for (size_t i = 0; i < times; ++i) {
+            dv.push_front(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+
+    std::cout << "\n=== devectra vs std::deque - push_back Performance ===\n";
+
+    bench.run("push_back std::deque<int64_t> (64K)", []() {
+        std::deque<int64_t> dq;
+        for (size_t i = 0; i < times; ++i) {
+            dq.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dq);
+    });
+    bench.run("push_back devectra<int64_t> (64K)", []() {
+        devectra<int64_t> dv;
+        dv.reserve_back(times);
+        for (size_t i = 0; i < times; ++i) {
+            dv.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+    bench.run("push_back devectra<int64_t> no reserve (64K)", []() {
+        devectra<int64_t> dv;
+        for (size_t i = 0; i < times; ++i) {
+            dv.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+
+    std::cout << "\n=== devectra vs std::deque - Mixed push_front/push_back ===\n";
+
+    bench.run("mixed push std::deque<int64_t> (64K)", []() {
+        std::deque<int64_t> dq;
+        for (size_t i = 0; i < times; ++i) {
+            if (i % 2 == 0) {
+                dq.push_front(static_cast<int64_t>(i));
+            } else {
+                dq.push_back(static_cast<int64_t>(i));
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(dq);
+    });
+    bench.run("mixed push devectra<int64_t> (64K)", []() {
+        devectra<int64_t> dv;
+        for (size_t i = 0; i < times; ++i) {
+            if (i % 2 == 0) {
+                dv.push_front(static_cast<int64_t>(i));
+            } else {
+                dv.push_back(static_cast<int64_t>(i));
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+
+    std::cout << "\n=== devectra vs std::deque - pop_front Performance ===\n";
+
+    bench.run("pop_front std::deque<int64_t> (64K)", []() {
+        std::deque<int64_t> dq(times);
+        while (!dq.empty()) {
+            dq.pop_front();
+        }
+        ankerl::nanobench::doNotOptimizeAway(dq);
+    });
+    bench.run("pop_front devectra<int64_t> (64K)", []() {
+        devectra<int64_t> dv(times);
+        while (!dv.empty()) {
+            dv.pop_front();
+        }
+        ankerl::nanobench::doNotOptimizeAway(dv);
+    });
+
+    std::cout << "\n=== devectra vs std::deque - Random Access ===\n";
+
+    bench.run("random access std::deque<int64_t> (64K)", []() {
+        std::deque<int64_t> dq(times);
+        int64_t sum = 0;
+        for (size_t i = 0; i < times; ++i) {
+            sum += dq[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+    bench.run("random access devectra<int64_t> (64K)", []() {
+        devectra<int64_t> dv(times);
+        int64_t sum = 0;
+        for (size_t i = 0; i < times; ++i) {
+            sum += dv[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    // === STATIC_VECTRA BENCHMARKS ===
+    std::cout << "\n=== static_vectra vs std::vector (Fixed Size) ===\n";
+
+    constexpr size_t static_size = 64;
+
+    bench.run("push_back std::vector<int64_t> (64 elements)", []() {
+        std::vector<int64_t> vec;
+        vec.reserve(static_size);
+        for (size_t i = 0; i < static_size; ++i) {
+            vec.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(vec);
+    });
+    bench.run("push_back static_vectra<int64_t,64>", []() {
+        static_vectra<int64_t, static_size> vec;
+        for (size_t i = 0; i < static_size; ++i) {
+            vec.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(vec);
+    });
+
+    std::cout << "\n=== static_vectra Create/Destroy (No Heap) ===\n";
+
+    bench.run("create/destroy std::vector<int64_t> 64 elem x1000", []() {
+        for (size_t iter = 0; iter < 1000; ++iter) {
+            std::vector<int64_t> vec;
+            vec.reserve(static_size);
+            for (size_t i = 0; i < static_size; ++i) {
+                vec.push_back(static_cast<int64_t>(i));
+            }
+            ankerl::nanobench::doNotOptimizeAway(vec);
+        }
+    });
+    bench.run("create/destroy static_vectra<int64_t,64> x1000", []() {
+        for (size_t iter = 0; iter < 1000; ++iter) {
+            static_vectra<int64_t, static_size> vec;
+            for (size_t i = 0; i < static_size; ++i) {
+                vec.push_back(static_cast<int64_t>(i));
+            }
+            ankerl::nanobench::doNotOptimizeAway(vec);
+        }
+    });
+
+    // === RING_BUFFER BENCHMARKS ===
+    std::cout << "\n=== ring_buffer Performance ===\n";
+
+    constexpr size_t ring_size = 1024;
+
+    bench.run("push_back ring_buffer<int64_t,1024> (fill)", []() {
+        ring_buffer<int64_t, ring_size> rb;
+        for (size_t i = 0; i < ring_size; ++i) {
+            rb.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(rb);
+    });
+    bench.run("push_back ring_buffer<int64_t,1024> (overflow 4x)", []() {
+        ring_buffer<int64_t, ring_size> rb;
+        for (size_t i = 0; i < ring_size * 4; ++i) {
+            rb.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(rb);
+    });
+
+    std::cout << "\n=== ring_buffer vs std::deque (FIFO Queue Pattern) ===\n";
+
+    // Simulate a FIFO queue pattern with fixed buffer
+    bench.run("FIFO std::deque<int64_t> (keep 1024 max)", []() {
+        std::deque<int64_t> dq;
+        for (size_t i = 0; i < times; ++i) {
+            dq.push_back(static_cast<int64_t>(i));
+            if (dq.size() > ring_size) {
+                dq.pop_front();
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(dq);
+    });
+    bench.run("FIFO ring_buffer<int64_t,1024> (auto-overwrite)", []() {
+        ring_buffer<int64_t, ring_size> rb;
+        for (size_t i = 0; i < times; ++i) {
+            rb.push_back(static_cast<int64_t>(i));
+        }
+        ankerl::nanobench::doNotOptimizeAway(rb);
+    });
+
+    std::cout << "\n=== ring_buffer Iteration ===\n";
+
+    bench.run("iterate ring_buffer<int64_t,1024>", []() {
+        ring_buffer<int64_t, ring_size> rb;
+        for (size_t i = 0; i < ring_size; ++i) {
+            rb.push_back(static_cast<int64_t>(i));
+        }
+        int64_t sum = 0;
+        for (auto val : rb) {
+            sum += val;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
     return 0;
