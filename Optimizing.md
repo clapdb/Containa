@@ -200,8 +200,9 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 5. **Perfect forwarding** throughout the insert path
 6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
 7. **Force-inline** with `__restrict__` hints for hot path functions
-8. **SSE2 SIMD** for int32_t keys (2.15x faster find than Abseil)
-9. **AVX2 SIMD** for int64_t keys (1.64x faster find than Abseil)
+8. **SSE2 SIMD** for int32_t keys on x86 (2.15x faster find than Abseil)
+9. **AVX2 SIMD** for int64_t keys on x86 (1.64x faster find than Abseil)
+10. **ARM NEON SIMD** for int32_t and int64_t keys on ARM64
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
