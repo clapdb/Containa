@@ -34,6 +34,9 @@
 #if defined(__AVX2__)
 #define BTREE_HAS_AVX2 1
 #endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define BTREE_HAS_NEON 1
 #endif
 
 namespace stdb::container {
@@ -303,6 +306,94 @@ class btree_map
     }
 #endif
 
+#ifdef BTREE_HAS_NEON
+    // NEON lower_bound for int32_t keys - returns first index where keys[i] >= target
+    template <typename T>
+    static auto neon_lower_bound_int32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        // Calculate stride between keys (for pair<Key,Value> layout)
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        int32x4_t target_vec = vdupq_n_s32(target);
+        size_type i = 0;
+
+        // Process 4 elements at a time with NEON
+        while (i + 4 <= count) {
+            // Gather 4 keys (accounting for stride)
+            int32x4_t key_vec = {
+                keys[i * stride],
+                keys[(i + 1) * stride],
+                keys[(i + 2) * stride],
+                keys[(i + 3) * stride]
+            };
+
+            // Compare: mask of keys < target (vcltq returns 0xFFFFFFFF for true)
+            uint32x4_t lt = vcltq_s32(key_vec, target_vec);
+
+            // Check if any key is NOT less than target
+            // vmaxvq_u32 returns max element - if any is 0, not all are less
+            if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
+                // Find first key >= target using scalar loop
+                for (size_type j = 0; j < 4; ++j) {
+                    if (keys[(i + j) * stride] >= target) {
+                        return i + j;
+                    }
+                }
+            }
+            i += 4;
+        }
+
+        // Handle remaining elements with scalar code
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) {
+                return i;
+            }
+        }
+        return count;
+    }
+
+    // NEON lower_bound for int64_t keys - returns first index where keys[i] >= target
+    template <typename T>
+    static auto neon_lower_bound_int64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        // Calculate stride between keys (for pair<Key,Value> layout)
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        int64x2_t target_vec = vdupq_n_s64(target);
+        size_type i = 0;
+
+        // Process 2 elements at a time with NEON (128-bit = 2x64-bit)
+        while (i + 2 <= count) {
+            // Gather 2 keys (accounting for stride)
+            int64x2_t key_vec = {
+                keys[i * stride],
+                keys[(i + 1) * stride]
+            };
+
+            // Compare: mask of keys < target
+            uint64x2_t lt = vcltq_s64(key_vec, target_vec);
+
+            // Check if any key is NOT less than target
+            if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
+                // Find first key >= target
+                if (keys[i * stride] >= target) return i;
+                if (keys[(i + 1) * stride] >= target) return i + 1;
+            }
+            i += 2;
+        }
+
+        // Handle remaining element with scalar code
+        if (i < count && keys[i * stride] >= target) {
+            return i;
+        }
+        return count;
+    }
+#endif
+
     // Type traits for SIMD eligibility
     template <typename T>
     static constexpr bool is_simd32_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
@@ -334,6 +425,7 @@ class btree_map
     // Specialized search for leaf node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_leaf(
         const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
         if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
@@ -344,12 +436,22 @@ class btree_map
             return simd_lower_bound_int64(leaf->slots, leaf->count, static_cast<int64_t>(key));
         }
 #endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
+        }
+        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_int64(leaf->slots, leaf->count, static_cast<int64_t>(key));
+        }
+#endif
         return binary_search_in_slots(leaf->slots, leaf->count, key);
     }
 
     // Specialized search for internal node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_internal(
         const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
         if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
@@ -358,6 +460,15 @@ class btree_map
 #ifdef BTREE_HAS_AVX2
         if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_int64(internal->slots, internal->count, static_cast<int64_t>(key));
+        }
+#endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
+        }
+        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_int64(internal->slots, internal->count, static_cast<int64_t>(key));
         }
 #endif
         return binary_search_in_slots(internal->slots, internal->count, key);
