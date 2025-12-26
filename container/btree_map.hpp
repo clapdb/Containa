@@ -49,6 +49,10 @@
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
 #define BTREE_HAS_NEON 1
+#if defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#define BTREE_HAS_SVE 1
+#endif
 #endif
 
 namespace stdb::container {
@@ -1133,6 +1137,241 @@ class btree_map
     }
 #endif
 
+#ifdef BTREE_HAS_SVE
+    // SVE lower_bound for int32_t keys - processes svcntw() keys at a time (hardware dependent)
+    // SVE vector length can be 128-2048 bits, so 4-64 int32_t elements per vector
+    template <typename T>
+    static auto sve_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        svint32_t target_vec = svdup_s32(target);
+        size_type i = 0;
+        const size_type vec_len = svcntw();  // Number of 32-bit elements per vector
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b32();
+
+            svint32_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_s32(pg, &keys[i]);
+            } else {
+                svuint32_t indices = svindex_u32(0, stride);
+                key_vec = svld1_gather_u32index_s32(pg, &keys[i * stride], indices);
+            }
+
+            // Compare: true where key >= target
+            svbool_t ge = svcmpge_s32(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                // Found at least one key >= target, count leading false bits
+                // svbrkb sets all bits after first true to false
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                // Count number of true bits before the break = position of first match
+                return i + svcntp_b32(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SVE lower_bound for uint32_t keys
+    template <typename T>
+    static auto sve_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        svuint32_t target_vec = svdup_u32(target);
+        size_type i = 0;
+        const size_type vec_len = svcntw();
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b32();
+
+            svuint32_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_u32(pg, &keys[i]);
+            } else {
+                svuint32_t indices = svindex_u32(0, stride);
+                key_vec = svld1_gather_u32index_u32(pg, &keys[i * stride], indices);
+            }
+
+            svbool_t ge = svcmpge_u32(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                return i + svcntp_b32(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SVE lower_bound for int64_t keys - processes svcntd() keys at a time
+    template <typename T>
+    static auto sve_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        svint64_t target_vec = svdup_s64(target);
+        size_type i = 0;
+        const size_type vec_len = svcntd();
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b64();
+
+            svint64_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_s64(pg, &keys[i]);
+            } else {
+                svuint64_t indices = svindex_u64(0, stride);
+                key_vec = svld1_gather_u64index_s64(pg, &keys[i * stride], indices);
+            }
+
+            svbool_t ge = svcmpge_s64(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                return i + svcntp_b64(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SVE lower_bound for uint64_t keys
+    template <typename T>
+    static auto sve_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        svuint64_t target_vec = svdup_u64(target);
+        size_type i = 0;
+        const size_type vec_len = svcntd();
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b64();
+
+            svuint64_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_u64(pg, &keys[i]);
+            } else {
+                svuint64_t indices = svindex_u64(0, stride);
+                key_vec = svld1_gather_u64index_u64(pg, &keys[i * stride], indices);
+            }
+
+            svbool_t ge = svcmpge_u64(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                return i + svcntp_b64(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SVE lower_bound for float keys
+    template <typename T>
+    static auto sve_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        svfloat32_t target_vec = svdup_f32(target);
+        size_type i = 0;
+        const size_type vec_len = svcntw();
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b32();
+
+            svfloat32_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_f32(pg, &keys[i]);
+            } else {
+                svuint32_t indices = svindex_u32(0, stride);
+                key_vec = svld1_gather_u32index_f32(pg, &keys[i * stride], indices);
+            }
+
+            svbool_t ge = svcmpge_f32(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                return i + svcntp_b32(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SVE lower_bound for double keys
+    template <typename T>
+    static auto sve_lower_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        svfloat64_t target_vec = svdup_f64(target);
+        size_type i = 0;
+        const size_type vec_len = svcntd();
+
+        while (i + vec_len <= count) {
+            svbool_t pg = svptrue_b64();
+
+            svfloat64_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = svld1_f64(pg, &keys[i]);
+            } else {
+                svuint64_t indices = svindex_u64(0, stride);
+                key_vec = svld1_gather_u64index_f64(pg, &keys[i * stride], indices);
+            }
+
+            svbool_t ge = svcmpge_f64(pg, key_vec, target_vec);
+
+            if (svptest_any(pg, ge)) {
+                svbool_t first_ge = svbrkb_z(pg, ge);
+                return i + svcntp_b64(pg, svnot_z(pg, first_ge));
+            }
+            i += vec_len;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+#endif
+
     // Linear search within a node - faster for small counts due to:
     // 1. Sequential memory access (better cache/prefetch behavior)
     // 2. Better branch prediction
@@ -1237,7 +1476,28 @@ class btree_map
         }
 #endif
 #endif
-        // ARM NEON paths
+        // ARM SVE paths (highest priority on ARM - scalable vectors)
+#ifdef BTREE_HAS_SVE
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_u64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_double(leaf->slots, leaf->count, key);
+        }
+#endif
+        // ARM NEON paths (fallback for int8/int16 or when SVE not available)
 #ifdef BTREE_HAS_NEON
         if constexpr (std::is_same_v<Key, int8_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s8(leaf->slots, leaf->count, key);
@@ -1251,6 +1511,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_u16(leaf->slots, leaf->count, key);
         }
+#ifndef BTREE_HAS_SVE  // Use NEON only if SVE not available for these types
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s32(leaf->slots, leaf->count, key);
         }
@@ -1269,6 +1530,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_double(leaf->slots, leaf->count, key);
         }
+#endif
 #endif
         // Linear search is faster than binary search for non-SIMD types at typical node sizes
         // (sequential access, better branch prediction, prefetching)
@@ -1341,7 +1603,28 @@ class btree_map
         }
 #endif
 #endif
-        // ARM NEON paths
+        // ARM SVE paths (highest priority on ARM - scalable vectors)
+#ifdef BTREE_HAS_SVE
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_u64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return sve_lower_bound_double(internal->slots, internal->count, key);
+        }
+#endif
+        // ARM NEON paths (fallback for int8/int16 or when SVE not available)
 #ifdef BTREE_HAS_NEON
         if constexpr (std::is_same_v<Key, int8_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s8(internal->slots, internal->count, key);
@@ -1355,6 +1638,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_u16(internal->slots, internal->count, key);
         }
+#ifndef BTREE_HAS_SVE  // Use NEON only if SVE not available for these types
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s32(internal->slots, internal->count, key);
         }
@@ -1373,6 +1657,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_double(internal->slots, internal->count, key);
         }
+#endif
 #endif
         // Linear search is faster than binary search for non-SIMD types at typical node sizes
         return linear_search_in_slots(internal->slots, internal->count, key);

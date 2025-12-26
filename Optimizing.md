@@ -39,7 +39,13 @@ SIMD instructions are used for fast node search with the following key types (wh
 - AVX2 for `int64_t` and `uint64_t` keys (4 keys/iteration)
 - AVX for `double` keys (4 keys/iteration)
 
-**ARM64:**
+**ARM64 (SVE, when available):**
+- SVE for `int32_t` and `uint32_t` keys (variable, up to 16 keys/iteration with 512-bit vectors)
+- SVE for `int64_t` and `uint64_t` keys (variable, up to 8 keys/iteration with 512-bit vectors)
+- SVE for `float` keys (variable, up to 16 keys/iteration)
+- SVE for `double` keys (variable, up to 8 keys/iteration)
+
+**ARM64 (NEON fallback):**
 - NEON for `int8_t` and `uint8_t` keys (16 keys/iteration)
 - NEON for `int16_t` and `uint16_t` keys (8 keys/iteration)
 - NEON for `int32_t` and `uint32_t` keys (4 keys/iteration)
@@ -47,7 +53,7 @@ SIMD instructions are used for fast node search with the following key types (wh
 - NEON for `float` keys (4 keys/iteration)
 - NEON for `double` keys (2 keys/iteration)
 
-Unsigned integer types use the XOR-with-sign-bit trick (x86) or native unsigned intrinsics (NEON) to achieve correct comparison semantics.
+SVE (Scalable Vector Extension) uses vector-length agnostic programming, automatically adapting to hardware vector width (128-2048 bits). Unsigned integer types use the XOR-with-sign-bit trick (x86) or native unsigned intrinsics (NEON/SVE) to achieve correct comparison semantics.
 
 ### Search Strategy
 
