@@ -261,9 +261,54 @@ class btree_map
 
 #endif
 
-    // Type traits for SIMD eligibility (only 32-bit integers benefit from SSE2 SIMD)
+#ifdef BTREE_HAS_AVX2
+    // AVX2 lower_bound for int64_t keys - returns first index where keys[i] >= target
     template <typename T>
-    static constexpr bool is_simd_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
+    static auto simd_lower_bound_int64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        // Calculate stride between keys (for pair<Key,Value> layout)
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        __m256i target_vec = _mm256_set1_epi64x(target);
+        size_type i = 0;
+
+        // Process 4 elements at a time with AVX2
+        while (i + 4 <= count) {
+            // Gather 4 keys (accounting for stride)
+            __m256i key_vec = _mm256_set_epi64x(
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+
+            // Compare: mask of keys < target
+            __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
+
+            // If any key is NOT less than target (i.e., >= target), find first
+            if (mask != 0xF) {
+                int first_ge = __builtin_ctz(~mask & 0xF);
+                return i + first_ge;
+            }
+            i += 4;
+        }
+
+        // Handle remaining elements with scalar code
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) {
+                return i;
+            }
+        }
+        return count;
+    }
+#endif
+
+    // Type traits for SIMD eligibility
+    template <typename T>
+    static constexpr bool is_simd32_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
+
+    template <typename T>
+    static constexpr bool is_simd64_eligible_v = std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>;
 
     // Binary search within a node using only keys for comparison
     // Returns first position where key >= slot
@@ -290,8 +335,13 @@ class btree_map
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_leaf(
         const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
 #ifdef BTREE_HAS_SSE2
-        if constexpr (is_simd_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
+        }
+#endif
+#ifdef BTREE_HAS_AVX2
+        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_int64(leaf->slots, leaf->count, static_cast<int64_t>(key));
         }
 #endif
         return binary_search_in_slots(leaf->slots, leaf->count, key);
@@ -301,8 +351,13 @@ class btree_map
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_internal(
         const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
 #ifdef BTREE_HAS_SSE2
-        if constexpr (is_simd_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
+        }
+#endif
+#ifdef BTREE_HAS_AVX2
+        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_int64(internal->slots, internal->count, static_cast<int64_t>(key));
         }
 #endif
         return binary_search_in_slots(internal->slots, internal->count, key);

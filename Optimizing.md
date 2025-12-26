@@ -184,13 +184,13 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 |-----------|----------|-----------|-------|
 | Find      | 297 us   | 138 us    | **2.15x faster** |
 
-**vs Abseil btree_map (10K int64_t entries):**
+**vs Abseil btree_map (10K int64_t entries, AVX2-optimized):**
 
 | Operation | Abseil   | Containa  | Ratio |
 |-----------|----------|-----------|-------|
-| Insert    | 457 us   | 257 us    | **1.78x faster** |
-| Find      | 302 us   | 360 us    | 0.84x (16% slower) |
-| Iterate   | 56 us    | 20 us     | **2.75x faster** |
+| Insert    | 468 us   | 325 us    | **1.44x faster** |
+| Find      | 297 us   | 181 us    | **1.64x faster** |
+| Iterate   | 57 us    | 21 us     | **2.75x faster** |
 
 **Key Optimizations Applied:**
 1. **Type-specialized search** - separate inlined functions for leaf/internal nodes with `flatten` attribute
@@ -201,6 +201,7 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
 7. **Force-inline** with `__restrict__` hints for hot path functions
 8. **SSE2 SIMD** for int32_t keys (2.15x faster find than Abseil)
+9. **AVX2 SIMD** for int64_t keys (1.64x faster find than Abseil)
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
