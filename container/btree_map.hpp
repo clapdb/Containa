@@ -20,8 +20,14 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <utility>
+
+#if __cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+#include <compare>
+#endif
 
 #include "vectra.hpp"
 
@@ -108,6 +114,22 @@ class btree_map
     using const_reference = const value_type&;
     using pointer = value_type*;
     using const_pointer = const value_type*;
+
+    // value_compare - compares value_type by key (std::map compatible)
+    class value_compare {
+        friend class btree_map;
+    protected:
+        Compare comp;
+        explicit value_compare(Compare c) : comp(c) {}
+    public:
+        using result_type [[deprecated]] = bool;
+        using first_argument_type [[deprecated]] = value_type;
+        using second_argument_type [[deprecated]] = value_type;
+
+        bool operator()(const value_type& lhs, const value_type& rhs) const {
+            return comp(lhs.first, rhs.first);
+        }
+    };
 
    private:
     // Storage type without const (for internal manipulation)
@@ -2144,6 +2166,48 @@ class btree_map
             }
         }
 
+        // Move to previous position in tree
+        void decrement() {
+            if (_node == nullptr) return;
+
+            if (_node->is_leaf_node()) {
+                if (_pos > 0) {
+                    --_pos;
+                    return;  // Previous element in current leaf
+                }
+
+                // Move to parent and find previous
+                while (_node->parent != nullptr) {
+                    size_type child_pos = _node->position;
+                    _node = _node->parent;
+                    if (child_pos > 0) {
+                        // Go to the rightmost element of the left subtree
+                        auto* internal = static_cast<internal_node*>(_node);
+                        _pos = child_pos - 1;
+                        // Check if parent key or need to descend
+                        node_base* child = internal->children[child_pos];
+                        // We came from child at child_pos, so previous is either parent[child_pos-1]
+                        // or the rightmost in children[child_pos-1] subtree
+                        // Actually, for a B-tree, we return to parent key at pos = child_pos - 1
+                        return;
+                    }
+                }
+                // Beginning of tree - undefined behavior, but set to invalid
+                _node = nullptr;
+                _pos = 0;
+            } else {
+                // Internal node: go to previous subtree's rightmost leaf
+                auto* internal = static_cast<internal_node*>(_node);
+                node_base* child = internal->children[_pos];
+                while (!child->is_leaf_node()) {
+                    auto* ichild = static_cast<internal_node*>(child);
+                    child = ichild->children[ichild->count];
+                }
+                _node = child;
+                _pos = static_cast<leaf_node*>(child)->count - 1;
+            }
+        }
+
        public:
         iterator() = default;
 
@@ -2166,6 +2230,17 @@ class btree_map
         auto operator++(int) -> iterator {
             auto tmp = *this;
             increment();
+            return tmp;
+        }
+
+        auto operator--() -> iterator& {
+            decrement();
+            return *this;
+        }
+
+        auto operator--(int) -> iterator {
+            auto tmp = *this;
+            decrement();
             return tmp;
         }
 
@@ -2224,6 +2299,37 @@ class btree_map
             }
         }
 
+        void decrement() {
+            if (_node == nullptr) return;
+
+            if (_node->is_leaf_node()) {
+                if (_pos > 0) {
+                    --_pos;
+                    return;
+                }
+
+                while (_node->parent != nullptr) {
+                    size_type child_pos = _node->position;
+                    _node = _node->parent;
+                    if (child_pos > 0) {
+                        _pos = child_pos - 1;
+                        return;
+                    }
+                }
+                _node = nullptr;
+                _pos = 0;
+            } else {
+                auto* internal = static_cast<const internal_node*>(_node);
+                const node_base* child = internal->children[_pos];
+                while (!child->is_leaf_node()) {
+                    auto* ichild = static_cast<const internal_node*>(child);
+                    child = ichild->children[ichild->count];
+                }
+                _node = child;
+                _pos = static_cast<const leaf_node*>(child)->count - 1;
+            }
+        }
+
        public:
         const_iterator() = default;
         const_iterator(const iterator& it) : _node(it._node), _pos(it._pos) {}
@@ -2250,11 +2356,258 @@ class btree_map
             return tmp;
         }
 
+        auto operator--() -> const_iterator& {
+            decrement();
+            return *this;
+        }
+
+        auto operator--(int) -> const_iterator {
+            auto tmp = *this;
+            decrement();
+            return tmp;
+        }
+
         friend auto operator==(const const_iterator& a, const const_iterator& b) -> bool {
             return a._node == b._node && a._pos == b._pos;
         }
 
         friend auto operator!=(const const_iterator& a, const const_iterator& b) -> bool { return !(a == b); }
+    };
+
+    // Custom reverse iterator (std::reverse_iterator doesn't work with our end() iterator)
+    class reverse_iterator {
+       public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using difference_type = std::ptrdiff_t;
+        using value_type = std::pair<const Key, Value>;
+        using pointer = value_type*;
+        using reference = value_type&;
+
+       private:
+        node_base* _node = nullptr;
+        size_type _pos = 0;
+        bool _is_end = true;  // True when pointing before begin (reverse end)
+
+        friend class btree_map;
+
+        reverse_iterator(node_base* node, size_type pos, bool is_end = false)
+            : _node(node), _pos(pos), _is_end(is_end) {}
+
+       public:
+        reverse_iterator() = default;
+
+        [[nodiscard]] auto operator*() const -> reference {
+            if (_node->is_leaf_node()) {
+                return reinterpret_cast<reference>(static_cast<leaf_node*>(_node)->slots[_pos]);
+            }
+            return reinterpret_cast<reference>(static_cast<internal_node*>(_node)->slots[_pos]);
+        }
+
+        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+
+        auto operator++() -> reverse_iterator& {
+            // Increment in reverse = decrement in forward
+            if (_node == nullptr) return *this;
+            if (_node->is_leaf_node()) {
+                if (_pos > 0) {
+                    --_pos;
+                    return *this;
+                }
+                while (_node->parent != nullptr) {
+                    size_type child_pos = _node->position;
+                    _node = _node->parent;
+                    if (child_pos > 0) {
+                        _pos = child_pos - 1;
+                        return *this;
+                    }
+                }
+                _is_end = true;
+                return *this;
+            } else {
+                auto* internal = static_cast<internal_node*>(_node);
+                node_base* child = internal->children[_pos];
+                while (!child->is_leaf_node()) {
+                    auto* ichild = static_cast<internal_node*>(child);
+                    child = ichild->children[ichild->count];
+                }
+                _node = child;
+                _pos = static_cast<leaf_node*>(child)->count - 1;
+            }
+            return *this;
+        }
+
+        auto operator++(int) -> reverse_iterator {
+            auto tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        auto operator--() -> reverse_iterator& {
+            // Decrement in reverse = increment in forward
+            if (_node == nullptr) return *this;
+            if (_node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(_node);
+                ++_pos;
+                if (_pos < leaf->count) {
+                    _is_end = false;
+                    return *this;
+                }
+                while (_node->parent != nullptr) {
+                    size_type parent_pos = _node->position;
+                    _node = _node->parent;
+                    if (parent_pos < _node->count) {
+                        _pos = parent_pos;
+                        _is_end = false;
+                        return *this;
+                    }
+                }
+                _node = nullptr;
+                _pos = 0;
+            } else {
+                auto* internal = static_cast<internal_node*>(_node);
+                node_base* child = internal->children[_pos + 1];
+                while (!child->is_leaf_node()) {
+                    child = static_cast<internal_node*>(child)->children[0];
+                }
+                _node = child;
+                _pos = 0;
+                _is_end = false;
+            }
+            return *this;
+        }
+
+        auto operator--(int) -> reverse_iterator {
+            auto tmp = *this;
+            --*this;
+            return tmp;
+        }
+
+        [[nodiscard]] auto base() const -> iterator { return iterator(_node, _pos); }
+
+        friend auto operator==(const reverse_iterator& a, const reverse_iterator& b) -> bool {
+            if (a._is_end && b._is_end) return true;
+            if (a._is_end || b._is_end) return false;
+            return a._node == b._node && a._pos == b._pos;
+        }
+
+        friend auto operator!=(const reverse_iterator& a, const reverse_iterator& b) -> bool { return !(a == b); }
+    };
+
+    class const_reverse_iterator {
+       public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using difference_type = std::ptrdiff_t;
+        using value_type = const std::pair<const Key, Value>;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+
+       private:
+        const node_base* _node = nullptr;
+        size_type _pos = 0;
+        bool _is_end = true;
+
+        friend class btree_map;
+
+        const_reverse_iterator(const node_base* node, size_type pos, bool is_end = false)
+            : _node(node), _pos(pos), _is_end(is_end) {}
+
+       public:
+        const_reverse_iterator() = default;
+        const_reverse_iterator(const reverse_iterator& it) : _node(it._node), _pos(it._pos), _is_end(it._is_end) {}
+
+        [[nodiscard]] auto operator*() const -> reference {
+            if (_node->is_leaf_node()) {
+                return reinterpret_cast<reference>(static_cast<const leaf_node*>(_node)->slots[_pos]);
+            }
+            return reinterpret_cast<reference>(static_cast<const internal_node*>(_node)->slots[_pos]);
+        }
+
+        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+
+        auto operator++() -> const_reverse_iterator& {
+            if (_node == nullptr) return *this;
+            if (_node->is_leaf_node()) {
+                if (_pos > 0) {
+                    --_pos;
+                    return *this;
+                }
+                while (_node->parent != nullptr) {
+                    size_type child_pos = _node->position;
+                    _node = _node->parent;
+                    if (child_pos > 0) {
+                        _pos = child_pos - 1;
+                        return *this;
+                    }
+                }
+                _is_end = true;
+                return *this;
+            } else {
+                auto* internal = static_cast<const internal_node*>(_node);
+                const node_base* child = internal->children[_pos];
+                while (!child->is_leaf_node()) {
+                    auto* ichild = static_cast<const internal_node*>(child);
+                    child = ichild->children[ichild->count];
+                }
+                _node = child;
+                _pos = static_cast<const leaf_node*>(child)->count - 1;
+            }
+            return *this;
+        }
+
+        auto operator++(int) -> const_reverse_iterator {
+            auto tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        auto operator--() -> const_reverse_iterator& {
+            if (_node == nullptr) return *this;
+            if (_node->is_leaf_node()) {
+                auto* leaf = static_cast<const leaf_node*>(_node);
+                ++_pos;
+                if (_pos < leaf->count) {
+                    _is_end = false;
+                    return *this;
+                }
+                while (_node->parent != nullptr) {
+                    size_type parent_pos = _node->position;
+                    _node = _node->parent;
+                    if (parent_pos < _node->count) {
+                        _pos = parent_pos;
+                        _is_end = false;
+                        return *this;
+                    }
+                }
+                _node = nullptr;
+                _pos = 0;
+            } else {
+                auto* internal = static_cast<const internal_node*>(_node);
+                const node_base* child = internal->children[_pos + 1];
+                while (!child->is_leaf_node()) {
+                    child = static_cast<const internal_node*>(child)->children[0];
+                }
+                _node = child;
+                _pos = 0;
+                _is_end = false;
+            }
+            return *this;
+        }
+
+        auto operator--(int) -> const_reverse_iterator {
+            auto tmp = *this;
+            --*this;
+            return tmp;
+        }
+
+        [[nodiscard]] auto base() const -> const_iterator { return const_iterator(_node, _pos); }
+
+        friend auto operator==(const const_reverse_iterator& a, const const_reverse_iterator& b) -> bool {
+            if (a._is_end && b._is_end) return true;
+            if (a._is_end || b._is_end) return false;
+            return a._node == b._node && a._pos == b._pos;
+        }
+
+        friend auto operator!=(const const_reverse_iterator& a, const const_reverse_iterator& b) -> bool { return !(a == b); }
     };
 
     // Constructors
@@ -2341,6 +2694,86 @@ class btree_map
     auto emplace(Args&&... args) -> std::pair<iterator, bool> {
         value_type val(std::forward<Args>(args)...);
         return insert_impl(std::move(val.first), std::move(val.second));
+    }
+
+    // emplace_hint - hint is ignored, just calls emplace (C++11)
+    template <typename... Args>
+    auto emplace_hint([[maybe_unused]] const_iterator hint, Args&&... args) -> iterator {
+        return emplace(std::forward<Args>(args)...).first;
+    }
+
+    // insert_or_assign - inserts or updates value (C++17)
+    template <typename M>
+    auto insert_or_assign(const Key& key, M&& value) -> std::pair<iterator, bool> {
+        auto it = find(key);
+        if (it != end()) {
+            // Key exists - update value
+            if (it._node->is_leaf_node()) {
+                static_cast<leaf_node*>(it._node)->value(it._pos) = std::forward<M>(value);
+            } else {
+                static_cast<internal_node*>(it._node)->value(it._pos) = std::forward<M>(value);
+            }
+            return {it, false};
+        }
+        // Key doesn't exist - insert
+        return insert_impl(key, std::forward<M>(value));
+    }
+
+    template <typename M>
+    auto insert_or_assign(Key&& key, M&& value) -> std::pair<iterator, bool> {
+        auto it = find(key);
+        if (it != end()) {
+            // Key exists - update value
+            if (it._node->is_leaf_node()) {
+                static_cast<leaf_node*>(it._node)->value(it._pos) = std::forward<M>(value);
+            } else {
+                static_cast<internal_node*>(it._node)->value(it._pos) = std::forward<M>(value);
+            }
+            return {it, false};
+        }
+        // Key doesn't exist - insert
+        return insert_impl(std::move(key), std::forward<M>(value));
+    }
+
+    // insert_or_assign with hint (hint is ignored)
+    template <typename M>
+    auto insert_or_assign([[maybe_unused]] const_iterator hint, const Key& key, M&& value) -> iterator {
+        return insert_or_assign(key, std::forward<M>(value)).first;
+    }
+
+    template <typename M>
+    auto insert_or_assign([[maybe_unused]] const_iterator hint, Key&& key, M&& value) -> iterator {
+        return insert_or_assign(std::move(key), std::forward<M>(value)).first;
+    }
+
+    // try_emplace - only constructs value if key doesn't exist (C++17)
+    template <typename... Args>
+    auto try_emplace(const Key& key, Args&&... args) -> std::pair<iterator, bool> {
+        auto it = find(key);
+        if (it != end()) {
+            return {it, false};  // Key exists, don't construct value
+        }
+        return insert_impl(key, Value(std::forward<Args>(args)...));
+    }
+
+    template <typename... Args>
+    auto try_emplace(Key&& key, Args&&... args) -> std::pair<iterator, bool> {
+        auto it = find(key);
+        if (it != end()) {
+            return {it, false};  // Key exists, don't construct value
+        }
+        return insert_impl(std::move(key), Value(std::forward<Args>(args)...));
+    }
+
+    // try_emplace with hint (hint is ignored)
+    template <typename... Args>
+    auto try_emplace([[maybe_unused]] const_iterator hint, const Key& key, Args&&... args) -> iterator {
+        return try_emplace(key, std::forward<Args>(args)...).first;
+    }
+
+    template <typename... Args>
+    auto try_emplace([[maybe_unused]] const_iterator hint, Key&& key, Args&&... args) -> iterator {
+        return try_emplace(std::move(key), std::forward<Args>(args)...).first;
     }
 
   private:
@@ -2522,7 +2955,33 @@ class btree_map
 
     [[nodiscard]] auto cend() const noexcept -> const_iterator { return end(); }
 
-    // Erase (basic implementation - can be optimized)
+    // Reverse iterators
+    [[nodiscard]] auto rbegin() noexcept -> reverse_iterator {
+        if (_root == nullptr) return reverse_iterator(nullptr, 0, true);
+        auto* leaf = rightmost_leaf();
+        return reverse_iterator(const_cast<node_base*>(static_cast<const node_base*>(leaf)),
+                               leaf->count - 1, false);
+    }
+
+    [[nodiscard]] auto rbegin() const noexcept -> const_reverse_iterator {
+        if (_root == nullptr) return const_reverse_iterator(nullptr, 0, true);
+        auto* leaf = rightmost_leaf();
+        return const_reverse_iterator(leaf, leaf->count - 1, false);
+    }
+
+    [[nodiscard]] auto crbegin() const noexcept -> const_reverse_iterator { return rbegin(); }
+
+    [[nodiscard]] auto rend() noexcept -> reverse_iterator {
+        return reverse_iterator(nullptr, 0, true);  // Before first element
+    }
+
+    [[nodiscard]] auto rend() const noexcept -> const_reverse_iterator {
+        return const_reverse_iterator(nullptr, 0, true);  // Before first element
+    }
+
+    [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return rend(); }
+
+    // Erase by key (basic implementation - can be optimized)
     auto erase(const Key& key) -> size_type {
         auto it = find(key);
         if (it == end()) {
@@ -2547,7 +3006,124 @@ class btree_map
         return 1;
     }
 
-    // Comparison
+    // Erase by iterator - returns iterator to next element
+    auto erase(iterator pos) -> iterator {
+        if (pos == end()) {
+            return end();
+        }
+
+        // Get key to erase and next key (if any)
+        Key key_to_erase = pos->first;
+        ++pos;
+        Key next_key{};
+        bool has_next = (pos != end());
+        if (has_next) {
+            next_key = pos->first;
+        }
+
+        erase(key_to_erase);
+
+        if (has_next) {
+            return find(next_key);
+        }
+        return end();
+    }
+
+    auto erase(const_iterator pos) -> iterator {
+        return erase(iterator(const_cast<node_base*>(pos._node), pos._pos));
+    }
+
+    // Erase range [first, last)
+    auto erase(const_iterator first, const_iterator last) -> iterator {
+        // Collect all keys to erase
+        std::vector<Key> keys_to_erase;
+        for (auto it = first; it != last; ++it) {
+            keys_to_erase.push_back(it->first);
+        }
+
+        // Get key after last (if any) to return iterator
+        Key next_key{};
+        bool has_next = (last != end());
+        if (has_next) {
+            next_key = last->first;
+        }
+
+        // Erase all keys
+        for (const auto& k : keys_to_erase) {
+            erase(k);
+        }
+
+        if (has_next) {
+            return find(next_key);
+        }
+        return end();
+    }
+
+    // equal_range - returns pair of iterators (lower_bound, upper_bound)
+    [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    [[nodiscard]] auto equal_range(const Key& key) const -> std::pair<const_iterator, const_iterator> {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    // swap
+    void swap(btree_map& other) noexcept {
+        std::swap(_root, other._root);
+        std::swap(_size, other._size);
+        std::swap(_comp, other._comp);
+    }
+
+    // max_size - theoretical maximum
+    [[nodiscard]] static constexpr auto max_size() noexcept -> size_type {
+        return std::numeric_limits<size_type>::max() / sizeof(storage_type);
+    }
+
+    // key_comp - returns the key comparison function
+    [[nodiscard]] auto key_comp() const -> key_compare { return _comp; }
+
+    // value_comp - returns the value comparison function
+    [[nodiscard]] auto value_comp() const -> value_compare { return value_compare(_comp); }
+
+    // merge - merge elements from another btree_map (C++17)
+    template <typename C2, std::size_t N2>
+    void merge(btree_map<Key, Value, C2, N2>& source) {
+        for (auto it = source.begin(); it != source.end(); ) {
+            auto [insert_it, inserted] = insert(it->first, it->second);
+            if (inserted) {
+                auto next = it;
+                ++next;
+                source.erase(it);
+                it = next;
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    template <typename C2, std::size_t N2>
+    void merge(btree_map<Key, Value, C2, N2>&& source) {
+        merge(source);
+    }
+
+    // insert with iterator range
+    template <typename InputIt>
+    void insert(InputIt first, InputIt last) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    // insert_range - insert elements from a range (C++23)
+    template <typename Range>
+    void insert_range(Range&& range) {
+        for (auto&& elem : range) {
+            insert(std::forward<decltype(elem)>(elem));
+        }
+    }
+
+    // Comparison operators
     friend auto operator==(const btree_map& lhs, const btree_map& rhs) -> bool {
         if (lhs.size() != rhs.size()) return false;
         auto it1 = lhs.begin();
@@ -2564,6 +3140,35 @@ class btree_map
 
     friend auto operator!=(const btree_map& lhs, const btree_map& rhs) -> bool { return !(lhs == rhs); }
 
+    // Lexicographical comparison operators (C++20)
+    friend auto operator<(const btree_map& lhs, const btree_map& rhs) -> bool {
+        return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
+            [](const value_type& a, const value_type& b) {
+                if (a.first < b.first) return true;
+                if (b.first < a.first) return false;
+                return a.second < b.second;
+            });
+    }
+
+    friend auto operator<=(const btree_map& lhs, const btree_map& rhs) -> bool { return !(rhs < lhs); }
+    friend auto operator>(const btree_map& lhs, const btree_map& rhs) -> bool { return rhs < lhs; }
+    friend auto operator>=(const btree_map& lhs, const btree_map& rhs) -> bool { return !(lhs < rhs); }
+
+#if __cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+    // Spaceship operator (C++20)
+    friend auto operator<=>(const btree_map& lhs, const btree_map& rhs) {
+        auto it1 = lhs.begin();
+        auto it2 = rhs.begin();
+        while (it1 != lhs.end() && it2 != rhs.end()) {
+            if (auto cmp = it1->first <=> it2->first; cmp != 0) return cmp;
+            if (auto cmp = it1->second <=> it2->second; cmp != 0) return cmp;
+            ++it1;
+            ++it2;
+        }
+        return lhs.size() <=> rhs.size();
+    }
+#endif
+
     // Debug info
     [[nodiscard]] static constexpr auto leaf_slots() noexcept -> size_type { return kLeafSlots; }
     [[nodiscard]] static constexpr auto internal_slots() noexcept -> size_type { return kInternalSlots; }
@@ -2578,5 +3183,26 @@ using btree_map_auto = btree_map<Key, Value, Compare>;
 // at the cost of potentially fewer slots for large value types
 template <typename Key, typename Value, typename Compare = std::less<Key>>
 using btree_map_compact = btree_map<Key, Value, Compare, 256>;
+
+// Non-member swap (C++17)
+template <typename Key, typename Value, typename Compare, std::size_t N>
+void swap(btree_map<Key, Value, Compare, N>& lhs, btree_map<Key, Value, Compare, N>& rhs) noexcept {
+    lhs.swap(rhs);
+}
+
+// erase_if - erase all elements satisfying predicate (C++20)
+template <typename Key, typename Value, typename Compare, std::size_t N, typename Pred>
+typename btree_map<Key, Value, Compare, N>::size_type
+erase_if(btree_map<Key, Value, Compare, N>& c, Pred pred) {
+    auto old_size = c.size();
+    for (auto it = c.begin(); it != c.end(); ) {
+        if (pred(*it)) {
+            it = c.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return old_size - c.size();
+}
 
 }  // namespace stdb::container
