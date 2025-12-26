@@ -25,10 +25,12 @@ This document describes the optimization techniques used in Containa containers.
 SIMD instructions are used for fast node search with the following integer key types (when using `std::less<Key>` comparator):
 
 **x86-64:**
+- SSE2 for `int16_t` and `uint16_t` keys (8 keys/iteration)
 - SSE2 for `int32_t` and `uint32_t` keys (4 keys/iteration)
 - AVX2 for `int64_t` and `uint64_t` keys (4 keys/iteration)
 
 **ARM64:**
+- NEON for `int16_t` and `uint16_t` keys (8 keys/iteration)
 - NEON for `int32_t` and `uint32_t` keys (4 keys/iteration)
 - NEON for `int64_t` and `uint64_t` keys (2 keys/iteration)
 
@@ -199,9 +201,10 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 5. **Perfect forwarding** throughout the insert path
 6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
 7. **Force-inline** with `__restrict__` hints for hot path functions
-8. **SSE2 SIMD** for int32_t/uint32_t keys on x86 (2.15x faster find than Abseil)
-9. **AVX2 SIMD** for int64_t/uint64_t keys on x86 (1.64x faster find than Abseil)
-10. **ARM NEON SIMD** for int32_t/uint32_t/int64_t/uint64_t keys on ARM64
+8. **SSE2 SIMD** for int16_t/uint16_t keys on x86 (8 keys/iteration)
+9. **SSE2 SIMD** for int32_t/uint32_t keys on x86 (2.15x faster find than Abseil)
+10. **AVX2 SIMD** for int64_t/uint64_t keys on x86 (1.64x faster find than Abseil)
+11. **ARM NEON SIMD** for int16_t/uint16_t/int32_t/uint32_t/int64_t/uint64_t keys on ARM64
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
