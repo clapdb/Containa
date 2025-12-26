@@ -430,6 +430,146 @@ TEST_CASE("btree_map::string_keys") {
     }
 }
 
+TEST_CASE("btree_map::string_string") {
+    btree_map<std::string, std::string> map;
+
+    SUBCASE("insert and find") {
+        map["hello"] = "world";
+        map["foo"] = "bar";
+        map["key"] = "value";
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at("hello"), "world");
+        CHECK_EQ(map.at("foo"), "bar");
+        CHECK_EQ(map.at("key"), "value");
+    }
+
+    SUBCASE("large strings") {
+        std::string long_key(1000, 'k');
+        std::string long_value(1000, 'v');
+
+        map[long_key] = long_value;
+        CHECK_EQ(map.size(), 1);
+        CHECK_EQ(map.at(long_key), long_value);
+    }
+
+    SUBCASE("many string entries") {
+        for (int i = 0; i < 1000; ++i) {
+            std::string key = "key_" + std::to_string(i);
+            std::string value = "value_" + std::to_string(i * 2);
+            map[key] = value;
+        }
+        CHECK_EQ(map.size(), 1000);
+
+        for (int i = 0; i < 1000; ++i) {
+            std::string key = "key_" + std::to_string(i);
+            std::string expected = "value_" + std::to_string(i * 2);
+            CHECK_EQ(map.at(key), expected);
+        }
+    }
+
+    SUBCASE("erase string keys") {
+        map["a"] = "1";
+        map["b"] = "2";
+        map["c"] = "3";
+
+        CHECK_EQ(map.erase("b"), 1);
+        CHECK_EQ(map.size(), 2);
+        CHECK(map.find("b") == map.end());
+        CHECK_EQ(map.at("a"), "1");
+        CHECK_EQ(map.at("c"), "3");
+    }
+
+    SUBCASE("iteration with strings") {
+        map["zebra"] = "z";
+        map["apple"] = "a";
+        map["mango"] = "m";
+        map["banana"] = "b";
+
+        std::vector<std::pair<std::string, std::string>> items;
+        for (const auto& [k, v] : map) {
+            items.emplace_back(k, v);
+        }
+
+        CHECK_EQ(items.size(), 4);
+        CHECK_EQ(items[0].first, "apple");
+        CHECK_EQ(items[1].first, "banana");
+        CHECK_EQ(items[2].first, "mango");
+        CHECK_EQ(items[3].first, "zebra");
+    }
+}
+
+TEST_CASE("btree_map::complex_types") {
+    struct Point {
+        int x, y;
+        bool operator<(const Point& other) const {
+            if (x != other.x) return x < other.x;
+            return y < other.y;
+        }
+        bool operator==(const Point& other) const {
+            return x == other.x && y == other.y;
+        }
+    };
+
+    SUBCASE("struct as key") {
+        btree_map<Point, std::string> map;
+        map.insert(Point{1, 2}, "first");
+        map.insert(Point{3, 4}, "second");
+        map.insert(Point{1, 3}, "third");
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(Point{1, 2}), "first");
+        CHECK_EQ(map.at(Point{3, 4}), "second");
+        CHECK_EQ(map.at(Point{1, 3}), "third");
+
+        // Check ordering
+        std::vector<Point> keys;
+        for (const auto& [k, v] : map) {
+            keys.push_back(k);
+        }
+        CHECK_EQ(keys[0], Point{1, 2});
+        CHECK_EQ(keys[1], Point{1, 3});
+        CHECK_EQ(keys[2], Point{3, 4});
+    }
+
+    SUBCASE("struct as value") {
+        btree_map<int, Point> map;
+        map[1] = Point{10, 20};
+        map[2] = Point{30, 40};
+
+        CHECK_EQ(map.at(1).x, 10);
+        CHECK_EQ(map.at(1).y, 20);
+        CHECK_EQ(map.at(2).x, 30);
+        CHECK_EQ(map.at(2).y, 40);
+    }
+}
+
+TEST_CASE("btree_map::move_semantics") {
+    SUBCASE("move construct map") {
+        btree_map<std::string, std::string> map1;
+        map1["a"] = "1";
+        map1["b"] = "2";
+
+        btree_map<std::string, std::string> map2(std::move(map1));
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2.at("a"), "1");
+        CHECK_EQ(map2.at("b"), "2");
+        CHECK_EQ(map1.size(), 0);  // NOLINT: testing moved-from state
+    }
+
+    SUBCASE("move assign map") {
+        btree_map<std::string, std::string> map1;
+        map1["x"] = "10";
+
+        btree_map<std::string, std::string> map2;
+        map2["y"] = "20";
+
+        map2 = std::move(map1);
+        CHECK_EQ(map2.size(), 1);
+        CHECK_EQ(map2.at("x"), "10");
+    }
+}
+
 TEST_CASE("btree_map::large_scale") {
     btree_map<int, int> map;
     constexpr int N = 10000;

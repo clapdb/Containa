@@ -109,20 +109,20 @@ if (it != map.end()) {
 
 | Operation | std::map | Containa | Abseil | Winner |
 |-----------|----------|----------|--------|--------|
-| Insert | 803 us | 644 us | 475 us | Abseil (1.35x faster) |
-| Find | 155 us | 259 us | 300 us | Containa (1.16x faster) |
-| Iterate | 73 us | 21.7 us | 57.3 us | **Containa (2.64x faster)** |
+| Insert | 821 us | 346 us | 450 us | **Containa (1.30x faster)** |
+| Find | 153 us | 248 us | 302 us | Containa (1.22x faster) |
+| Iterate | 68 us | 20.5 us | 56.8 us | **Containa (2.77x faster)** |
 
 **int32_t keys:**
 
 | Operation | std::map | Containa (SIMD) | Abseil |
 |-----------|----------|-----------------|--------|
-| Find | 148 us | 144 us | 300 us | **Containa (2.08x faster)** |
+| Find | 148 us | 144 us | 332 us | **Containa (2.31x faster)** |
 
 **Key findings:**
-- Abseil is 1.35x faster at insertion (better rebalancing algorithm)
-- Containa is 1.16-2.08x faster at find (SIMD for int32, simpler traversal)
-- Containa is 2.64x faster at iteration (more compact node layout)
+- Containa is 1.30x faster at insertion (optimized split + no redundant find)
+- Containa is 1.22-2.31x faster at find (SIMD for int32, simpler traversal)
+- Containa is 2.77x faster at iteration (more compact node layout)
 
 #### Design Differences
 
@@ -145,16 +145,43 @@ if (it != map.end()) {
 #### When to Choose Each
 
 **Use Containa btree_map when:**
-- You need a simple, header-only solution
-- Your keys are int32_t (SIMD benefit)
+- You need a simple, header-only solution with no dependencies
+- You want faster insert, find, and iteration than Abseil
+- Your keys are int32_t (SIMD benefit: 2.31x faster find)
 - Deletion is rare or batch-oriented
-- Iteration performance is critical
+- Iteration performance is critical (2.77x faster)
 
 **Use Abseil btree_map when:**
-- You need production-grade deletion performance
+- You need production-grade deletion performance with rebalancing
 - You're already using Abseil in your project
 - You need custom allocator support
-- You want thoroughly battle-tested code
+- You want thoroughly battle-tested code in production environments
+
+### String Key/Value Performance
+
+btree_map fully supports non-trivially-copyable types like `std::string`:
+
+**vs std::map (10K string entries):**
+
+| Operation | std::map | btree_map | Speedup |
+|-----------|----------|-----------|---------|
+| Insert    | 2199 us  | 1771 us   | **1.24x** |
+| Find      | 1263 us  | 1029 us   | **1.23x** |
+| Iterate   | 84 us    | 52 us     | **1.62x** |
+
+**vs Abseil btree_map (10K string entries):**
+
+| Operation | Abseil   | Containa  | Winner |
+|-----------|----------|-----------|--------|
+| Insert    | 1606 us  | 2124 us   | Abseil (1.32x faster) |
+| Find      | 1001 us  | 1058 us   | Abseil (1.06x faster) |
+| Iterate   | 104 us   | 44 us     | **Containa (2.36x faster)** |
+
+**Analysis:**
+- For string keys, Abseil is slightly faster on insert/find due to more mature optimizations
+- Containa maintains significant iteration advantage (2.36x) due to compact node layout
+- String support uses move semantics during node splits for efficiency
+- Both beat `std::map` by significant margins
 
 ### Future Optimizations
 
@@ -162,3 +189,4 @@ if (it != map.end()) {
 - Binary search fallback for large nodes
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
+- Optimize string key insert/find to match Abseil performance
