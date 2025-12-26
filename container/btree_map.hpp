@@ -37,7 +37,10 @@
 #if defined(__clang__)
 #define BTREE_ASSUME(x) __builtin_assume(x)
 #elif defined(__GNUC__)
-#define BTREE_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#define BTREE_ASSUME(x)                    \
+    do {                                   \
+        if (!(x)) __builtin_unreachable(); \
+    } while (0)
 #else
 #define BTREE_ASSUME(x) ((void)0)
 #endif
@@ -116,19 +119,20 @@ class btree_map
     using const_pointer = const value_type*;
 
     // value_compare - compares value_type by key (std::map compatible)
-    class value_compare {
+    class value_compare
+    {
         friend class btree_map;
-    protected:
+
+       protected:
         Compare comp;
         explicit value_compare(Compare c) : comp(c) {}
-    public:
+
+       public:
         using result_type [[deprecated]] = bool;
         using first_argument_type [[deprecated]] = value_type;
         using second_argument_type [[deprecated]] = value_type;
 
-        bool operator()(const value_type& lhs, const value_type& rhs) const {
-            return comp(lhs.first, rhs.first);
-        }
+        bool operator()(const value_type& lhs, const value_type& rhs) const { return comp(lhs.first, rhs.first); }
     };
 
    private:
@@ -304,11 +308,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m128i key_vec = _mm_set_epi32(
-                static_cast<int32_t>(keys[(i + 3) * stride]),
-                static_cast<int32_t>(keys[(i + 2) * stride]),
-                static_cast<int32_t>(keys[(i + 1) * stride]),
-                static_cast<int32_t>(keys[i * stride]));
+            __m128i key_vec =
+              _mm_set_epi32(static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
+                            static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
             int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
@@ -337,11 +339,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m128i key_vec = _mm_set_epi16(
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m128i key_vec = _mm_set_epi16(keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride],
+                                            keys[(i + 4) * stride], keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                            keys[(i + 1) * stride], keys[i * stride]);
             __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
 
@@ -372,15 +372,11 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m128i key_vec = _mm_set_epi16(
-                static_cast<int16_t>(keys[(i + 7) * stride]),
-                static_cast<int16_t>(keys[(i + 6) * stride]),
-                static_cast<int16_t>(keys[(i + 5) * stride]),
-                static_cast<int16_t>(keys[(i + 4) * stride]),
-                static_cast<int16_t>(keys[(i + 3) * stride]),
-                static_cast<int16_t>(keys[(i + 2) * stride]),
-                static_cast<int16_t>(keys[(i + 1) * stride]),
-                static_cast<int16_t>(keys[i * stride]));
+            __m128i key_vec =
+              _mm_set_epi16(static_cast<int16_t>(keys[(i + 7) * stride]), static_cast<int16_t>(keys[(i + 6) * stride]),
+                            static_cast<int16_t>(keys[(i + 5) * stride]), static_cast<int16_t>(keys[(i + 4) * stride]),
+                            static_cast<int16_t>(keys[(i + 3) * stride]), static_cast<int16_t>(keys[(i + 2) * stride]),
+                            static_cast<int16_t>(keys[(i + 1) * stride]), static_cast<int16_t>(keys[i * stride]));
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
@@ -410,14 +406,10 @@ class btree_map
 
         while (i + 16 <= count) {
             __m128i key_vec = _mm_set_epi8(
-                keys[(i + 15) * stride], keys[(i + 14) * stride],
-                keys[(i + 13) * stride], keys[(i + 12) * stride],
-                keys[(i + 11) * stride], keys[(i + 10) * stride],
-                keys[(i + 9) * stride], keys[(i + 8) * stride],
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+              keys[(i + 15) * stride], keys[(i + 14) * stride], keys[(i + 13) * stride], keys[(i + 12) * stride],
+              keys[(i + 11) * stride], keys[(i + 10) * stride], keys[(i + 9) * stride], keys[(i + 8) * stride],
+              keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride], keys[(i + 4) * stride],
+              keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
             __m128i lt = _mm_cmplt_epi8(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
 
@@ -447,23 +439,15 @@ class btree_map
         size_type i = 0;
 
         while (i + 16 <= count) {
-            __m128i key_vec = _mm_set_epi8(
-                static_cast<int8_t>(keys[(i + 15) * stride]),
-                static_cast<int8_t>(keys[(i + 14) * stride]),
-                static_cast<int8_t>(keys[(i + 13) * stride]),
-                static_cast<int8_t>(keys[(i + 12) * stride]),
-                static_cast<int8_t>(keys[(i + 11) * stride]),
-                static_cast<int8_t>(keys[(i + 10) * stride]),
-                static_cast<int8_t>(keys[(i + 9) * stride]),
-                static_cast<int8_t>(keys[(i + 8) * stride]),
-                static_cast<int8_t>(keys[(i + 7) * stride]),
-                static_cast<int8_t>(keys[(i + 6) * stride]),
-                static_cast<int8_t>(keys[(i + 5) * stride]),
-                static_cast<int8_t>(keys[(i + 4) * stride]),
-                static_cast<int8_t>(keys[(i + 3) * stride]),
-                static_cast<int8_t>(keys[(i + 2) * stride]),
-                static_cast<int8_t>(keys[(i + 1) * stride]),
-                static_cast<int8_t>(keys[i * stride]));
+            __m128i key_vec =
+              _mm_set_epi8(static_cast<int8_t>(keys[(i + 15) * stride]), static_cast<int8_t>(keys[(i + 14) * stride]),
+                           static_cast<int8_t>(keys[(i + 13) * stride]), static_cast<int8_t>(keys[(i + 12) * stride]),
+                           static_cast<int8_t>(keys[(i + 11) * stride]), static_cast<int8_t>(keys[(i + 10) * stride]),
+                           static_cast<int8_t>(keys[(i + 9) * stride]), static_cast<int8_t>(keys[(i + 8) * stride]),
+                           static_cast<int8_t>(keys[(i + 7) * stride]), static_cast<int8_t>(keys[(i + 6) * stride]),
+                           static_cast<int8_t>(keys[(i + 5) * stride]), static_cast<int8_t>(keys[(i + 4) * stride]),
+                           static_cast<int8_t>(keys[(i + 3) * stride]), static_cast<int8_t>(keys[(i + 2) * stride]),
+                           static_cast<int8_t>(keys[(i + 1) * stride]), static_cast<int8_t>(keys[i * stride]));
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi8(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
@@ -492,9 +476,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m128 key_vec = _mm_set_ps(
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m128 key_vec =
+              _mm_set_ps(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
             __m128 lt = _mm_cmplt_ps(key_vec, target_vec);
             int mask = _mm_movemask_ps(lt);
 
@@ -550,9 +533,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m256i key_vec = _mm256_set_epi64x(
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m256i key_vec = _mm256_set_epi64x(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride],
+                                                keys[i * stride]);
             __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
             int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
 
@@ -583,10 +565,8 @@ class btree_map
 
         while (i + 4 <= count) {
             __m256i key_vec = _mm256_set_epi64x(
-                static_cast<int64_t>(keys[(i + 3) * stride]),
-                static_cast<int64_t>(keys[(i + 2) * stride]),
-                static_cast<int64_t>(keys[(i + 1) * stride]),
-                static_cast<int64_t>(keys[i * stride]));
+              static_cast<int64_t>(keys[(i + 3) * stride]), static_cast<int64_t>(keys[(i + 2) * stride]),
+              static_cast<int64_t>(keys[(i + 1) * stride]), static_cast<int64_t>(keys[i * stride]));
             key_vec = _mm256_xor_si256(key_vec, sign_bit);
             __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
             int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
@@ -615,9 +595,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m256d key_vec = _mm256_set_pd(
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m256d key_vec =
+              _mm256_set_pd(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
             __m256d lt = _mm256_cmp_pd(key_vec, target_vec, _CMP_LT_OQ);
             int mask = _mm256_movemask_pd(lt);
 
@@ -647,11 +626,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m512i key_vec = _mm512_set_epi64(
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m512i key_vec = _mm512_set_epi64(keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride],
+                                               keys[(i + 4) * stride], keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                               keys[(i + 1) * stride], keys[i * stride]);
             // Compare: mask bit is 1 where key < target
             __mmask8 lt_mask = _mm512_cmplt_epi64_mask(key_vec, target_vec);
 
@@ -681,14 +658,10 @@ class btree_map
 
         while (i + 8 <= count) {
             __m512i key_vec = _mm512_set_epi64(
-                static_cast<int64_t>(keys[(i + 7) * stride]),
-                static_cast<int64_t>(keys[(i + 6) * stride]),
-                static_cast<int64_t>(keys[(i + 5) * stride]),
-                static_cast<int64_t>(keys[(i + 4) * stride]),
-                static_cast<int64_t>(keys[(i + 3) * stride]),
-                static_cast<int64_t>(keys[(i + 2) * stride]),
-                static_cast<int64_t>(keys[(i + 1) * stride]),
-                static_cast<int64_t>(keys[i * stride]));
+              static_cast<int64_t>(keys[(i + 7) * stride]), static_cast<int64_t>(keys[(i + 6) * stride]),
+              static_cast<int64_t>(keys[(i + 5) * stride]), static_cast<int64_t>(keys[(i + 4) * stride]),
+              static_cast<int64_t>(keys[(i + 3) * stride]), static_cast<int64_t>(keys[(i + 2) * stride]),
+              static_cast<int64_t>(keys[(i + 1) * stride]), static_cast<int64_t>(keys[i * stride]));
             // AVX-512 has native unsigned comparison
             __mmask8 lt_mask = _mm512_cmplt_epu64_mask(key_vec, target_vec);
 
@@ -717,14 +690,10 @@ class btree_map
 
         while (i + 16 <= count) {
             __m512i key_vec = _mm512_set_epi32(
-                keys[(i + 15) * stride], keys[(i + 14) * stride],
-                keys[(i + 13) * stride], keys[(i + 12) * stride],
-                keys[(i + 11) * stride], keys[(i + 10) * stride],
-                keys[(i + 9) * stride], keys[(i + 8) * stride],
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+              keys[(i + 15) * stride], keys[(i + 14) * stride], keys[(i + 13) * stride], keys[(i + 12) * stride],
+              keys[(i + 11) * stride], keys[(i + 10) * stride], keys[(i + 9) * stride], keys[(i + 8) * stride],
+              keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride], keys[(i + 4) * stride],
+              keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
             __mmask16 lt_mask = _mm512_cmplt_epi32_mask(key_vec, target_vec);
 
             if (lt_mask != 0xFFFF) {
@@ -752,22 +721,14 @@ class btree_map
 
         while (i + 16 <= count) {
             __m512i key_vec = _mm512_set_epi32(
-                static_cast<int32_t>(keys[(i + 15) * stride]),
-                static_cast<int32_t>(keys[(i + 14) * stride]),
-                static_cast<int32_t>(keys[(i + 13) * stride]),
-                static_cast<int32_t>(keys[(i + 12) * stride]),
-                static_cast<int32_t>(keys[(i + 11) * stride]),
-                static_cast<int32_t>(keys[(i + 10) * stride]),
-                static_cast<int32_t>(keys[(i + 9) * stride]),
-                static_cast<int32_t>(keys[(i + 8) * stride]),
-                static_cast<int32_t>(keys[(i + 7) * stride]),
-                static_cast<int32_t>(keys[(i + 6) * stride]),
-                static_cast<int32_t>(keys[(i + 5) * stride]),
-                static_cast<int32_t>(keys[(i + 4) * stride]),
-                static_cast<int32_t>(keys[(i + 3) * stride]),
-                static_cast<int32_t>(keys[(i + 2) * stride]),
-                static_cast<int32_t>(keys[(i + 1) * stride]),
-                static_cast<int32_t>(keys[i * stride]));
+              static_cast<int32_t>(keys[(i + 15) * stride]), static_cast<int32_t>(keys[(i + 14) * stride]),
+              static_cast<int32_t>(keys[(i + 13) * stride]), static_cast<int32_t>(keys[(i + 12) * stride]),
+              static_cast<int32_t>(keys[(i + 11) * stride]), static_cast<int32_t>(keys[(i + 10) * stride]),
+              static_cast<int32_t>(keys[(i + 9) * stride]), static_cast<int32_t>(keys[(i + 8) * stride]),
+              static_cast<int32_t>(keys[(i + 7) * stride]), static_cast<int32_t>(keys[(i + 6) * stride]),
+              static_cast<int32_t>(keys[(i + 5) * stride]), static_cast<int32_t>(keys[(i + 4) * stride]),
+              static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
+              static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
             __mmask16 lt_mask = _mm512_cmplt_epu32_mask(key_vec, target_vec);
 
             if (lt_mask != 0xFFFF) {
@@ -794,11 +755,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m512d key_vec = _mm512_set_pd(
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m512d key_vec = _mm512_set_pd(keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride],
+                                            keys[(i + 4) * stride], keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                            keys[(i + 1) * stride], keys[i * stride]);
             __mmask8 lt_mask = _mm512_cmp_pd_mask(key_vec, target_vec, _CMP_LT_OQ);
 
             if (lt_mask != 0xFF) {
@@ -826,14 +785,10 @@ class btree_map
 
         while (i + 16 <= count) {
             __m512 key_vec = _mm512_set_ps(
-                keys[(i + 15) * stride], keys[(i + 14) * stride],
-                keys[(i + 13) * stride], keys[(i + 12) * stride],
-                keys[(i + 11) * stride], keys[(i + 10) * stride],
-                keys[(i + 9) * stride], keys[(i + 8) * stride],
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+              keys[(i + 15) * stride], keys[(i + 14) * stride], keys[(i + 13) * stride], keys[(i + 12) * stride],
+              keys[(i + 11) * stride], keys[(i + 10) * stride], keys[(i + 9) * stride], keys[(i + 8) * stride],
+              keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride], keys[(i + 4) * stride],
+              keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
             __mmask16 lt_mask = _mm512_cmp_ps_mask(key_vec, target_vec, _CMP_LT_OQ);
 
             if (lt_mask != 0xFFFF) {
@@ -862,8 +817,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            int32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride],
-                                 keys[(i + 2) * stride], keys[(i + 3) * stride]};
+            int32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                 keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_s32(key_vec, target_vec);
 
             if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
@@ -892,8 +847,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            uint32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride],
-                                  keys[(i + 2) * stride], keys[(i + 3) * stride]};
+            uint32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                  keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_u32(key_vec, target_vec);
 
             if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
@@ -974,11 +929,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            int16x8_t key_vec = {
-                keys[i * stride], keys[(i + 1) * stride],
-                keys[(i + 2) * stride], keys[(i + 3) * stride],
-                keys[(i + 4) * stride], keys[(i + 5) * stride],
-                keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            int16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                 keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
+                                 keys[(i + 6) * stride], keys[(i + 7) * stride]};
             uint16x8_t lt = vcltq_s16(key_vec, target_vec);
 
             if (vmaxvq_u16(lt) != 0xFFFF) {
@@ -1007,11 +960,9 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            uint16x8_t key_vec = {
-                keys[i * stride], keys[(i + 1) * stride],
-                keys[(i + 2) * stride], keys[(i + 3) * stride],
-                keys[(i + 4) * stride], keys[(i + 5) * stride],
-                keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            uint16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                  keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
+                                  keys[(i + 6) * stride], keys[(i + 7) * stride]};
             uint16x8_t lt = vcltq_u16(key_vec, target_vec);
 
             if (vmaxvq_u16(lt) != 0xFFFF) {
@@ -1041,14 +992,10 @@ class btree_map
 
         while (i + 16 <= count) {
             int8x16_t key_vec = {
-                keys[i * stride], keys[(i + 1) * stride],
-                keys[(i + 2) * stride], keys[(i + 3) * stride],
-                keys[(i + 4) * stride], keys[(i + 5) * stride],
-                keys[(i + 6) * stride], keys[(i + 7) * stride],
-                keys[(i + 8) * stride], keys[(i + 9) * stride],
-                keys[(i + 10) * stride], keys[(i + 11) * stride],
-                keys[(i + 12) * stride], keys[(i + 13) * stride],
-                keys[(i + 14) * stride], keys[(i + 15) * stride]};
+              keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
+              keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
+              keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
+              keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
             uint8x16_t lt = vcltq_s8(key_vec, target_vec);
 
             if (vmaxvq_u8(lt) != 0xFF) {
@@ -1078,14 +1025,10 @@ class btree_map
 
         while (i + 16 <= count) {
             uint8x16_t key_vec = {
-                keys[i * stride], keys[(i + 1) * stride],
-                keys[(i + 2) * stride], keys[(i + 3) * stride],
-                keys[(i + 4) * stride], keys[(i + 5) * stride],
-                keys[(i + 6) * stride], keys[(i + 7) * stride],
-                keys[(i + 8) * stride], keys[(i + 9) * stride],
-                keys[(i + 10) * stride], keys[(i + 11) * stride],
-                keys[(i + 12) * stride], keys[(i + 13) * stride],
-                keys[(i + 14) * stride], keys[(i + 15) * stride]};
+              keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
+              keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
+              keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
+              keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
             uint8x16_t lt = vcltq_u8(key_vec, target_vec);
 
             if (vmaxvq_u8(lt) != 0xFF) {
@@ -1114,8 +1057,8 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            float32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride],
-                                   keys[(i + 2) * stride], keys[(i + 3) * stride]};
+            float32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                   keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_f32(key_vec, target_vec);
 
             if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
@@ -1401,7 +1344,7 @@ class btree_map
     // Returns first position where key >= slot
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_in_slots(
-        const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
         BTREE_ASSUME(count <= 32);
         for (size_type i = 0; i < count; ++i) {
             if (!_comp(slots[i].first, key)) {
@@ -1415,7 +1358,7 @@ class btree_map
     // Returns first position where key >= slot
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_in_slots(
-        const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
         // Hint to compiler about expected count range (typical btree has 15 slots)
         BTREE_ASSUME(count <= 32);
 
@@ -1434,7 +1377,7 @@ class btree_map
 
     // Specialized search for leaf node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_leaf(
-        const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
+      const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
         // AVX-512 paths (highest priority - fastest)
 #ifdef BTREE_HAS_AVX512
         if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
@@ -1561,7 +1504,7 @@ class btree_map
 
     // Specialized search for internal node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_internal(
-        const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
+      const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
         // AVX-512 paths (highest priority - fastest)
 #ifdef BTREE_HAS_AVX512
         if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
@@ -1830,8 +1773,8 @@ class btree_map
     // Returns the (node, position) where the key-value was inserted (for leaf inserts only)
     // Uses perfect forwarding for efficient insertion
     template <typename K, typename V>
-    auto insert_and_split_impl(node_base* node, size_type pos, K&& key, V&& value,
-                               node_base* right_child = nullptr) -> std::pair<node_base*, size_type> {
+    auto insert_and_split_impl(node_base* node, size_type pos, K&& key, V&& value, node_base* right_child = nullptr)
+      -> std::pair<node_base*, size_type> {
         if (node->is_leaf_node()) {
             auto* leaf = static_cast<leaf_node*>(node);
             if (!leaf->is_full()) {
@@ -1878,7 +1821,8 @@ class btree_map
             } else if (pos == mid) {
                 // New element IS the median - it goes to parent, not a leaf
 #if BTREE_DEBUG
-                std::cerr << "[DEBUG] pos==mid case: pos=" << pos << " mid=" << mid << " key type=" << typeid(Key).name() << std::endl;
+                std::cerr << "[DEBUG] pos==mid case: pos=" << pos << " mid=" << mid
+                          << " key type=" << typeid(Key).name() << std::endl;
 #endif
                 // Move elements [mid, count) to right
                 if constexpr (std::is_trivially_copyable_v<storage_type>) {
@@ -1909,7 +1853,8 @@ class btree_map
 
                 // Move elements [mid+1, count) to right
                 if constexpr (std::is_trivially_copyable_v<storage_type>) {
-                    std::memcpy(new_right->slots, &leaf->slots[mid + 1], (leaf->count - mid - 1) * sizeof(storage_type));
+                    std::memcpy(new_right->slots, &leaf->slots[mid + 1],
+                                (leaf->count - mid - 1) * sizeof(storage_type));
                 } else {
                     for (size_type i = mid + 1; i < leaf->count; ++i) {
                         new_right->slots[i - mid - 1] = std::move(leaf->slots[i]);
@@ -1941,7 +1886,8 @@ class btree_map
                 // If element was the median, it's now in the root
                 if (inserted_node == nullptr) {
 #if BTREE_DEBUG
-                    std::cerr << "[DEBUG] Returning new_root, pos=0, slot[0].second='" << new_root->slots[0].second << "'" << std::endl;
+                    std::cerr << "[DEBUG] Returning new_root, pos=0, slot[0].second='" << new_root->slots[0].second
+                              << "'" << std::endl;
 #endif
                     return {new_root, 0};
                 }
@@ -1952,7 +1898,8 @@ class btree_map
 #if BTREE_DEBUG
                 std::cerr << "[DEBUG] Inserting median into parent at pos=" << parent_pos << std::endl;
 #endif
-                auto [pnode, ppos] = insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
+                auto [pnode, ppos] =
+                  insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
                 // If element was the median, return the parent position
                 if (inserted_node == nullptr) {
 #if BTREE_DEBUG
@@ -1962,7 +1909,8 @@ class btree_map
                 }
             }
 #if BTREE_DEBUG
-            std::cerr << "[DEBUG] Returning leaf result: node=" << (void*)inserted_node << " pos=" << inserted_pos << std::endl;
+            std::cerr << "[DEBUG] Returning leaf result: node=" << (void*)inserted_node << " pos=" << inserted_pos
+                      << std::endl;
 #endif
             return {inserted_node, inserted_pos};
         } else {
@@ -2077,7 +2025,8 @@ class btree_map
             } else {
                 auto* parent = static_cast<internal_node*>(internal->parent);
                 size_type parent_pos = internal->position;
-                auto [pnode, ppos] = insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
+                auto [pnode, ppos] =
+                  insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
                 if (inserted_node == nullptr) {
                     return {pnode, ppos};
                 }
@@ -2375,7 +2324,8 @@ class btree_map
     };
 
     // Custom reverse iterator (std::reverse_iterator doesn't work with our end() iterator)
-    class reverse_iterator {
+    class reverse_iterator
+    {
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
@@ -2493,7 +2443,8 @@ class btree_map
         friend auto operator!=(const reverse_iterator& a, const reverse_iterator& b) -> bool { return !(a == b); }
     };
 
-    class const_reverse_iterator {
+    class const_reverse_iterator
+    {
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
@@ -2607,7 +2558,9 @@ class btree_map
             return a._node == b._node && a._pos == b._pos;
         }
 
-        friend auto operator!=(const const_reverse_iterator& a, const const_reverse_iterator& b) -> bool { return !(a == b); }
+        friend auto operator!=(const const_reverse_iterator& a, const const_reverse_iterator& b) -> bool {
+            return !(a == b);
+        }
     };
 
     // Constructors
@@ -2673,9 +2626,7 @@ class btree_map
     }
 
     // Insert a key-value pair (const lvalue version)
-    auto insert(const Key& key, const Value& value) -> std::pair<iterator, bool> {
-        return insert_impl(key, value);
-    }
+    auto insert(const Key& key, const Value& value) -> std::pair<iterator, bool> { return insert_impl(key, value); }
 
     // Insert a key-value pair (rvalue version for value - avoids copy)
     auto insert(const Key& key, Value&& value) -> std::pair<iterator, bool> {
@@ -2776,7 +2727,7 @@ class btree_map
         return try_emplace(std::move(key), std::forward<Args>(args)...).first;
     }
 
-  private:
+   private:
     // Internal insert implementation with perfect forwarding
     template <typename K, typename V>
     __attribute__((hot)) auto insert_impl(K&& key, V&& value) -> std::pair<iterator, bool> {
@@ -2808,14 +2759,14 @@ class btree_map
         }
 
         // Insert and get the position where it was inserted
-        auto [inserted_node, inserted_pos] = insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+        auto [inserted_node, inserted_pos] =
+          insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
         ++_size;
 
         return {iterator(inserted_node, inserted_pos), true};
     }
 
-  public:
-
+   public:
     // Find - optimized with type-specialized search and minimal branching
     [[nodiscard]] __attribute__((hot)) auto find(const Key& key) -> iterator {
         node_base* node = _root;
@@ -2959,8 +2910,7 @@ class btree_map
     [[nodiscard]] auto rbegin() noexcept -> reverse_iterator {
         if (_root == nullptr) return reverse_iterator(nullptr, 0, true);
         auto* leaf = rightmost_leaf();
-        return reverse_iterator(const_cast<node_base*>(static_cast<const node_base*>(leaf)),
-                               leaf->count - 1, false);
+        return reverse_iterator(const_cast<node_base*>(static_cast<const node_base*>(leaf)), leaf->count - 1, false);
     }
 
     [[nodiscard]] auto rbegin() const noexcept -> const_reverse_iterator {
@@ -3029,9 +2979,7 @@ class btree_map
         return end();
     }
 
-    auto erase(const_iterator pos) -> iterator {
-        return erase(iterator(const_cast<node_base*>(pos._node), pos._pos));
-    }
+    auto erase(const_iterator pos) -> iterator { return erase(iterator(const_cast<node_base*>(pos._node), pos._pos)); }
 
     // Erase range [first, last)
     auto erase(const_iterator first, const_iterator last) -> iterator {
@@ -3089,7 +3037,7 @@ class btree_map
     // merge - merge elements from another btree_map (C++17)
     template <typename C2, std::size_t N2>
     void merge(btree_map<Key, Value, C2, N2>& source) {
-        for (auto it = source.begin(); it != source.end(); ) {
+        for (auto it = source.begin(); it != source.end();) {
             auto [insert_it, inserted] = insert(it->first, it->second);
             if (inserted) {
                 auto next = it;
@@ -3143,11 +3091,11 @@ class btree_map
     // Lexicographical comparison operators (C++20)
     friend auto operator<(const btree_map& lhs, const btree_map& rhs) -> bool {
         return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-            [](const value_type& a, const value_type& b) {
-                if (a.first < b.first) return true;
-                if (b.first < a.first) return false;
-                return a.second < b.second;
-            });
+                                            [](const value_type& a, const value_type& b) {
+                                                if (a.first < b.first) return true;
+                                                if (b.first < a.first) return false;
+                                                return a.second < b.second;
+                                            });
     }
 
     friend auto operator<=(const btree_map& lhs, const btree_map& rhs) -> bool { return !(rhs < lhs); }
@@ -3192,10 +3140,9 @@ void swap(btree_map<Key, Value, Compare, N>& lhs, btree_map<Key, Value, Compare,
 
 // erase_if - erase all elements satisfying predicate (C++20)
 template <typename Key, typename Value, typename Compare, std::size_t N, typename Pred>
-typename btree_map<Key, Value, Compare, N>::size_type
-erase_if(btree_map<Key, Value, Compare, N>& c, Pred pred) {
+typename btree_map<Key, Value, Compare, N>::size_type erase_if(btree_map<Key, Value, Compare, N>& c, Pred pred) {
     auto old_size = c.size();
-    for (auto it = c.begin(); it != c.end(); ) {
+    for (auto it = c.begin(); it != c.end();) {
         if (pred(*it)) {
             it = c.erase(it);
         } else {
