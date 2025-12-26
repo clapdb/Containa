@@ -86,7 +86,8 @@ constexpr std::size_t optimal_node_size() {
     return 4096;
 }
 
-template <typename Key, typename Value, typename Compare = std::less<Key>, std::size_t TargetNodeSize = 256>
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
 class btree_map
 {
    public:
@@ -2015,9 +2016,14 @@ class btree_map
     [[nodiscard]] static constexpr auto internal_slots() noexcept -> size_type { return kInternalSlots; }
 };
 
-// Convenience alias that automatically selects optimal node size
-// Ensures at least 15 slots per node regardless of key/value size
+// btree_map now automatically selects optimal node size by default.
+// btree_map_auto is kept for backward compatibility but is now identical to btree_map.
 template <typename Key, typename Value, typename Compare = std::less<Key>>
-using btree_map_auto = btree_map<Key, Value, Compare, optimal_node_size<Key, Value>()>;
+using btree_map_auto = btree_map<Key, Value, Compare>;
+
+// Explicit 256-byte node size for when you want minimal memory footprint
+// at the cost of potentially fewer slots for large value types
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using btree_map_compact = btree_map<Key, Value, Compare, 256>;
 
 }  // namespace stdb::container
