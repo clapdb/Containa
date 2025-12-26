@@ -43,6 +43,9 @@
 #if defined(__AVX2__)
 #define BTREE_HAS_AVX2 1
 #endif
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#define BTREE_HAS_AVX512 1
+#endif
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
 #define BTREE_HAS_NEON 1
@@ -605,6 +608,221 @@ class btree_map
     }
 #endif
 
+#ifdef BTREE_HAS_AVX512
+    // AVX-512 lower_bound for int64_t keys (signed) - processes 8 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        __m512i target_vec = _mm512_set1_epi64(target);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m512i key_vec = _mm512_set_epi64(
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            // Compare: mask bit is 1 where key < target
+            __mmask8 lt_mask = _mm512_cmplt_epi64_mask(key_vec, target_vec);
+
+            if (lt_mask != 0xFF) {
+                // Find first position where key >= target
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFF));
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX-512 lower_bound for uint64_t keys (unsigned) - processes 8 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        __m512i target_vec = _mm512_set1_epi64(static_cast<int64_t>(target));
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m512i key_vec = _mm512_set_epi64(
+                static_cast<int64_t>(keys[(i + 7) * stride]),
+                static_cast<int64_t>(keys[(i + 6) * stride]),
+                static_cast<int64_t>(keys[(i + 5) * stride]),
+                static_cast<int64_t>(keys[(i + 4) * stride]),
+                static_cast<int64_t>(keys[(i + 3) * stride]),
+                static_cast<int64_t>(keys[(i + 2) * stride]),
+                static_cast<int64_t>(keys[(i + 1) * stride]),
+                static_cast<int64_t>(keys[i * stride]));
+            // AVX-512 has native unsigned comparison
+            __mmask8 lt_mask = _mm512_cmplt_epu64_mask(key_vec, target_vec);
+
+            if (lt_mask != 0xFF) {
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFF));
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX-512 lower_bound for int32_t keys (signed) - processes 16 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        __m512i target_vec = _mm512_set1_epi32(target);
+        size_type i = 0;
+
+        while (i + 16 <= count) {
+            __m512i key_vec = _mm512_set_epi32(
+                keys[(i + 15) * stride], keys[(i + 14) * stride],
+                keys[(i + 13) * stride], keys[(i + 12) * stride],
+                keys[(i + 11) * stride], keys[(i + 10) * stride],
+                keys[(i + 9) * stride], keys[(i + 8) * stride],
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            __mmask16 lt_mask = _mm512_cmplt_epi32_mask(key_vec, target_vec);
+
+            if (lt_mask != 0xFFFF) {
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFFFF));
+            }
+            i += 16;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX-512 lower_bound for uint32_t keys (unsigned) - processes 16 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        __m512i target_vec = _mm512_set1_epi32(static_cast<int32_t>(target));
+        size_type i = 0;
+
+        while (i + 16 <= count) {
+            __m512i key_vec = _mm512_set_epi32(
+                static_cast<int32_t>(keys[(i + 15) * stride]),
+                static_cast<int32_t>(keys[(i + 14) * stride]),
+                static_cast<int32_t>(keys[(i + 13) * stride]),
+                static_cast<int32_t>(keys[(i + 12) * stride]),
+                static_cast<int32_t>(keys[(i + 11) * stride]),
+                static_cast<int32_t>(keys[(i + 10) * stride]),
+                static_cast<int32_t>(keys[(i + 9) * stride]),
+                static_cast<int32_t>(keys[(i + 8) * stride]),
+                static_cast<int32_t>(keys[(i + 7) * stride]),
+                static_cast<int32_t>(keys[(i + 6) * stride]),
+                static_cast<int32_t>(keys[(i + 5) * stride]),
+                static_cast<int32_t>(keys[(i + 4) * stride]),
+                static_cast<int32_t>(keys[(i + 3) * stride]),
+                static_cast<int32_t>(keys[(i + 2) * stride]),
+                static_cast<int32_t>(keys[(i + 1) * stride]),
+                static_cast<int32_t>(keys[i * stride]));
+            __mmask16 lt_mask = _mm512_cmplt_epu32_mask(key_vec, target_vec);
+
+            if (lt_mask != 0xFFFF) {
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFFFF));
+            }
+            i += 16;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX-512 lower_bound for double keys - processes 8 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        __m512d target_vec = _mm512_set1_pd(target);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m512d key_vec = _mm512_set_pd(
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            __mmask8 lt_mask = _mm512_cmp_pd_mask(key_vec, target_vec, _CMP_LT_OQ);
+
+            if (lt_mask != 0xFF) {
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFF));
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX-512 lower_bound for float keys - processes 16 keys at a time
+    template <typename T>
+    static auto avx512_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        __m512 target_vec = _mm512_set1_ps(target);
+        size_type i = 0;
+
+        while (i + 16 <= count) {
+            __m512 key_vec = _mm512_set_ps(
+                keys[(i + 15) * stride], keys[(i + 14) * stride],
+                keys[(i + 13) * stride], keys[(i + 12) * stride],
+                keys[(i + 11) * stride], keys[(i + 10) * stride],
+                keys[(i + 9) * stride], keys[(i + 8) * stride],
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            __mmask16 lt_mask = _mm512_cmp_ps_mask(key_vec, target_vec, _CMP_LT_OQ);
+
+            if (lt_mask != 0xFFFF) {
+                return i + __builtin_ctz(static_cast<unsigned>(~lt_mask & 0xFFFF));
+            }
+            i += 16;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+#endif
+
 #ifdef BTREE_HAS_NEON
     // NEON lower_bound for int32_t keys (signed)
     template <typename T>
@@ -956,7 +1174,28 @@ class btree_map
     // Specialized search for leaf node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_leaf(
         const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
-        // x86 SIMD paths
+        // AVX-512 paths (highest priority - fastest)
+#ifdef BTREE_HAS_AVX512
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_u64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_double(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_float(leaf->slots, leaf->count, key);
+        }
+#endif
+        // x86 SSE2/AVX2 paths
 #ifdef BTREE_HAS_SSE2
         if constexpr (std::is_same_v<Key, int8_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s8(leaf->slots, leaf->count, key);
@@ -970,6 +1209,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_u16(leaf->slots, leaf->count, key);
         }
+#ifndef BTREE_HAS_AVX512  // Use SSE2 only if AVX-512 not available
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(leaf->slots, leaf->count, key);
         }
@@ -983,7 +1223,9 @@ class btree_map
             return simd_lower_bound_double(leaf->slots, leaf->count, key);
         }
 #endif
+#endif
 #ifdef BTREE_HAS_AVX2
+#ifndef BTREE_HAS_AVX512  // Use AVX2 only if AVX-512 not available
         if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s64(leaf->slots, leaf->count, key);
         }
@@ -993,6 +1235,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_double_avx(leaf->slots, leaf->count, key);
         }
+#endif
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON
@@ -1035,7 +1278,28 @@ class btree_map
     // Specialized search for internal node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_internal(
         const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
-        // x86 SIMD paths
+        // AVX-512 paths (highest priority - fastest)
+#ifdef BTREE_HAS_AVX512
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_u64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_double(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return avx512_lower_bound_float(internal->slots, internal->count, key);
+        }
+#endif
+        // x86 SSE2/AVX2 paths
 #ifdef BTREE_HAS_SSE2
         if constexpr (std::is_same_v<Key, int8_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s8(internal->slots, internal->count, key);
@@ -1049,6 +1313,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_u16(internal->slots, internal->count, key);
         }
+#ifndef BTREE_HAS_AVX512  // Use SSE2 only if AVX-512 not available
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(internal->slots, internal->count, key);
         }
@@ -1062,7 +1327,9 @@ class btree_map
             return simd_lower_bound_double(internal->slots, internal->count, key);
         }
 #endif
+#endif
 #ifdef BTREE_HAS_AVX2
+#ifndef BTREE_HAS_AVX512  // Use AVX2 only if AVX-512 not available
         if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s64(internal->slots, internal->count, key);
         }
@@ -1072,6 +1339,7 @@ class btree_map
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_double_avx(internal->slots, internal->count, key);
         }
+#endif
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON

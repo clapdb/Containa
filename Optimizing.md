@@ -24,14 +24,20 @@ This document describes the optimization techniques used in Containa containers.
 
 SIMD instructions are used for fast node search with the following key types (when using `std::less<Key>` comparator):
 
-**x86-64:**
+**x86-64 (AVX-512, when available):**
+- AVX-512 for `int32_t` and `uint32_t` keys (16 keys/iteration)
+- AVX-512 for `int64_t` and `uint64_t` keys (8 keys/iteration)
+- AVX-512 for `float` keys (16 keys/iteration)
+- AVX-512 for `double` keys (8 keys/iteration)
+
+**x86-64 (SSE2/AVX2 fallback):**
 - SSE2 for `int8_t` and `uint8_t` keys (16 keys/iteration)
 - SSE2 for `int16_t` and `uint16_t` keys (8 keys/iteration)
 - SSE2 for `int32_t` and `uint32_t` keys (4 keys/iteration)
 - SSE for `float` keys (4 keys/iteration)
 - SSE2 for `double` keys (2 keys/iteration)
 - AVX2 for `int64_t` and `uint64_t` keys (4 keys/iteration)
-- AVX for `double` keys (4 keys/iteration, when AVX2 available)
+- AVX for `double` keys (4 keys/iteration)
 
 **ARM64:**
 - NEON for `int8_t` and `uint8_t` keys (16 keys/iteration)
@@ -224,6 +230,5 @@ Containa btree_map is **1.1-2.7x faster** than Abseil for find (depending on key
 | Iterate   | 87 us    | 23 us     | **3.78x** |
 
 ### Future Optimizations
-- AVX-512 for even faster SIMD search (current AVX2 handles 4 int64_t keys, AVX-512 could handle 8)
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
