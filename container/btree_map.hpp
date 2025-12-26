@@ -19,10 +19,13 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <utility>
 
 #include "vectra.hpp"
+
+#define BTREE_DEBUG 0
 
 // SIMD support detection
 #if defined(__x86_64__) || defined(_M_X64)
@@ -305,9 +308,16 @@ class btree_map
 
     // Insert key-value into a leaf node at position (node must have space)
     void insert_into_leaf(leaf_node* leaf, size_type pos, const Key& key, const Value& value) {
-        // Shift elements to make room
-        for (size_type i = leaf->count; i > pos; --i) {
-            leaf->slots[i] = std::move(leaf->slots[i - 1]);
+        size_type count = leaf->count;
+        if (pos < count) {
+            // Use memmove for trivially copyable types
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&leaf->slots[pos + 1], &leaf->slots[pos], (count - pos) * sizeof(storage_type));
+            } else {
+                for (size_type i = count; i > pos; --i) {
+                    leaf->slots[i] = std::move(leaf->slots[i - 1]);
+                }
+            }
         }
         leaf->slots[pos].first = key;
         leaf->slots[pos].second = value;
@@ -317,12 +327,23 @@ class btree_map
     // Insert key-value-child into an internal node at position
     void insert_into_internal(internal_node* node, size_type pos, const Key& key, const Value& value,
                               node_base* right_child) {
-        // Shift elements to make room
-        for (size_type i = node->count; i > pos; --i) {
-            node->slots[i] = std::move(node->slots[i - 1]);
-            node->children[i + 1] = node->children[i];
-            if (node->children[i + 1]) {
-                node->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+        size_type count = node->count;
+        if (pos < count) {
+            // Use memmove for trivially copyable types
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&node->slots[pos + 1], &node->slots[pos], (count - pos) * sizeof(storage_type));
+            } else {
+                for (size_type i = count; i > pos; --i) {
+                    node->slots[i] = std::move(node->slots[i - 1]);
+                }
+            }
+            // Move children pointers
+            std::memmove(&node->children[pos + 2], &node->children[pos + 1], (count - pos) * sizeof(node_base*));
+            // Update positions for shifted children
+            for (size_type i = pos + 2; i <= count + 1; ++i) {
+                if (node->children[i]) {
+                    node->children[i]->position = static_cast<uint16_t>(i);
+                }
             }
         }
         node->slots[pos].first = key;
@@ -395,72 +416,100 @@ class btree_map
     }
 
     // Insert and handle splits up the tree
-    void insert_and_split(node_base* node, size_type pos, const Key& key, const Value& value,
-                          node_base* right_child = nullptr) {
+    // Returns the (node, position) where the key-value was inserted (for leaf inserts only)
+    auto insert_and_split(node_base* node, size_type pos, const Key& key, const Value& value,
+                          node_base* right_child = nullptr) -> std::pair<node_base*, size_type> {
         if (node->is_leaf_node()) {
             auto* leaf = static_cast<leaf_node*>(node);
             if (!leaf->is_full()) {
                 insert_into_leaf(leaf, pos, key, value);
-                return;
+                return {leaf, pos};
             }
 
             // Need to split - create new right node first
             auto* new_right = create_leaf();
             size_type mid = (leaf->count + 1) / 2;  // Include new element in count
 
+            // Track where the element ends up
+            node_base* inserted_node = nullptr;
+            size_type inserted_pos = 0;
+
             // Determine which node the new element goes into
             Key median_key;
             Value median_value;
 
             if (pos < mid) {
-                // New element goes to left, median is at mid-1 after insertion
-                // Move elements [mid-1, count) to right
-                for (size_type i = mid - 1; i < leaf->count; ++i) {
-                    new_right->slots[i - (mid - 1)] = std::move(leaf->slots[i]);
+                // New element goes to left
+                // Median is the original element at position mid-1
+                // Move elements [mid, count) to right, keep [0, mid-1) in left, median at mid-1
+
+                // First, save the median (at position mid-1 before any modification)
+                median_key = std::move(leaf->slots[mid - 1].first);
+                median_value = std::move(leaf->slots[mid - 1].second);
+
+                // Move elements [mid, count) to right
+                if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                    std::memcpy(new_right->slots, &leaf->slots[mid], (leaf->count - mid) * sizeof(storage_type));
+                } else {
+                    for (size_type i = mid; i < leaf->count; ++i) {
+                        new_right->slots[i - mid] = std::move(leaf->slots[i]);
+                    }
                 }
-                new_right->count = static_cast<uint16_t>(leaf->count - (mid - 1));
-                leaf->count = static_cast<uint16_t>(mid - 1);
+                new_right->count = static_cast<uint16_t>(leaf->count - mid);
+                leaf->count = static_cast<uint16_t>(mid - 1);  // Left keeps [0, mid-2] = mid-1 elements
 
                 // Insert new element into left
                 insert_into_leaf(leaf, pos, key, value);
-
-                // Median is last element of left
-                median_key = std::move(leaf->slots[leaf->count - 1].first);
-                median_value = std::move(leaf->slots[leaf->count - 1].second);
-                --leaf->count;
+                inserted_node = leaf;
+                inserted_pos = pos;
             } else if (pos == mid) {
-                // New element IS the median
+                // New element IS the median - it goes to parent, not a leaf
+#if BTREE_DEBUG
+                std::cerr << "[DEBUG] pos==mid case: pos=" << pos << " mid=" << mid << " key type=" << typeid(Key).name() << std::endl;
+#endif
                 // Move elements [mid, count) to right
-                for (size_type i = mid; i < leaf->count; ++i) {
-                    new_right->slots[i - mid] = std::move(leaf->slots[i]);
+                if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                    std::memcpy(new_right->slots, &leaf->slots[mid], (leaf->count - mid) * sizeof(storage_type));
+                } else {
+                    for (size_type i = mid; i < leaf->count; ++i) {
+                        new_right->slots[i - mid] = std::move(leaf->slots[i]);
+                    }
                 }
                 new_right->count = static_cast<uint16_t>(leaf->count - mid);
                 leaf->count = static_cast<uint16_t>(mid);
 
                 median_key = key;
                 median_value = value;
+#if BTREE_DEBUG
+                std::cerr << "[DEBUG] median assigned, inserted_node=nullptr" << std::endl;
+#endif
+                // Element goes to internal node - we'll return the parent position later
+                inserted_node = nullptr;  // Will be set after parent insert
+                inserted_pos = 0;
             } else {
                 // New element goes to right
-                // Move elements [mid, count) to right, then insert
-                for (size_type i = mid; i < leaf->count; ++i) {
-                    new_right->slots[i - mid] = std::move(leaf->slots[i]);
-                }
-                new_right->count = static_cast<uint16_t>(leaf->count - mid);
-                leaf->count = static_cast<uint16_t>(mid);
+                // Median is the original element at position mid
 
-                // Median is first element of right
-                median_key = std::move(new_right->slots[0].first);
-                median_value = std::move(new_right->slots[0].second);
+                // First, save the median (at position mid before any modification)
+                median_key = std::move(leaf->slots[mid].first);
+                median_value = std::move(leaf->slots[mid].second);
 
-                // Shift right node and insert new element
-                for (size_type i = 0; i < new_right->count - 1; ++i) {
-                    new_right->slots[i] = std::move(new_right->slots[i + 1]);
+                // Move elements [mid+1, count) to right
+                if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                    std::memcpy(new_right->slots, &leaf->slots[mid + 1], (leaf->count - mid - 1) * sizeof(storage_type));
+                } else {
+                    for (size_type i = mid + 1; i < leaf->count; ++i) {
+                        new_right->slots[i - mid - 1] = std::move(leaf->slots[i]);
+                    }
                 }
-                --new_right->count;
+                new_right->count = static_cast<uint16_t>(leaf->count - mid - 1);
+                leaf->count = static_cast<uint16_t>(mid);  // Left keeps [0, mid-1] = mid elements
 
                 // Insert into right node
-                size_type right_pos = pos - mid - 1;  // Adjust position for right node
+                size_type right_pos = pos - mid - 1;  // Position in right node
                 insert_into_leaf(new_right, right_pos, key, value);
+                inserted_node = new_right;
+                inserted_pos = right_pos;
             }
 
             if (leaf->parent == nullptr) {
@@ -476,29 +525,53 @@ class btree_map
                 new_right->parent = new_root;
                 new_right->position = 1;
                 _root = new_root;
+                // If element was the median, it's now in the root
+                if (inserted_node == nullptr) {
+#if BTREE_DEBUG
+                    std::cerr << "[DEBUG] Returning new_root, pos=0, slot[0].second='" << new_root->slots[0].second << "'" << std::endl;
+#endif
+                    return {new_root, 0};
+                }
             } else {
                 // Insert median into parent
                 auto* parent = static_cast<internal_node*>(leaf->parent);
                 size_type parent_pos = leaf->position;
-                insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+#if BTREE_DEBUG
+                std::cerr << "[DEBUG] Inserting median into parent at pos=" << parent_pos << std::endl;
+#endif
+                auto [pnode, ppos] = insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+                // If element was the median, return the parent position
+                if (inserted_node == nullptr) {
+#if BTREE_DEBUG
+                    std::cerr << "[DEBUG] Returning parent result: ppos=" << ppos << std::endl;
+#endif
+                    return {pnode, ppos};
+                }
             }
+#if BTREE_DEBUG
+            std::cerr << "[DEBUG] Returning leaf result: node=" << (void*)inserted_node << " pos=" << inserted_pos << std::endl;
+#endif
+            return {inserted_node, inserted_pos};
         } else {
             auto* internal = static_cast<internal_node*>(node);
             if (!internal->is_full()) {
                 insert_into_internal(internal, pos, key, value, right_child);
-                return;
+                return {internal, pos};
             }
 
             // Need to split internal node
             auto* new_right = create_internal();
             size_type mid = (internal->count + 1) / 2;
 
+            // Track where the element was inserted
+            node_base* inserted_node = nullptr;
+            size_type inserted_pos = 0;
+
             Key median_key;
             Value median_value;
 
             if (pos < mid) {
                 // New element goes to left
-                // Median will be at position mid-1 after insertion
                 median_key = std::move(internal->slots[mid - 1].first);
                 median_value = std::move(internal->slots[mid - 1].second);
 
@@ -518,6 +591,8 @@ class btree_map
                 internal->count = static_cast<uint16_t>(mid - 1);
 
                 insert_into_internal(internal, pos, key, value, right_child);
+                inserted_node = internal;
+                inserted_pos = pos;
             } else if (pos == mid) {
                 // New element IS the median
                 median_key = key;
@@ -527,7 +602,6 @@ class btree_map
                 for (size_type i = mid; i < internal->count; ++i) {
                     new_right->slots[i - mid] = std::move(internal->slots[i]);
                 }
-                // Children: left keeps [0, mid], right gets [mid+1, count+1) which is just right_child at start
                 new_right->children[0] = right_child;
                 if (right_child) {
                     right_child->parent = new_right;
@@ -543,6 +617,8 @@ class btree_map
                 }
                 new_right->count = static_cast<uint16_t>(internal->count - mid);
                 internal->count = static_cast<uint16_t>(mid);
+                // Element goes to parent - will be set after parent insert
+                inserted_node = nullptr;
             } else {
                 // New element goes to right
                 median_key = std::move(internal->slots[mid].first);
@@ -565,6 +641,8 @@ class btree_map
 
                 size_type right_pos = pos - mid - 1;
                 insert_into_internal(new_right, right_pos, key, value, right_child);
+                inserted_node = new_right;
+                inserted_pos = right_pos;
             }
 
             if (internal->parent == nullptr) {
@@ -580,11 +658,18 @@ class btree_map
                 new_right->parent = new_root;
                 new_right->position = 1;
                 _root = new_root;
+                if (inserted_node == nullptr) {
+                    return {new_root, 0};
+                }
             } else {
                 auto* parent = static_cast<internal_node*>(internal->parent);
                 size_type parent_pos = internal->position;
-                insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+                auto [pnode, ppos] = insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+                if (inserted_node == nullptr) {
+                    return {pnode, ppos};
+                }
             }
+            return {inserted_node, inserted_pos};
         }
     }
 
@@ -872,12 +957,11 @@ class btree_map
             return {iterator(leaf, pos), false};  // Key already exists
         }
 
-        // Insert
-        insert_and_split(leaf, pos, key, value);
+        // Insert and get the position where it was inserted
+        auto [inserted_node, inserted_pos] = insert_and_split(leaf, pos, key, value);
         ++_size;
 
-        // Find the iterator to the inserted element
-        return {find(key), true};
+        return {iterator(inserted_node, inserted_pos), true};
     }
 
     // Insert with value_type
