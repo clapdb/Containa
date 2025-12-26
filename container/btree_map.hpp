@@ -914,6 +914,23 @@ class btree_map
     }
 #endif
 
+    // Linear search within a node - faster for small counts due to:
+    // 1. Sequential memory access (better cache/prefetch behavior)
+    // 2. Better branch prediction
+    // 3. Lower overhead per iteration
+    // Returns first position where key >= slot
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_in_slots(
+        const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        BTREE_ASSUME(count <= 32);
+        for (size_type i = 0; i < count; ++i) {
+            if (!_comp(slots[i].first, key)) {
+                return i;
+            }
+        }
+        return count;
+    }
+
     // Binary search within a node using only keys for comparison
     // Returns first position where key >= slot
     template <typename Slots>
@@ -1009,7 +1026,9 @@ class btree_map
             return neon_lower_bound_double(leaf->slots, leaf->count, key);
         }
 #endif
-        return binary_search_in_slots(leaf->slots, leaf->count, key);
+        // Linear search is faster than binary search for non-SIMD types at typical node sizes
+        // (sequential access, better branch prediction, prefetching)
+        return linear_search_in_slots(leaf->slots, leaf->count, key);
     }
 
     // Specialized search for internal node
@@ -1086,7 +1105,8 @@ class btree_map
             return neon_lower_bound_double(internal->slots, internal->count, key);
         }
 #endif
-        return binary_search_in_slots(internal->slots, internal->count, key);
+        // Linear search is faster than binary search for non-SIMD types at typical node sizes
+        return linear_search_in_slots(internal->slots, internal->count, key);
     }
 
     // Generic search (for compatibility) - uses node type dispatch
