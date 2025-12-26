@@ -265,16 +265,24 @@ class btree_map
     template <typename T>
     static constexpr bool is_simd_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
 
-    // Binary search within a node - returns first position where key >= slot
-    // Optimized with force inline and branch hints
+    // Binary search within a node using only keys for comparison
+    // Returns first position where key >= slot
     template <typename Slots>
-    [[nodiscard]] __attribute__((always_inline)) auto binary_search_in_slots(const Slots* slots, size_type count,
-                                                                              const Key& key) const noexcept
-      -> size_type {
+    [[nodiscard]] __attribute__((always_inline)) auto binary_search_in_slots(
+        const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        // Unrolled binary search for small counts (common case)
+        if (count <= 4) {
+            size_type i = 0;
+            while (i < count && _comp(slots[i].first, key)) {
+                ++i;
+            }
+            return i;
+        }
+
         size_type lo = 0;
         size_type hi = count;
         while (lo < hi) {
-            size_type mid = lo + (hi - lo) / 2;
+            size_type mid = lo + ((hi - lo) >> 1);
             if (_comp(slots[mid].first, key)) {
                 lo = mid + 1;
             } else {
@@ -284,29 +292,34 @@ class btree_map
         return lo;
     }
 
-    // Search within a node - returns the position where key should be inserted
-    // Uses SIMD for int32_t, binary search for strings/complex types, linear for small int types
-    [[nodiscard]] auto lower_bound_in_node(const node_base* node, const Key& key) const noexcept -> size_type {
-        size_type count = node->count;
-
+    // Specialized search for leaf node
+    [[nodiscard]] __attribute__((always_inline)) auto lower_bound_in_leaf(
+        const leaf_node* leaf, const Key& key) const noexcept -> size_type {
 #ifdef BTREE_HAS_SSE2
-        // Use SIMD for 32-bit integer types with default comparator
         if constexpr (is_simd_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            if (node->is_leaf_node()) {
-                return simd_lower_bound_int32(static_cast<const leaf_node*>(node)->slots, count,
-                                              static_cast<int32_t>(key));
-            }
-            return simd_lower_bound_int32(static_cast<const internal_node*>(node)->slots, count,
-                                          static_cast<int32_t>(key));
+            return simd_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
         }
 #endif
+        return binary_search_in_slots(leaf->slots, leaf->count, key);
+    }
 
-        // Use binary search for types with expensive comparison (strings, complex types)
-        // Binary search: O(log n) comparisons vs O(n) for linear
-        if (node->is_leaf_node()) {
-            return binary_search_in_slots(static_cast<const leaf_node*>(node)->slots, count, key);
+    // Specialized search for internal node
+    [[nodiscard]] __attribute__((always_inline)) auto lower_bound_in_internal(
+        const internal_node* internal, const Key& key) const noexcept -> size_type {
+#ifdef BTREE_HAS_SSE2
+        if constexpr (is_simd_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
         }
-        return binary_search_in_slots(static_cast<const internal_node*>(node)->slots, count, key);
+#endif
+        return binary_search_in_slots(internal->slots, internal->count, key);
+    }
+
+    // Generic search (for compatibility) - uses node type dispatch
+    [[nodiscard]] auto lower_bound_in_node(const node_base* node, const Key& key) const noexcept -> size_type {
+        if (node->is_leaf_node()) {
+            return lower_bound_in_leaf(static_cast<const leaf_node*>(node), key);
+        }
+        return lower_bound_in_internal(static_cast<const internal_node*>(node), key);
     }
 
     // Create a new leaf node
@@ -1023,36 +1036,33 @@ class btree_map
 
   public:
 
-    // Find - optimized with single comparison for equality
+    // Find - optimized with type-specialized search
     [[nodiscard]] auto find(const Key& key) -> iterator {
         if (_root == nullptr) [[unlikely]] {
             return end();
         }
 
         node_base* node = _root;
-        while (true) {
-            size_type pos = lower_bound_in_node(node, key);
-
-            if (node->is_leaf_node()) [[likely]] {
-                auto* leaf = static_cast<leaf_node*>(node);
-                // lower_bound gives first pos where slot[pos] >= key (i.e., !(slot[pos] < key))
-                // For equality: need !(key < slot[pos]) in addition
-                if (pos < leaf->count && !_comp(key, leaf->key(pos))) {
-                    return iterator(leaf, pos);
-                }
-                return end();
-            }
-
+        // Traverse internal nodes
+        while (!node->is_leaf_node()) {
             auto* internal = static_cast<internal_node*>(node);
-            // For internal nodes, check if we found exact match
+            size_type pos = lower_bound_in_internal(internal, key);
+
+            // Check for exact match in internal node
             if (pos < internal->count && !_comp(key, internal->key(pos))) {
                 return iterator(internal, pos);
             }
 
-            node_base* next = internal->children[pos];
-            __builtin_prefetch(next, 0, 3);
-            node = next;
+            node = internal->children[pos];
         }
+
+        // At leaf node - use specialized search
+        auto* leaf = static_cast<leaf_node*>(node);
+        size_type pos = lower_bound_in_leaf(leaf, key);
+        if (pos < leaf->count && !_comp(key, leaf->key(pos))) {
+            return iterator(leaf, pos);
+        }
+        return end();
     }
 
     [[nodiscard]] auto find(const Key& key) const -> const_iterator {

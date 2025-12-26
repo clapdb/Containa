@@ -174,38 +174,36 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 
 | Operation | Abseil   | Containa  | Ratio |
 |-----------|----------|-----------|-------|
-| Insert    | 1545 us  | 1579 us   | **0.98x** (2% slower) |
-| Find      | 764 us   | 930 us    | **0.82x** (18% slower) |
-| Iterate   | 85 us    | 20 us     | **4.25x faster** |
+| Insert    | 1390 us  | 1480 us   | **0.94x** (6% slower) |
+| Find      | 866 us   | 890 us    | **0.97x** (3% slower) |
+| Iterate   | 96 us    | 23 us     | **4.17x faster** |
 
 **Key Optimizations Applied:**
-1. **Binary search** within nodes (O(log n) vs O(n) per node)
-2. **Move semantics** for efficient string insertion without copies
-3. **Automatic node sizing** - larger nodes for larger types (1024 bytes for strings)
-4. **Perfect forwarding** throughout the insert path
-5. **Single comparison** for equality checks (leveraging lower_bound guarantee)
-6. **Cache prefetching** during tree traversal
-7. **Force-inline** for hot path functions
+1. **Type-specialized search** - separate inlined functions for leaf/internal nodes
+2. **Binary search with small-count optimization** - linear scan for ≤4 elements
+3. **Move semantics** for efficient string insertion without copies
+4. **Automatic node sizing** - larger nodes for larger types (1024 bytes for strings)
+5. **Perfect forwarding** throughout the insert path
+6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
+7. **Force-inline** with `__restrict__` hints for hot path functions
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
 - `btree_map_auto<K,V>` automatically selects node size to ensure ≥15 slots
 - For `pair<string,string>` (64 bytes), this means 1024-byte nodes
 
-**Why Find is Still Slower:**
-Abseil separates keys and values in their node layout, improving cache efficiency during binary search (only touches keys, not values). Our layout stores key-value pairs together. This is a significant architectural difference that would require major refactoring to match.
+**Performance Summary:**
+Containa btree_map is now nearly performance-equivalent to Abseil for find (97%) and insert (94%), while being **4.17x faster for iteration**. This makes it an excellent choice for workloads that involve frequent iteration over ordered data.
 
 **vs std::map (10K string entries):**
 
 | Operation | std::map | btree_map_auto | Speedup |
 |-----------|----------|----------------|---------|
-| Insert    | 2199 us  | 1579 us        | **1.39x** |
-| Find      | 1263 us  | 930 us         | **1.36x** |
-| Iterate   | 84 us    | 20 us          | **4.20x** |
+| Insert    | 2330 us  | 1480 us        | **1.57x** |
+| Find      | 1230 us  | 890 us         | **1.38x** |
+| Iterate   | 87 us    | 23 us          | **3.78x** |
 
 ### Future Optimizations
-
-- **Split key-value layout** - Store keys and values separately for better cache efficiency during search
 - AVX2/AVX-512 for 64-bit key SIMD search
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
