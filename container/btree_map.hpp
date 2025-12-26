@@ -58,6 +58,22 @@ namespace stdb::container {
  *   Compare - Comparison function (default: std::less<Key>)
  *   TargetNodeSize - Target node size in bytes (default: 256)
  */
+// Helper to calculate optimal node size for a given key-value pair type
+// Aims for at least 15 slots per node for good cache utilization
+template <typename Key, typename Value>
+constexpr std::size_t optimal_node_size() {
+    constexpr std::size_t header_size = 24;  // parent + count + position + is_leaf + padding
+    constexpr std::size_t target_slots = 15;
+    constexpr std::size_t pair_size = sizeof(std::pair<Key, Value>);
+    constexpr std::size_t min_size = header_size + pair_size * target_slots;
+    // Round up to power of 2 for cache alignment
+    if (min_size <= 256) return 256;
+    if (min_size <= 512) return 512;
+    if (min_size <= 1024) return 1024;
+    if (min_size <= 2048) return 2048;
+    return 4096;
+}
+
 template <typename Key, typename Value, typename Compare = std::less<Key>, std::size_t TargetNodeSize = 256>
 class btree_map
 {
@@ -249,8 +265,25 @@ class btree_map
     template <typename T>
     static constexpr bool is_simd_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
 
-    // Linear search within a node (cache-friendly for small nodes)
-    // Returns the position where key should be inserted
+    // Binary search within a node - returns first position where key <= slot
+    template <typename Slots>
+    [[nodiscard]] auto binary_search_in_slots(const Slots* slots, size_type count, const Key& key) const noexcept
+      -> size_type {
+        size_type lo = 0;
+        size_type hi = count;
+        while (lo < hi) {
+            size_type mid = lo + (hi - lo) / 2;
+            if (_comp(slots[mid].first, key)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    // Search within a node - returns the position where key should be inserted
+    // Uses SIMD for int32_t, binary search for strings/complex types, linear for small int types
     [[nodiscard]] auto lower_bound_in_node(const node_base* node, const Key& key) const noexcept -> size_type {
         size_type count = node->count;
 
@@ -266,23 +299,12 @@ class btree_map
         }
 #endif
 
-        // Fallback to linear search
+        // Use binary search for types with expensive comparison (strings, complex types)
+        // Binary search: O(log n) comparisons vs O(n) for linear
         if (node->is_leaf_node()) {
-            const auto* leaf = static_cast<const leaf_node*>(node);
-            for (size_type i = 0; i < count; ++i) {
-                if (!_comp(leaf->key(i), key)) {
-                    return i;
-                }
-            }
-        } else {
-            const auto* internal = static_cast<const internal_node*>(node);
-            for (size_type i = 0; i < count; ++i) {
-                if (!_comp(internal->key(i), key)) {
-                    return i;
-                }
-            }
+            return binary_search_in_slots(static_cast<const leaf_node*>(node)->slots, count, key);
         }
-        return count;
+        return binary_search_in_slots(static_cast<const internal_node*>(node)->slots, count, key);
     }
 
     // Create a new leaf node
@@ -307,7 +329,9 @@ class btree_map
     }
 
     // Insert key-value into a leaf node at position (node must have space)
-    void insert_into_leaf(leaf_node* leaf, size_type pos, const Key& key, const Value& value) {
+    // Uses perfect forwarding for efficient insertion of rvalues
+    template <typename K, typename V>
+    void insert_into_leaf(leaf_node* leaf, size_type pos, K&& key, V&& value) {
         size_type count = leaf->count;
         if (pos < count) {
             // Use memmove for trivially copyable types
@@ -319,14 +343,15 @@ class btree_map
                 }
             }
         }
-        leaf->slots[pos].first = key;
-        leaf->slots[pos].second = value;
+        leaf->slots[pos].first = std::forward<K>(key);
+        leaf->slots[pos].second = std::forward<V>(value);
         ++leaf->count;
     }
 
     // Insert key-value-child into an internal node at position
-    void insert_into_internal(internal_node* node, size_type pos, const Key& key, const Value& value,
-                              node_base* right_child) {
+    // Uses perfect forwarding for efficient insertion
+    template <typename K, typename V>
+    void insert_into_internal(internal_node* node, size_type pos, K&& key, V&& value, node_base* right_child) {
         size_type count = node->count;
         if (pos < count) {
             // Use memmove for trivially copyable types
@@ -346,8 +371,8 @@ class btree_map
                 }
             }
         }
-        node->slots[pos].first = key;
-        node->slots[pos].second = value;
+        node->slots[pos].first = std::forward<K>(key);
+        node->slots[pos].second = std::forward<V>(value);
         node->children[pos + 1] = right_child;
         if (right_child) {
             right_child->parent = node;
@@ -417,12 +442,14 @@ class btree_map
 
     // Insert and handle splits up the tree
     // Returns the (node, position) where the key-value was inserted (for leaf inserts only)
-    auto insert_and_split(node_base* node, size_type pos, const Key& key, const Value& value,
-                          node_base* right_child = nullptr) -> std::pair<node_base*, size_type> {
+    // Uses perfect forwarding for efficient insertion
+    template <typename K, typename V>
+    auto insert_and_split_impl(node_base* node, size_type pos, K&& key, V&& value,
+                               node_base* right_child = nullptr) -> std::pair<node_base*, size_type> {
         if (node->is_leaf_node()) {
             auto* leaf = static_cast<leaf_node*>(node);
             if (!leaf->is_full()) {
-                insert_into_leaf(leaf, pos, key, value);
+                insert_into_leaf(leaf, pos, std::forward<K>(key), std::forward<V>(value));
                 return {leaf, pos};
             }
 
@@ -459,7 +486,7 @@ class btree_map
                 leaf->count = static_cast<uint16_t>(mid - 1);  // Left keeps [0, mid-2] = mid-1 elements
 
                 // Insert new element into left
-                insert_into_leaf(leaf, pos, key, value);
+                insert_into_leaf(leaf, pos, std::forward<K>(key), std::forward<V>(value));
                 inserted_node = leaf;
                 inserted_pos = pos;
             } else if (pos == mid) {
@@ -478,8 +505,8 @@ class btree_map
                 new_right->count = static_cast<uint16_t>(leaf->count - mid);
                 leaf->count = static_cast<uint16_t>(mid);
 
-                median_key = key;
-                median_value = value;
+                median_key = std::forward<K>(key);
+                median_value = std::forward<V>(value);
 #if BTREE_DEBUG
                 std::cerr << "[DEBUG] median assigned, inserted_node=nullptr" << std::endl;
 #endif
@@ -507,7 +534,7 @@ class btree_map
 
                 // Insert into right node
                 size_type right_pos = pos - mid - 1;  // Position in right node
-                insert_into_leaf(new_right, right_pos, key, value);
+                insert_into_leaf(new_right, right_pos, std::forward<K>(key), std::forward<V>(value));
                 inserted_node = new_right;
                 inserted_pos = right_pos;
             }
@@ -539,7 +566,7 @@ class btree_map
 #if BTREE_DEBUG
                 std::cerr << "[DEBUG] Inserting median into parent at pos=" << parent_pos << std::endl;
 #endif
-                auto [pnode, ppos] = insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+                auto [pnode, ppos] = insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
                 // If element was the median, return the parent position
                 if (inserted_node == nullptr) {
 #if BTREE_DEBUG
@@ -555,7 +582,7 @@ class btree_map
         } else {
             auto* internal = static_cast<internal_node*>(node);
             if (!internal->is_full()) {
-                insert_into_internal(internal, pos, key, value, right_child);
+                insert_into_internal(internal, pos, std::forward<K>(key), std::forward<V>(value), right_child);
                 return {internal, pos};
             }
 
@@ -590,13 +617,13 @@ class btree_map
                 new_right->count = static_cast<uint16_t>(internal->count - mid);
                 internal->count = static_cast<uint16_t>(mid - 1);
 
-                insert_into_internal(internal, pos, key, value, right_child);
+                insert_into_internal(internal, pos, std::forward<K>(key), std::forward<V>(value), right_child);
                 inserted_node = internal;
                 inserted_pos = pos;
             } else if (pos == mid) {
                 // New element IS the median
-                median_key = key;
-                median_value = value;
+                median_key = std::forward<K>(key);
+                median_value = std::forward<V>(value);
 
                 // Move [mid, count) to right
                 for (size_type i = mid; i < internal->count; ++i) {
@@ -640,7 +667,7 @@ class btree_map
                 internal->count = static_cast<uint16_t>(mid);
 
                 size_type right_pos = pos - mid - 1;
-                insert_into_internal(new_right, right_pos, key, value, right_child);
+                insert_into_internal(new_right, right_pos, std::forward<K>(key), std::forward<V>(value), right_child);
                 inserted_node = new_right;
                 inserted_pos = right_pos;
             }
@@ -664,7 +691,7 @@ class btree_map
             } else {
                 auto* parent = static_cast<internal_node*>(internal->parent);
                 size_type parent_pos = internal->position;
-                auto [pnode, ppos] = insert_and_split(parent, parent_pos, median_key, median_value, new_right);
+                auto [pnode, ppos] = insert_and_split_impl(parent, parent_pos, std::move(median_key), std::move(median_value), new_right);
                 if (inserted_node == nullptr) {
                     return {pnode, ppos};
                 }
@@ -928,8 +955,34 @@ class btree_map
         _size = 0;
     }
 
-    // Insert a key-value pair
+    // Insert a key-value pair (const lvalue version)
     auto insert(const Key& key, const Value& value) -> std::pair<iterator, bool> {
+        return insert_impl(key, value);
+    }
+
+    // Insert a key-value pair (rvalue version for value - avoids copy)
+    auto insert(const Key& key, Value&& value) -> std::pair<iterator, bool> {
+        return insert_impl(key, std::move(value));
+    }
+
+    // Insert with value_type
+    auto insert(const value_type& kv) -> std::pair<iterator, bool> { return insert(kv.first, kv.second); }
+
+    auto insert(value_type&& kv) -> std::pair<iterator, bool> {
+        return insert_impl(std::move(kv.first), std::move(kv.second));
+    }
+
+    // Emplace - construct in place
+    template <typename... Args>
+    auto emplace(Args&&... args) -> std::pair<iterator, bool> {
+        value_type val(std::forward<Args>(args)...);
+        return insert_impl(std::move(val.first), std::move(val.second));
+    }
+
+  private:
+    // Internal insert implementation with perfect forwarding
+    template <typename K, typename V>
+    auto insert_impl(K&& key, V&& value) -> std::pair<iterator, bool> {
         if (_root == nullptr) {
             _root = create_leaf();
         }
@@ -958,21 +1011,13 @@ class btree_map
         }
 
         // Insert and get the position where it was inserted
-        auto [inserted_node, inserted_pos] = insert_and_split(leaf, pos, key, value);
+        auto [inserted_node, inserted_pos] = insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
         ++_size;
 
         return {iterator(inserted_node, inserted_pos), true};
     }
 
-    // Insert with value_type
-    auto insert(const value_type& kv) -> std::pair<iterator, bool> { return insert(kv.first, kv.second); }
-
-    // Emplace
-    template <typename... Args>
-    auto emplace(Args&&... args) -> std::pair<iterator, bool> {
-        value_type val(std::forward<Args>(args)...);
-        return insert(val.first, val.second);
-    }
+  public:
 
     // Find
     [[nodiscard]] auto find(const Key& key) -> iterator {
@@ -1153,5 +1198,10 @@ class btree_map
     [[nodiscard]] static constexpr auto leaf_slots() noexcept -> size_type { return kLeafSlots; }
     [[nodiscard]] static constexpr auto internal_slots() noexcept -> size_type { return kInternalSlots; }
 };
+
+// Convenience alias that automatically selects optimal node size
+// Ensures at least 15 slots per node regardless of key/value size
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using btree_map_auto = btree_map<Key, Value, Compare, optimal_node_size<Key, Value>()>;
 
 }  // namespace stdb::container

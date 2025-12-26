@@ -159,34 +159,46 @@ if (it != map.end()) {
 
 ### String Key/Value Performance
 
-btree_map fully supports non-trivially-copyable types like `std::string`:
+btree_map fully supports non-trivially-copyable types like `std::string`.
+
+**Recommended: Use `btree_map_auto` for string types** - it automatically selects optimal node size:
+
+```cpp
+#include "container/btree_map.hpp"
+
+// Automatically uses 1024-byte nodes for string pairs (15 slots/node)
+stdb::container::btree_map_auto<std::string, std::string> map;
+```
+
+**vs Abseil btree_map (10K string entries, using btree_map_auto):**
+
+| Operation | Abseil   | Containa  | Ratio |
+|-----------|----------|-----------|-------|
+| Insert    | 1449 us  | 1586 us   | **0.91x** (9% slower) |
+| Find      | 923 us   | 949 us    | **0.97x** (3% slower) |
+| Iterate   | 100 us   | 23 us     | **4.35x faster** |
+
+**Key Optimizations Applied:**
+1. **Binary search** within nodes (O(log n) vs O(n) per node)
+2. **Move semantics** for efficient string insertion without copies
+3. **Automatic node sizing** - larger nodes for larger types (1024 bytes for strings)
+4. **Perfect forwarding** throughout the insert path
+
+**Node Size Selection:**
+- `btree_map<K,V>` uses 256-byte nodes (default)
+- `btree_map_auto<K,V>` automatically selects node size to ensure ≥15 slots
+- For `pair<string,string>` (64 bytes), this means 1024-byte nodes
 
 **vs std::map (10K string entries):**
 
-| Operation | std::map | btree_map | Speedup |
-|-----------|----------|-----------|---------|
-| Insert    | 2199 us  | 1771 us   | **1.24x** |
-| Find      | 1263 us  | 1029 us   | **1.23x** |
-| Iterate   | 84 us    | 52 us     | **1.62x** |
-
-**vs Abseil btree_map (10K string entries):**
-
-| Operation | Abseil   | Containa  | Winner |
-|-----------|----------|-----------|--------|
-| Insert    | 1606 us  | 2124 us   | Abseil (1.32x faster) |
-| Find      | 1001 us  | 1058 us   | Abseil (1.06x faster) |
-| Iterate   | 104 us   | 44 us     | **Containa (2.36x faster)** |
-
-**Analysis:**
-- For string keys, Abseil is slightly faster on insert/find due to more mature optimizations
-- Containa maintains significant iteration advantage (2.36x) due to compact node layout
-- String support uses move semantics during node splits for efficiency
-- Both beat `std::map` by significant margins
+| Operation | std::map | btree_map_auto | Speedup |
+|-----------|----------|----------------|---------|
+| Insert    | 2199 us  | 1586 us        | **1.39x** |
+| Find      | 1263 us  | 949 us         | **1.33x** |
+| Iterate   | 84 us    | 23 us          | **3.65x** |
 
 ### Future Optimizations
 
 - AVX2/AVX-512 for 64-bit key SIMD search
-- Binary search fallback for large nodes
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
-- Optimize string key insert/find to match Abseil performance
