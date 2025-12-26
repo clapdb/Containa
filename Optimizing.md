@@ -174,18 +174,33 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 
 | Operation | Abseil   | Containa  | Ratio |
 |-----------|----------|-----------|-------|
-| Insert    | 1390 us  | 1480 us   | **0.94x** (6% slower) |
-| Find      | 866 us   | 890 us    | **0.97x** (3% slower) |
-| Iterate   | 96 us    | 23 us     | **4.17x faster** |
+| Insert    | 1388 us  | 1475 us   | **0.94x** (6% slower) |
+| Find      | 862 us   | 899 us    | **0.96x** (4% slower) |
+| Iterate   | 96 us    | 24 us     | **4.0x faster** |
+
+**vs Abseil btree_map (10K int32_t entries, SIMD-optimized):**
+
+| Operation | Abseil   | Containa  | Ratio |
+|-----------|----------|-----------|-------|
+| Find      | 297 us   | 138 us    | **2.15x faster** |
+
+**vs Abseil btree_map (10K int64_t entries):**
+
+| Operation | Abseil   | Containa  | Ratio |
+|-----------|----------|-----------|-------|
+| Insert    | 457 us   | 257 us    | **1.78x faster** |
+| Find      | 302 us   | 360 us    | 0.84x (16% slower) |
+| Iterate   | 56 us    | 20 us     | **2.75x faster** |
 
 **Key Optimizations Applied:**
-1. **Type-specialized search** - separate inlined functions for leaf/internal nodes
-2. **Binary search with small-count optimization** - linear scan for ≤4 elements
+1. **Type-specialized search** - separate inlined functions for leaf/internal nodes with `flatten` attribute
+2. **Binary search with compiler hints** - `__builtin_assume` for count bounds
 3. **Move semantics** for efficient string insertion without copies
 4. **Automatic node sizing** - larger nodes for larger types (1024 bytes for strings)
 5. **Perfect forwarding** throughout the insert path
 6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
 7. **Force-inline** with `__restrict__` hints for hot path functions
+8. **SSE2 SIMD** for int32_t keys (2.15x faster find than Abseil)
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
