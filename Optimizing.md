@@ -202,24 +202,26 @@ Note: String find is slightly slower due to complex comparison semantics. Iterat
 3. **Type-specialized search** - separate inlined functions with `flatten` attribute
 4. **Compiler hints** - portable `BTREE_ASSUME` for count bounds optimization
 5. **Move semantics** - efficient insertion without unnecessary copies
-6. **Automatic node sizing** - larger nodes for larger types via `btree_map_auto`
+6. **Automatic node sizing** - btree_map now auto-selects optimal node size
 7. **Force-inline** with `__restrict__` hints for hot path functions
 
 **Node Size Selection:**
-- `btree_map<K,V>` uses 256-byte nodes (default)
-- `btree_map_auto<K,V>` automatically selects node size to ensure ≥15 slots
-- For `pair<string,string>` (64 bytes), this means 1024-byte nodes
+- `btree_map<K,V>` automatically selects node size to ensure ≥15 slots
+- Small types (pair ≤17B): 256-byte nodes
+- Medium types (pair ≤34B): 512-byte nodes
+- Large types (pair ≤68B): 1024-byte nodes, etc.
+- `btree_map_compact<K,V>` forces 256-byte nodes if memory is critical
 
 **Performance Summary:**
 Containa btree_map is **1.1-2.7x faster** than Abseil for find (depending on key type) and **2-4x faster for iteration**. Even for non-SIMD types like struct/string, linear search provides competitive or better performance than Abseil's binary search.
 
 **vs std::map (10K string entries):**
 
-| Operation | std::map | btree_map_auto | Speedup |
-|-----------|----------|----------------|---------|
-| Insert    | 2330 us  | 1480 us        | **1.57x** |
-| Find      | 1230 us  | 890 us         | **1.38x** |
-| Iterate   | 87 us    | 23 us          | **3.78x** |
+| Operation | std::map | btree_map | Speedup |
+|-----------|----------|-----------|---------|
+| Insert    | 2330 us  | 1480 us   | **1.57x** |
+| Find      | 1230 us  | 890 us    | **1.38x** |
+| Iterate   | 87 us    | 23 us     | **3.78x** |
 
 ### Future Optimizations
 - AVX-512 for even faster SIMD search (current AVX2 handles 4 int64_t keys, AVX-512 could handle 8)
