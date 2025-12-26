@@ -294,6 +294,78 @@ class btree_map
         }
         return count;
     }
+
+    // SSE2 lower_bound for int16_t keys (signed) - processes 8 keys at a time
+    template <typename T>
+    static auto simd_lower_bound_s16(const T* slots, size_type count, int16_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int16_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int16_t);
+        const auto* keys = reinterpret_cast<const int16_t*>(slots);
+
+        __m128i target_vec = _mm_set1_epi16(target);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m128i key_vec = _mm_set_epi16(
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
+            int mask = _mm_movemask_epi8(lt);
+
+            // Each 16-bit element produces 2 bits in mask (both 1 if <, both 0 if >=)
+            if (mask != 0xFFFF) {
+                return i + (__builtin_ctz(~mask) >> 1);
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // SSE2 lower_bound for uint16_t keys (unsigned) - processes 8 keys at a time
+    template <typename T>
+    static auto simd_lower_bound_u16(const T* slots, size_type count, uint16_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint16_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint16_t);
+        const auto* keys = reinterpret_cast<const uint16_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m128i sign_bit = _mm_set1_epi16(static_cast<int16_t>(0x8000));
+        __m128i target_vec = _mm_xor_si128(_mm_set1_epi16(static_cast<int16_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m128i key_vec = _mm_set_epi16(
+                static_cast<int16_t>(keys[(i + 7) * stride]),
+                static_cast<int16_t>(keys[(i + 6) * stride]),
+                static_cast<int16_t>(keys[(i + 5) * stride]),
+                static_cast<int16_t>(keys[(i + 4) * stride]),
+                static_cast<int16_t>(keys[(i + 3) * stride]),
+                static_cast<int16_t>(keys[(i + 2) * stride]),
+                static_cast<int16_t>(keys[(i + 1) * stride]),
+                static_cast<int16_t>(keys[i * stride]));
+            key_vec = _mm_xor_si128(key_vec, sign_bit);
+            __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
+            int mask = _mm_movemask_epi8(lt);
+
+            if (mask != 0xFFFF) {
+                return i + (__builtin_ctz(~mask) >> 1);
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
 #endif
 
 #ifdef BTREE_HAS_AVX2
@@ -475,7 +547,74 @@ class btree_map
         if (i < count && keys[i * stride] >= target) return i;
         return count;
     }
+
+    // NEON lower_bound for int16_t keys (signed) - processes 8 keys at a time
+    template <typename T>
+    static auto neon_lower_bound_s16(const T* slots, size_type count, int16_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int16_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int16_t);
+        const auto* keys = reinterpret_cast<const int16_t*>(slots);
+
+        int16x8_t target_vec = vdupq_n_s16(target);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            int16x8_t key_vec = {
+                keys[i * stride], keys[(i + 1) * stride],
+                keys[(i + 2) * stride], keys[(i + 3) * stride],
+                keys[(i + 4) * stride], keys[(i + 5) * stride],
+                keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            uint16x8_t lt = vcltq_s16(key_vec, target_vec);
+
+            if (vmaxvq_u16(lt) != 0xFFFF) {
+                for (size_type j = 0; j < 8; ++j) {
+                    if (keys[(i + j) * stride] >= target) return i + j;
+                }
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // NEON lower_bound for uint16_t keys (unsigned) - processes 8 keys at a time
+    template <typename T>
+    static auto neon_lower_bound_u16(const T* slots, size_type count, uint16_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint16_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint16_t);
+        const auto* keys = reinterpret_cast<const uint16_t*>(slots);
+
+        uint16x8_t target_vec = vdupq_n_u16(target);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            uint16x8_t key_vec = {
+                keys[i * stride], keys[(i + 1) * stride],
+                keys[(i + 2) * stride], keys[(i + 3) * stride],
+                keys[(i + 4) * stride], keys[(i + 5) * stride],
+                keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            uint16x8_t lt = vcltq_u16(key_vec, target_vec);
+
+            if (vmaxvq_u16(lt) != 0xFFFF) {
+                for (size_type j = 0; j < 8; ++j) {
+                    if (keys[(i + j) * stride] >= target) return i + j;
+                }
+            }
+            i += 8;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
 #endif
+
     // Binary search within a node using only keys for comparison
     // Returns first position where key >= slot
     template <typename Slots>
@@ -502,6 +641,12 @@ class btree_map
         const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
         // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
+        if constexpr (std::is_same_v<Key, int16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s16(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u16(leaf->slots, leaf->count, key);
+        }
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(leaf->slots, leaf->count, key);
         }
@@ -519,6 +664,12 @@ class btree_map
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s16(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u16(leaf->slots, leaf->count, key);
+        }
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s32(leaf->slots, leaf->count, key);
         }
@@ -540,6 +691,12 @@ class btree_map
         const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
         // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
+        if constexpr (std::is_same_v<Key, int16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s16(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u16(internal->slots, internal->count, key);
+        }
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(internal->slots, internal->count, key);
         }
@@ -557,6 +714,12 @@ class btree_map
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s16(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u16(internal->slots, internal->count, key);
+        }
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return neon_lower_bound_s32(internal->slots, internal->count, key);
         }
