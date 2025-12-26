@@ -22,18 +22,17 @@ This document describes the optimization techniques used in Containa containers.
 
 ### SIMD Optimization
 
-For `int32_t` and `uint32_t` keys with default comparator (`std::less<Key>`), SSE2 SIMD instructions are used for node search:
+SIMD instructions are used for fast node search with the following integer key types (when using `std::less<Key>` comparator):
 
-```cpp
-// Process 4 keys at a time with SSE2
-__m128i key_vec = _mm_set_epi32(keys[i+3], keys[i+2], keys[i+1], keys[i]);
-__m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
-int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
-```
+**x86-64:**
+- SSE2 for `int32_t` and `uint32_t` keys (4 keys/iteration)
+- AVX2 for `int64_t` and `uint64_t` keys (4 keys/iteration)
 
-SIMD provides **1.93x speedup** for find operations on int32_t keys compared to scalar linear search.
+**ARM64:**
+- NEON for `int32_t` and `uint32_t` keys (4 keys/iteration)
+- NEON for `int64_t` and `uint64_t` keys (2 keys/iteration)
 
-Note: int64_t keys do not use SIMD as SSE2 lacks native 64-bit comparison instructions. AVX-512 would be needed for 64-bit SIMD optimization.
+Unsigned types use the XOR-with-sign-bit trick (x86) or native unsigned intrinsics (NEON) to achieve correct comparison semantics.
 
 ### Performance Benchmarks
 
@@ -200,9 +199,9 @@ stdb::container::btree_map_auto<std::string, std::string> map;
 5. **Perfect forwarding** throughout the insert path
 6. **Single comparison** for equality checks (leveraging lower_bound guarantee)
 7. **Force-inline** with `__restrict__` hints for hot path functions
-8. **SSE2 SIMD** for int32_t keys on x86 (2.15x faster find than Abseil)
-9. **AVX2 SIMD** for int64_t keys on x86 (1.64x faster find than Abseil)
-10. **ARM NEON SIMD** for int32_t and int64_t keys on ARM64
+8. **SSE2 SIMD** for int32_t/uint32_t keys on x86 (2.15x faster find than Abseil)
+9. **AVX2 SIMD** for int64_t/uint64_t keys on x86 (1.64x faster find than Abseil)
+10. **ARM NEON SIMD** for int32_t/uint32_t/int64_t/uint64_t keys on ARM64
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
@@ -221,6 +220,6 @@ Containa btree_map is now nearly performance-equivalent to Abseil for find (97%)
 | Iterate   | 87 us    | 23 us          | **3.78x** |
 
 ### Future Optimizations
-- AVX2/AVX-512 for 64-bit key SIMD search
+- AVX-512 for even faster SIMD search (current AVX2 handles 4 int64_t keys, AVX-512 could handle 8)
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration

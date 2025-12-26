@@ -27,6 +27,15 @@
 
 #define BTREE_DEBUG 0
 
+// Portable assume macro for compiler optimization hints
+#if defined(__clang__)
+#define BTREE_ASSUME(x) __builtin_assume(x)
+#elif defined(__GNUC__)
+#define BTREE_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#else
+#define BTREE_ASSUME(x) ((void)0)
+#endif
+
 // SIMD support detection
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -222,192 +231,258 @@ class btree_map
 
     // SIMD search helpers
 #ifdef BTREE_HAS_SSE2
-    // SSE2 lower_bound for int32_t keys - returns first index where keys[i] >= target
+    // SSE2 lower_bound for int32_t keys (signed)
     template <typename T>
-    static auto simd_lower_bound_int32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    static auto simd_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
     {
-        // Calculate stride between keys (for pair<Key,Value> layout)
         constexpr size_type stride = sizeof(T) / sizeof(int32_t);
         const auto* keys = reinterpret_cast<const int32_t*>(slots);
 
         __m128i target_vec = _mm_set1_epi32(target);
         size_type i = 0;
 
-        // Process 4 elements at a time
         while (i + 4 <= count) {
-            // Gather 4 keys (accounting for stride)
             __m128i key_vec =
               _mm_set_epi32(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
-
-            // Compare: mask of keys >= target (i.e., NOT keys < target)
             __m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
             int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
 
-            // If any key is NOT less than target (i.e., >= target), find first
-            if (mask != 0xF) {  // Not all are less than target
-                // Find first bit that is 0 (first key >= target)
-                int first_ge = __builtin_ctz(~mask & 0xF);
-                return i + first_ge;
+            if (mask != 0xF) {
+                return i + __builtin_ctz(~mask & 0xF);
             }
             i += 4;
         }
 
-        // Handle remaining elements with scalar code
         for (; i < count; ++i) {
-            if (keys[i * stride] >= target) {
-                return i;
-            }
+            if (keys[i * stride] >= target) return i;
         }
         return count;
     }
 
+    // SSE2 lower_bound for uint32_t keys (unsigned)
+    template <typename T>
+    static auto simd_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m128i sign_bit = _mm_set1_epi32(static_cast<int32_t>(0x80000000));
+        __m128i target_vec = _mm_xor_si128(_mm_set1_epi32(static_cast<int32_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128i key_vec = _mm_set_epi32(
+                static_cast<int32_t>(keys[(i + 3) * stride]),
+                static_cast<int32_t>(keys[(i + 2) * stride]),
+                static_cast<int32_t>(keys[(i + 1) * stride]),
+                static_cast<int32_t>(keys[i * stride]));
+            key_vec = _mm_xor_si128(key_vec, sign_bit);
+            __m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
+            int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
+
+            if (mask != 0xF) {
+                return i + __builtin_ctz(~mask & 0xF);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
 #endif
 
 #ifdef BTREE_HAS_AVX2
-    // AVX2 lower_bound for int64_t keys - returns first index where keys[i] >= target
+    // AVX2 lower_bound for int64_t keys (signed)
     template <typename T>
-    static auto simd_lower_bound_int64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    static auto simd_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int64_t))
     {
-        // Calculate stride between keys (for pair<Key,Value> layout)
         constexpr size_type stride = sizeof(T) / sizeof(int64_t);
         const auto* keys = reinterpret_cast<const int64_t*>(slots);
 
         __m256i target_vec = _mm256_set1_epi64x(target);
         size_type i = 0;
 
-        // Process 4 elements at a time with AVX2
         while (i + 4 <= count) {
-            // Gather 4 keys (accounting for stride)
             __m256i key_vec = _mm256_set_epi64x(
                 keys[(i + 3) * stride], keys[(i + 2) * stride],
                 keys[(i + 1) * stride], keys[i * stride]);
-
-            // Compare: mask of keys < target
             __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
             int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
 
-            // If any key is NOT less than target (i.e., >= target), find first
             if (mask != 0xF) {
-                int first_ge = __builtin_ctz(~mask & 0xF);
-                return i + first_ge;
+                return i + __builtin_ctz(~mask & 0xF);
             }
             i += 4;
         }
 
-        // Handle remaining elements with scalar code
         for (; i < count; ++i) {
-            if (keys[i * stride] >= target) {
-                return i;
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX2 lower_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto simd_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m256i sign_bit = _mm256_set1_epi64x(static_cast<int64_t>(0x8000000000000000ULL));
+        __m256i target_vec = _mm256_xor_si256(_mm256_set1_epi64x(static_cast<int64_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m256i key_vec = _mm256_set_epi64x(
+                static_cast<int64_t>(keys[(i + 3) * stride]),
+                static_cast<int64_t>(keys[(i + 2) * stride]),
+                static_cast<int64_t>(keys[(i + 1) * stride]),
+                static_cast<int64_t>(keys[i * stride]));
+            key_vec = _mm256_xor_si256(key_vec, sign_bit);
+            __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
+
+            if (mask != 0xF) {
+                return i + __builtin_ctz(~mask & 0xF);
             }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
         }
         return count;
     }
 #endif
 
 #ifdef BTREE_HAS_NEON
-    // NEON lower_bound for int32_t keys - returns first index where keys[i] >= target
+    // NEON lower_bound for int32_t keys (signed)
     template <typename T>
-    static auto neon_lower_bound_int32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    static auto neon_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
     {
-        // Calculate stride between keys (for pair<Key,Value> layout)
         constexpr size_type stride = sizeof(T) / sizeof(int32_t);
         const auto* keys = reinterpret_cast<const int32_t*>(slots);
 
         int32x4_t target_vec = vdupq_n_s32(target);
         size_type i = 0;
 
-        // Process 4 elements at a time with NEON
         while (i + 4 <= count) {
-            // Gather 4 keys (accounting for stride)
-            int32x4_t key_vec = {
-                keys[i * stride],
-                keys[(i + 1) * stride],
-                keys[(i + 2) * stride],
-                keys[(i + 3) * stride]
-            };
-
-            // Compare: mask of keys < target (vcltq returns 0xFFFFFFFF for true)
+            int32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride],
+                                 keys[(i + 2) * stride], keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_s32(key_vec, target_vec);
 
-            // Check if any key is NOT less than target
-            // vmaxvq_u32 returns max element - if any is 0, not all are less
             if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
-                // Find first key >= target using scalar loop
                 for (size_type j = 0; j < 4; ++j) {
-                    if (keys[(i + j) * stride] >= target) {
-                        return i + j;
-                    }
+                    if (keys[(i + j) * stride] >= target) return i + j;
                 }
             }
             i += 4;
         }
 
-        // Handle remaining elements with scalar code
         for (; i < count; ++i) {
-            if (keys[i * stride] >= target) {
-                return i;
-            }
+            if (keys[i * stride] >= target) return i;
         }
         return count;
     }
 
-    // NEON lower_bound for int64_t keys - returns first index where keys[i] >= target
+    // NEON lower_bound for uint32_t keys (unsigned)
     template <typename T>
-    static auto neon_lower_bound_int64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    static auto neon_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        uint32x4_t target_vec = vdupq_n_u32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            uint32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride],
+                                  keys[(i + 2) * stride], keys[(i + 3) * stride]};
+            uint32x4_t lt = vcltq_u32(key_vec, target_vec);
+
+            if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
+                for (size_type j = 0; j < 4; ++j) {
+                    if (keys[(i + j) * stride] >= target) return i + j;
+                }
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // NEON lower_bound for int64_t keys (signed)
+    template <typename T>
+    static auto neon_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int64_t))
     {
-        // Calculate stride between keys (for pair<Key,Value> layout)
         constexpr size_type stride = sizeof(T) / sizeof(int64_t);
         const auto* keys = reinterpret_cast<const int64_t*>(slots);
 
         int64x2_t target_vec = vdupq_n_s64(target);
         size_type i = 0;
 
-        // Process 2 elements at a time with NEON (128-bit = 2x64-bit)
         while (i + 2 <= count) {
-            // Gather 2 keys (accounting for stride)
-            int64x2_t key_vec = {
-                keys[i * stride],
-                keys[(i + 1) * stride]
-            };
-
-            // Compare: mask of keys < target
+            int64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
             uint64x2_t lt = vcltq_s64(key_vec, target_vec);
 
-            // Check if any key is NOT less than target
             if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
-                // Find first key >= target
                 if (keys[i * stride] >= target) return i;
                 if (keys[(i + 1) * stride] >= target) return i + 1;
             }
             i += 2;
         }
 
-        // Handle remaining element with scalar code
-        if (i < count && keys[i * stride] >= target) {
-            return i;
+        if (i < count && keys[i * stride] >= target) return i;
+        return count;
+    }
+
+    // NEON lower_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto neon_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        uint64x2_t target_vec = vdupq_n_u64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            uint64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
+            uint64x2_t lt = vcltq_u64(key_vec, target_vec);
+
+            if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
+                if (keys[i * stride] >= target) return i;
+                if (keys[(i + 1) * stride] >= target) return i + 1;
+            }
+            i += 2;
         }
+
+        if (i < count && keys[i * stride] >= target) return i;
         return count;
     }
 #endif
-
-    // Type traits for SIMD eligibility
-    template <typename T>
-    static constexpr bool is_simd32_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
-
-    template <typename T>
-    static constexpr bool is_simd64_eligible_v = std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>;
-
     // Binary search within a node using only keys for comparison
     // Returns first position where key >= slot
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_in_slots(
         const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
         // Hint to compiler about expected count range (typical btree has 15 slots)
-        __builtin_assume(count <= 32);
+        BTREE_ASSUME(count <= 32);
 
         size_type lo = 0;
         size_type hi = count;
@@ -427,22 +502,34 @@ class btree_map
         const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
         // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
-        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u32(leaf->slots, leaf->count, key);
         }
 #endif
 #ifdef BTREE_HAS_AVX2
-        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_int64(leaf->slots, leaf->count, static_cast<int64_t>(key));
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u64(leaf->slots, leaf->count, key);
         }
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON
-        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return neon_lower_bound_int32(leaf->slots, leaf->count, static_cast<int32_t>(key));
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s32(leaf->slots, leaf->count, key);
         }
-        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return neon_lower_bound_int64(leaf->slots, leaf->count, static_cast<int64_t>(key));
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u64(leaf->slots, leaf->count, key);
         }
 #endif
         return binary_search_in_slots(leaf->slots, leaf->count, key);
@@ -453,22 +540,34 @@ class btree_map
         const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
         // x86 SIMD paths
 #ifdef BTREE_HAS_SSE2
-        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u32(internal->slots, internal->count, key);
         }
 #endif
 #ifdef BTREE_HAS_AVX2
-        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_int64(internal->slots, internal->count, static_cast<int64_t>(key));
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u64(internal->slots, internal->count, key);
         }
 #endif
         // ARM NEON paths
 #ifdef BTREE_HAS_NEON
-        if constexpr (is_simd32_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return neon_lower_bound_int32(internal->slots, internal->count, static_cast<int32_t>(key));
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s32(internal->slots, internal->count, key);
         }
-        if constexpr (is_simd64_eligible_v<Key> && std::is_same_v<Compare, std::less<Key>>) {
-            return neon_lower_bound_int64(internal->slots, internal->count, static_cast<int64_t>(key));
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_lower_bound_u64(internal->slots, internal->count, key);
         }
 #endif
         return binary_search_in_slots(internal->slots, internal->count, key);
