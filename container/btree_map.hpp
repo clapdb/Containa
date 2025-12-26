@@ -265,9 +265,11 @@ class btree_map
     template <typename T>
     static constexpr bool is_simd_eligible_v = std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>;
 
-    // Binary search within a node - returns first position where key <= slot
+    // Binary search within a node - returns first position where key >= slot
+    // Optimized with force inline and branch hints
     template <typename Slots>
-    [[nodiscard]] auto binary_search_in_slots(const Slots* slots, size_type count, const Key& key) const noexcept
+    [[nodiscard]] __attribute__((always_inline)) auto binary_search_in_slots(const Slots* slots, size_type count,
+                                                                              const Key& key) const noexcept
       -> size_type {
         size_type lo = 0;
         size_type hi = count;
@@ -987,26 +989,28 @@ class btree_map
             _root = create_leaf();
         }
 
-        // Find insertion point
+        // Find insertion point - traverse to leaf
         node_base* node = _root;
         while (!node->is_leaf_node()) {
             auto* internal = static_cast<internal_node*>(node);
             size_type pos = lower_bound_in_node(node, key);
 
-            // Check for exact match
-            if (pos < node->count && !_comp(key, internal->key(pos)) && !_comp(internal->key(pos), key)) {
+            // Check for exact match (single comparison optimization)
+            if (pos < node->count && !_comp(key, internal->key(pos))) {
                 return {iterator(node, pos), false};  // Key already exists
             }
 
-            node = internal->children[pos];
+            node_base* next = internal->children[pos];
+            __builtin_prefetch(next, 0, 3);  // Prefetch next node
+            node = next;
         }
 
         // Now at leaf
         auto* leaf = static_cast<leaf_node*>(node);
         size_type pos = lower_bound_in_node(leaf, key);
 
-        // Check for exact match
-        if (pos < leaf->count && !_comp(key, leaf->key(pos)) && !_comp(leaf->key(pos), key)) {
+        // Check for exact match (single comparison since lower_bound guarantees key <= slot[pos])
+        if (pos < leaf->count && !_comp(key, leaf->key(pos))) {
             return {iterator(leaf, pos), false};  // Key already exists
         }
 
@@ -1019,28 +1023,35 @@ class btree_map
 
   public:
 
-    // Find
+    // Find - optimized with single comparison for equality
     [[nodiscard]] auto find(const Key& key) -> iterator {
-        if (_root == nullptr) return end();
+        if (_root == nullptr) [[unlikely]] {
+            return end();
+        }
 
         node_base* node = _root;
         while (true) {
             size_type pos = lower_bound_in_node(node, key);
 
-            if (node->is_leaf_node()) {
+            if (node->is_leaf_node()) [[likely]] {
                 auto* leaf = static_cast<leaf_node*>(node);
-                if (pos < leaf->count && !_comp(key, leaf->key(pos)) && !_comp(leaf->key(pos), key)) {
+                // lower_bound gives first pos where slot[pos] >= key (i.e., !(slot[pos] < key))
+                // For equality: need !(key < slot[pos]) in addition
+                if (pos < leaf->count && !_comp(key, leaf->key(pos))) {
                     return iterator(leaf, pos);
                 }
                 return end();
             }
 
             auto* internal = static_cast<internal_node*>(node);
-            if (pos < internal->count && !_comp(key, internal->key(pos)) && !_comp(internal->key(pos), key)) {
+            // For internal nodes, check if we found exact match
+            if (pos < internal->count && !_comp(key, internal->key(pos))) {
                 return iterator(internal, pos);
             }
 
-            node = internal->children[pos];
+            node_base* next = internal->children[pos];
+            __builtin_prefetch(next, 0, 3);
+            node = next;
         }
     }
 

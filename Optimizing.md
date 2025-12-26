@@ -170,35 +170,42 @@ btree_map fully supports non-trivially-copyable types like `std::string`.
 stdb::container::btree_map_auto<std::string, std::string> map;
 ```
 
-**vs Abseil btree_map (10K string entries, using btree_map_auto):**
+**vs Abseil btree_map (10K string entries, -O3 -march=native):**
 
 | Operation | Abseil   | Containa  | Ratio |
 |-----------|----------|-----------|-------|
-| Insert    | 1449 us  | 1586 us   | **0.91x** (9% slower) |
-| Find      | 923 us   | 949 us    | **0.97x** (3% slower) |
-| Iterate   | 100 us   | 23 us     | **4.35x faster** |
+| Insert    | 1545 us  | 1579 us   | **0.98x** (2% slower) |
+| Find      | 764 us   | 930 us    | **0.82x** (18% slower) |
+| Iterate   | 85 us    | 20 us     | **4.25x faster** |
 
 **Key Optimizations Applied:**
 1. **Binary search** within nodes (O(log n) vs O(n) per node)
 2. **Move semantics** for efficient string insertion without copies
 3. **Automatic node sizing** - larger nodes for larger types (1024 bytes for strings)
 4. **Perfect forwarding** throughout the insert path
+5. **Single comparison** for equality checks (leveraging lower_bound guarantee)
+6. **Cache prefetching** during tree traversal
+7. **Force-inline** for hot path functions
 
 **Node Size Selection:**
 - `btree_map<K,V>` uses 256-byte nodes (default)
 - `btree_map_auto<K,V>` automatically selects node size to ensure ≥15 slots
 - For `pair<string,string>` (64 bytes), this means 1024-byte nodes
 
+**Why Find is Still Slower:**
+Abseil separates keys and values in their node layout, improving cache efficiency during binary search (only touches keys, not values). Our layout stores key-value pairs together. This is a significant architectural difference that would require major refactoring to match.
+
 **vs std::map (10K string entries):**
 
 | Operation | std::map | btree_map_auto | Speedup |
 |-----------|----------|----------------|---------|
-| Insert    | 2199 us  | 1586 us        | **1.39x** |
-| Find      | 1263 us  | 949 us         | **1.33x** |
-| Iterate   | 84 us    | 23 us          | **3.65x** |
+| Insert    | 2199 us  | 1579 us        | **1.39x** |
+| Find      | 1263 us  | 930 us         | **1.36x** |
+| Iterate   | 84 us    | 20 us          | **4.20x** |
 
 ### Future Optimizations
 
+- **Split key-value layout** - Store keys and values separately for better cache efficiency during search
 - AVX2/AVX-512 for 64-bit key SIMD search
 - Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
