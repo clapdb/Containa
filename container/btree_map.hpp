@@ -95,6 +95,16 @@ concept string_like = requires(const T& a) {
     { a.size() } -> std::convertible_to<std::size_t>;
 };
 
+// Trait to detect transparent comparators (have is_transparent type member)
+template <typename, typename = void>
+struct is_transparent_comparator : std::false_type {};
+
+template <typename T>
+struct is_transparent_comparator<T, std::void_t<typename T::is_transparent>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_transparent_comparator_v = is_transparent_comparator<T>::value;
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 template <typename Key, typename Value>
@@ -112,6 +122,7 @@ constexpr std::size_t optimal_node_size() {
 }
 
 template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>,
           std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
 class btree_map
 {
@@ -122,6 +133,7 @@ class btree_map
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
     using key_compare = Compare;
+    using allocator_type = Allocator;
     using reference = value_type&;
     using const_reference = const value_type&;
     using pointer = value_type*;
@@ -142,6 +154,50 @@ class btree_map
         using second_argument_type [[deprecated]] = value_type;
 
         bool operator()(const value_type& lhs, const value_type& rhs) const { return comp(lhs.first, rhs.first); }
+    };
+
+    // Node handle for extract/insert operations (C++17)
+    class node_type
+    {
+        friend class btree_map;
+
+       public:
+        using key_type = Key;
+        using mapped_type = Value;
+
+        node_type() noexcept = default;
+        node_type(node_type&& other) noexcept : _storage(std::move(other._storage)), _valid(other._valid) {
+            other._valid = false;
+        }
+
+        node_type& operator=(node_type&& other) noexcept {
+            if (this != &other) {
+                _storage = std::move(other._storage);
+                _valid = other._valid;
+                other._valid = false;
+            }
+            return *this;
+        }
+
+        ~node_type() = default;
+
+        [[nodiscard]] bool empty() const noexcept { return !_valid; }
+        explicit operator bool() const noexcept { return _valid; }
+
+        [[nodiscard]] key_type& key() { return _storage.first; }
+        [[nodiscard]] mapped_type& mapped() { return _storage.second; }
+
+        void swap(node_type& other) noexcept {
+            std::swap(_storage, other._storage);
+            std::swap(_valid, other._valid);
+        }
+
+       private:
+        explicit node_type(Key&& k, Value&& v) : _storage(std::move(k), std::move(v)), _valid(true) {}
+        explicit node_type(const Key& k, Value&& v) : _storage(k, std::move(v)), _valid(true) {}
+
+        std::pair<Key, Value> _storage;
+        bool _valid = false;
     };
 
    private:
@@ -219,10 +275,16 @@ class btree_map
         [[nodiscard]] auto value(size_type i) noexcept -> Value& { return slots[i].second; }
     };
 
+    // Allocator types for node allocation
+    using leaf_allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<leaf_node>;
+    using internal_allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<internal_node>;
+
     // Root node and tree state
     node_base* _root = nullptr;
     size_type _size = 0;
-    Compare _comp;
+    [[no_unique_address]] Compare _comp;
+    [[no_unique_address]] leaf_allocator_type _leaf_alloc;
+    [[no_unique_address]] internal_allocator_type _internal_alloc;
 
     // Helper to get key at position
     [[nodiscard]] auto get_key(const node_base* node, size_type pos) const noexcept -> const Key& {
@@ -3159,7 +3221,13 @@ class btree_map
             return tmp;
         }
 
-        [[nodiscard]] auto base() const -> iterator { return iterator(_node, _pos); }
+        [[nodiscard]] auto base() const -> iterator {
+            // Standard semantics: *rit == *std::prev(rit.base())
+            // So base() returns iterator one position ahead
+            iterator it(_node, _pos);
+            ++it;
+            return it;
+        }
 
         friend auto operator==(const reverse_iterator& a, const reverse_iterator& b) -> bool {
             if (a._is_end && b._is_end) return true;
@@ -3277,7 +3345,13 @@ class btree_map
             return tmp;
         }
 
-        [[nodiscard]] auto base() const -> const_iterator { return const_iterator(_node, _pos); }
+        [[nodiscard]] auto base() const -> const_iterator {
+            // Standard semantics: *rit == *std::prev(rit.base())
+            // So base() returns iterator one position ahead
+            const_iterator it(_node, _pos);
+            ++it;
+            return it;
+        }
 
         friend auto operator==(const const_reverse_iterator& a, const const_reverse_iterator& b) -> bool {
             if (a._is_end && b._is_end) return true;
@@ -3290,28 +3364,110 @@ class btree_map
         }
     };
 
+    // Insert return type for node handle insertion (C++17)
+    struct insert_return_type {
+        iterator position;
+        bool inserted;
+        node_type node;
+    };
+
     // Constructors
     btree_map() = default;
 
-    explicit btree_map(const Compare& comp) : _comp(comp) {}
+    explicit btree_map(const Compare& comp, const Allocator& alloc = Allocator())
+        : _comp(comp), _leaf_alloc(alloc), _internal_alloc(alloc) {}
 
-    btree_map(std::initializer_list<value_type> init, const Compare& comp = Compare()) : _comp(comp) {
+    explicit btree_map(const Allocator& alloc)
+        : _leaf_alloc(alloc), _internal_alloc(alloc) {}
+
+    btree_map(std::initializer_list<value_type> init, const Compare& comp = Compare(),
+              const Allocator& alloc = Allocator())
+        : _comp(comp), _leaf_alloc(alloc), _internal_alloc(alloc) {
         for (const auto& [k, v] : init) {
             insert(k, v);
+        }
+    }
+
+    btree_map(std::initializer_list<value_type> init, const Allocator& alloc)
+        : _leaf_alloc(alloc), _internal_alloc(alloc) {
+        for (const auto& [k, v] : init) {
+            insert(k, v);
+        }
+    }
+
+    // Range constructor - construct from iterator range
+    template <typename InputIt>
+        requires requires(InputIt it) {
+            { *it } -> std::convertible_to<value_type>;
+            ++it;
+        }
+    btree_map(InputIt first, InputIt last, const Compare& comp = Compare(),
+              const Allocator& alloc = Allocator())
+        : _comp(comp), _leaf_alloc(alloc), _internal_alloc(alloc) {
+        for (; first != last; ++first) {
+            insert(*first);
+        }
+    }
+
+    template <typename InputIt>
+        requires requires(InputIt it) {
+            { *it } -> std::convertible_to<value_type>;
+            ++it;
+        }
+    btree_map(InputIt first, InputIt last, const Allocator& alloc)
+        : _leaf_alloc(alloc), _internal_alloc(alloc) {
+        for (; first != last; ++first) {
+            insert(*first);
         }
     }
 
     ~btree_map() { destroy_node(_root); }
 
     // Copy constructor - O(n) deep copy of tree structure
-    btree_map(const btree_map& other) : _comp(other._comp), _size(other._size) {
+    btree_map(const btree_map& other)
+        : _comp(other._comp),
+          _size(other._size),
+          _leaf_alloc(std::allocator_traits<leaf_allocator_type>::select_on_container_copy_construction(
+              other._leaf_alloc)),
+          _internal_alloc(std::allocator_traits<internal_allocator_type>::select_on_container_copy_construction(
+              other._internal_alloc)) {
+        _root = deep_copy_node(other._root, nullptr);
+    }
+
+    // Copy constructor with allocator
+    btree_map(const btree_map& other, const Allocator& alloc)
+        : _comp(other._comp), _size(other._size), _leaf_alloc(alloc), _internal_alloc(alloc) {
         _root = deep_copy_node(other._root, nullptr);
     }
 
     // Move constructor
-    btree_map(btree_map&& other) noexcept : _root(other._root), _size(other._size), _comp(std::move(other._comp)) {
+    btree_map(btree_map&& other) noexcept
+        : _root(other._root),
+          _size(other._size),
+          _comp(std::move(other._comp)),
+          _leaf_alloc(std::move(other._leaf_alloc)),
+          _internal_alloc(std::move(other._internal_alloc)) {
         other._root = nullptr;
         other._size = 0;
+    }
+
+    // Move constructor with allocator
+    btree_map(btree_map&& other, const Allocator& alloc)
+        : _comp(std::move(other._comp)), _leaf_alloc(alloc), _internal_alloc(alloc) {
+        if (_leaf_alloc == other._leaf_alloc) {
+            // Same allocator - can steal resources
+            _root = other._root;
+            _size = other._size;
+            other._root = nullptr;
+            other._size = 0;
+        } else {
+            // Different allocator - must copy elements
+            _size = 0;
+            for (auto&& [k, v] : other) {
+                insert(std::move(const_cast<Key&>(k)), std::move(v));
+            }
+            other.clear();
+        }
     }
 
     // Copy assignment - O(n) deep copy of tree structure
@@ -3349,12 +3505,11 @@ class btree_map
         _size = 0;
     }
 
-    // Insert a key-value pair (const lvalue version)
-    auto insert(const Key& key, const Value& value) -> std::pair<iterator, bool> { return insert_impl(key, value); }
-
-    // Insert a key-value pair (rvalue version for value - avoids copy)
-    auto insert(const Key& key, Value&& value) -> std::pair<iterator, bool> {
-        return insert_impl(key, std::move(value));
+    // Insert a key-value pair with perfect forwarding
+    template <typename K, typename V>
+        requires std::is_convertible_v<K&&, Key> && std::is_convertible_v<V&&, Value>
+    auto insert(K&& key, V&& value) -> std::pair<iterator, bool> {
+        return insert_impl(std::forward<K>(key), std::forward<V>(value));
     }
 
     // Insert with value_type
@@ -3790,6 +3945,84 @@ class btree_map
         return it;
     }
 
+    // Internal find implementation supporting heterogeneous lookup
+    template <typename K>
+    [[nodiscard]] auto find_impl(const K& key) -> iterator {
+        node_base* node = _root;
+        if (node == nullptr) [[unlikely]] {
+            return end();
+        }
+
+        // Traverse internal nodes
+        while (!node->is_leaf_node()) [[likely]] {
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = lower_bound_generic(internal, key);
+
+            // Check for exact match in internal node
+            if (pos < internal->count) [[likely]] {
+                // Use equivalence check: !comp(a,b) && !comp(b,a)
+                if (!_comp(key, internal->key(pos)) && !_comp(internal->key(pos), key)) [[unlikely]] {
+                    return iterator(internal, pos);
+                }
+            }
+
+            node = internal->children[pos];
+        }
+
+        // At leaf node
+        auto* leaf = static_cast<leaf_node*>(node);
+        size_type pos = lower_bound_generic(leaf, key);
+        if (pos < leaf->count && !_comp(key, leaf->key(pos)) && !_comp(leaf->key(pos), key)) [[likely]] {
+            return iterator(leaf, pos);
+        }
+        return end();
+    }
+
+    // Generic lower_bound for heterogeneous lookup (no SIMD, uses comparator)
+    template <typename K, typename Node>
+    [[nodiscard]] auto lower_bound_generic(const Node* node, const K& key) const noexcept -> size_type {
+        size_type lo = 0;
+        size_type hi = node->count;
+        while (lo < hi) {
+            size_type mid = lo + (hi - lo) / 2;
+            if (_comp(node->key(mid), key)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    // Internal lower_bound implementation supporting heterogeneous lookup
+    template <typename K>
+    [[nodiscard]] auto lower_bound_impl(const K& key) -> iterator {
+        if (_root == nullptr) return end();
+
+        node_base* node = _root;
+        iterator result = end();
+
+        while (true) {
+            if (node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(node);
+                size_type pos = lower_bound_generic(leaf, key);
+                if (pos < leaf->count) {
+                    return iterator(leaf, pos);
+                }
+                return result;
+            }
+
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = lower_bound_generic(internal, key);
+            if (pos < internal->count) {
+                if (!_comp(internal->key(pos), key)) {
+                    result = iterator(internal, pos);
+                }
+            }
+            node = internal->children[pos];
+        }
+    }
+
    public:
     // Find - optimized with type-specialized search and minimal branching
     [[nodiscard]] __attribute__((hot)) auto find(const Key& key) -> iterator {
@@ -3849,6 +4082,19 @@ class btree_map
         return const_iterator(const_cast<btree_map*>(this)->find(key));
     }
 
+    // Heterogeneous lookup - find with transparent comparator
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto find(const K& key) -> iterator {
+        return find_impl(key);
+    }
+
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto find(const K& key) const -> const_iterator {
+        return const_iterator(const_cast<btree_map*>(this)->find_impl(key));
+    }
+
     // operator[] - uses try_emplace to avoid constructing Value if key exists
     auto operator[](const Key& key) -> Value& {
         auto [it, inserted] = try_emplace(key);
@@ -3893,8 +4139,22 @@ class btree_map
     // contains
     [[nodiscard]] auto contains(const Key& key) const -> bool { return find(key) != end(); }
 
+    // Heterogeneous contains
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto contains(const K& key) const -> bool {
+        return const_cast<btree_map*>(this)->find_impl(key) != end();
+    }
+
     // count
     [[nodiscard]] auto count(const Key& key) const -> size_type { return contains(key) ? 1 : 0; }
+
+    // Heterogeneous count
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto count(const K& key) const -> size_type {
+        return contains(key) ? 1 : 0;
+    }
 
     // lower_bound
     [[nodiscard]] auto lower_bound(const Key& key) -> iterator {
@@ -3942,6 +4202,36 @@ class btree_map
     }
 
     [[nodiscard]] auto upper_bound(const Key& key) const -> const_iterator {
+        return const_iterator(const_cast<btree_map*>(this)->upper_bound(key));
+    }
+
+    // Heterogeneous lower_bound
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto lower_bound(const K& key) -> iterator {
+        return lower_bound_impl(key);
+    }
+
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto lower_bound(const K& key) const -> const_iterator {
+        return const_iterator(const_cast<btree_map*>(this)->lower_bound_impl(key));
+    }
+
+    // Heterogeneous upper_bound
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto upper_bound(const K& key) -> iterator {
+        auto it = lower_bound(key);
+        if (it != end() && !_comp(key, it->first) && !_comp(it->first, key)) {
+            ++it;
+        }
+        return it;
+    }
+
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto upper_bound(const K& key) const -> const_iterator {
         return const_iterator(const_cast<btree_map*>(this)->upper_bound(key));
     }
 
@@ -3994,6 +4284,19 @@ class btree_map
     // Erase by key - O(log n) with proper B-tree rebalancing
     auto erase(const Key& key) -> size_type {
         auto it = find(key);
+        if (it == end()) {
+            return 0;
+        }
+
+        erase_impl(it._node, it._pos);
+        return 1;
+    }
+
+    // Heterogeneous erase by key
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    auto erase(const K& key) -> size_type {
+        auto it = find_impl(key);
         if (it == end()) {
             return 0;
         }
@@ -4076,6 +4379,82 @@ class btree_map
         return it;
     }
 
+    // Extract node by position (C++17)
+    auto extract(const_iterator pos) -> node_type {
+        if (pos == end()) {
+            return node_type{};
+        }
+
+        // Get key and value before erasing
+        Key key = pos->first;
+        Value value = std::move(const_cast<Value&>(pos->second));
+
+        // Erase the element
+        erase(pos);
+
+        return node_type(std::move(key), std::move(value));
+    }
+
+    // Extract node by key (C++17)
+    auto extract(const Key& key) -> node_type {
+        auto it = find(key);
+        if (it == end()) {
+            return node_type{};
+        }
+        return extract(it);
+    }
+
+    // Heterogeneous extract by key
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    auto extract(const K& key) -> node_type {
+        auto it = find_impl(key);
+        if (it == end()) {
+            return node_type{};
+        }
+        return extract(const_iterator(it._node, it._pos));
+    }
+
+    // Extract and get next iterator (absl extension)
+    auto extract_and_get_next(const_iterator pos) -> std::pair<node_type, iterator> {
+        if (pos == end()) {
+            return {node_type{}, end()};
+        }
+
+        // Get key and value before erasing
+        Key key = pos->first;
+        Value value = std::move(const_cast<Value&>(pos->second));
+
+        // Erase returns iterator to next element
+        iterator next = erase(pos);
+
+        return {node_type(std::move(key), std::move(value)), next};
+    }
+
+    // Insert node handle (C++17)
+    auto insert(node_type&& nh) -> insert_return_type {
+        if (nh.empty()) {
+            return {end(), false, std::move(nh)};
+        }
+
+        auto [it, inserted] = insert(std::move(nh._storage.first), std::move(nh._storage.second));
+        if (inserted) {
+            nh._valid = false;
+            return {it, true, node_type{}};
+        }
+        return {it, false, std::move(nh)};
+    }
+
+    // Insert node handle with hint (C++17)
+    auto insert(const_iterator hint, node_type&& nh) -> iterator {
+        if (nh.empty()) {
+            return end();
+        }
+
+        auto result = insert(std::move(nh));
+        return result.position;
+    }
+
     // equal_range - returns pair of iterators (lower_bound, upper_bound)
     // Optimized: single traversal since this is a unique-key map
     [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
@@ -4100,11 +4479,41 @@ class btree_map
         return {lb, ub};
     }
 
+    // Heterogeneous equal_range
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto equal_range(const K& key) -> std::pair<iterator, iterator> {
+        auto lb = lower_bound(key);
+        if (lb == end() || _comp(key, lb->first)) {
+            return {lb, lb};
+        }
+        auto ub = lb;
+        ++ub;
+        return {lb, ub};
+    }
+
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    [[nodiscard]] auto equal_range(const K& key) const -> std::pair<const_iterator, const_iterator> {
+        auto lb = lower_bound(key);
+        if (lb == end() || _comp(key, lb->first)) {
+            return {lb, lb};
+        }
+        auto ub = lb;
+        ++ub;
+        return {lb, ub};
+    }
+
     // swap
     void swap(btree_map& other) noexcept {
         std::swap(_root, other._root);
         std::swap(_size, other._size);
         std::swap(_comp, other._comp);
+        // Swap allocators if propagate_on_container_swap is true
+        if constexpr (std::allocator_traits<Allocator>::propagate_on_container_swap::value) {
+            std::swap(_leaf_alloc, other._leaf_alloc);
+            std::swap(_internal_alloc, other._internal_alloc);
+        }
     }
 
     // max_size - theoretical maximum
@@ -4118,32 +4527,47 @@ class btree_map
     // value_comp - returns the value comparison function
     [[nodiscard]] auto value_comp() const -> value_compare { return value_compare(_comp); }
 
+    // get_allocator - returns the allocator (C++11)
+    [[nodiscard]] auto get_allocator() const noexcept -> allocator_type {
+        return allocator_type(_leaf_alloc);
+    }
+
     // merge - merge elements from another btree_map (C++17)
-    template <typename C2, std::size_t N2>
-    void merge(btree_map<Key, Value, C2, N2>& source) {
+    template <typename C2, typename A2, std::size_t N2>
+    void merge(btree_map<Key, Value, C2, A2, N2>& source) {
         for (auto it = source.begin(); it != source.end();) {
             auto [insert_it, inserted] = insert(it->first, it->second);
             if (inserted) {
-                auto next = it;
-                ++next;
-                source.erase(it);
-                it = next;
+                // Use erase return value - getting next before erase is unsafe
+                // because erase can rebalance and free nodes
+                it = source.erase(it);
             } else {
                 ++it;
             }
         }
     }
 
-    template <typename C2, std::size_t N2>
-    void merge(btree_map<Key, Value, C2, N2>&& source) {
+    template <typename C2, typename A2, std::size_t N2>
+    void merge(btree_map<Key, Value, C2, A2, N2>&& source) {
         merge(source);
     }
 
     // insert with iterator range
     template <typename InputIt>
+        requires requires(InputIt it) {
+            { *it } -> std::convertible_to<value_type>;
+            ++it;
+        }
     void insert(InputIt first, InputIt last) {
         for (; first != last; ++first) {
             insert(*first);
+        }
+    }
+
+    // insert with initializer_list
+    void insert(std::initializer_list<value_type> ilist) {
+        for (const auto& elem : ilist) {
+            insert(elem);
         }
     }
 
@@ -4213,18 +4637,21 @@ using btree_map_auto = btree_map<Key, Value, Compare>;
 
 // Explicit 256-byte node size for when you want minimal memory footprint
 // at the cost of potentially fewer slots for large value types
-template <typename Key, typename Value, typename Compare = std::less<Key>>
-using btree_map_compact = btree_map<Key, Value, Compare, 256>;
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>>
+using btree_map_compact = btree_map<Key, Value, Compare, Allocator, 256>;
 
 // Non-member swap (C++17)
-template <typename Key, typename Value, typename Compare, std::size_t N>
-void swap(btree_map<Key, Value, Compare, N>& lhs, btree_map<Key, Value, Compare, N>& rhs) noexcept {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N>
+void swap(btree_map<Key, Value, Compare, Allocator, N>& lhs,
+          btree_map<Key, Value, Compare, Allocator, N>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
 // erase_if - erase all elements satisfying predicate (C++20)
-template <typename Key, typename Value, typename Compare, std::size_t N, typename Pred>
-typename btree_map<Key, Value, Compare, N>::size_type erase_if(btree_map<Key, Value, Compare, N>& c, Pred pred) {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename Pred>
+typename btree_map<Key, Value, Compare, Allocator, N>::size_type
+erase_if(btree_map<Key, Value, Compare, Allocator, N>& c, Pred pred) {
     auto old_size = c.size();
     for (auto it = c.begin(); it != c.end();) {
         if (pred(*it)) {
