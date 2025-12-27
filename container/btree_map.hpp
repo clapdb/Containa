@@ -2294,8 +2294,12 @@ class btree_map
         delete right;
     }
 
-    // Rebalance after deletion - handles underflow
-    void rebalance_after_erase(node_base* node) {
+    // Rebalance after deletion - handles underflow and tracks iterator position
+    // res_node/res_pos: on entry, the position of the "next" element (in the erased leaf)
+    //                   on exit, adjusted to reflect moves during rebalancing
+    void rebalance_after_erase_with_iterator(node_base* node, node_base*& res_node, size_type& res_pos) {
+        bool first_iteration = true;
+
         while (node != _root) {
             auto* parent = static_cast<internal_node*>(node->parent);
             size_type pos = node->position;
@@ -2307,6 +2311,9 @@ class btree_map
                 return;  // No underflow
             }
 
+            // Track if result is in this node (only matters on first iteration for leaves)
+            bool result_in_node = first_iteration && is_leaf && (res_node == node);
+
             // Try to borrow from left sibling
             if (pos > 0) {
                 node_base* left_sibling = parent->children[pos - 1];
@@ -2314,6 +2321,10 @@ class btree_map
                     auto* left_leaf = static_cast<leaf_node*>(left_sibling);
                     if (can_spare_leaf(left_leaf)) {
                         borrow_from_left_leaf(static_cast<leaf_node*>(node), left_leaf, parent, pos);
+                        // Borrow from left shifts all elements right by 1
+                        if (result_in_node) {
+                            res_pos += 1;
+                        }
                         return;
                     }
                 } else {
@@ -2332,6 +2343,7 @@ class btree_map
                     auto* right_leaf = static_cast<leaf_node*>(right_sibling);
                     if (can_spare_leaf(right_leaf)) {
                         borrow_from_right_leaf(static_cast<leaf_node*>(node), right_leaf, parent, pos);
+                        // Borrow from right doesn't change positions of existing elements
                         return;
                     }
                 } else {
@@ -2347,7 +2359,14 @@ class btree_map
             if (pos > 0) {
                 node_base* left_sibling = parent->children[pos - 1];
                 if (is_leaf) {
-                    merge_leaves(static_cast<leaf_node*>(left_sibling), static_cast<leaf_node*>(node), parent, pos - 1);
+                    auto* left_leaf = static_cast<leaf_node*>(left_sibling);
+                    size_type left_count = left_leaf->count;
+                    merge_leaves(left_leaf, static_cast<leaf_node*>(node), parent, pos - 1);
+                    // Elements moved to left: new_pos = left_count + 1 (separator) + old_pos
+                    if (result_in_node) {
+                        res_node = left_sibling;
+                        res_pos = left_count + 1 + res_pos;
+                    }
                 } else {
                     merge_internal_nodes(static_cast<internal_node*>(left_sibling), static_cast<internal_node*>(node),
                                          parent, pos - 1);
@@ -2356,12 +2375,24 @@ class btree_map
                 // Merge with right sibling
                 node_base* right_sibling = parent->children[pos + 1];
                 if (is_leaf) {
-                    merge_leaves(static_cast<leaf_node*>(node), static_cast<leaf_node*>(right_sibling), parent, pos);
+                    auto* right_leaf = static_cast<leaf_node*>(right_sibling);
+                    // Check if result is in the right sibling
+                    bool result_in_right = first_iteration && (res_node == right_sibling);
+                    size_type node_count = static_cast<leaf_node*>(node)->count;
+                    merge_leaves(static_cast<leaf_node*>(node), right_leaf, parent, pos);
+                    // Right's elements moved to us: new_pos = node_count + 1 (separator) + old_pos
+                    if (result_in_right) {
+                        res_node = node;
+                        res_pos = node_count + 1 + res_pos;
+                    }
+                    // If result was in our node, position doesn't change
                 } else {
                     merge_internal_nodes(static_cast<internal_node*>(node), static_cast<internal_node*>(right_sibling),
                                          parent, pos);
                 }
             }
+
+            first_iteration = false;
 
             // Check if parent needs rebalancing
             if (parent == _root && parent->count == 0) {
@@ -2376,6 +2407,13 @@ class btree_map
 
             node = parent;
         }
+    }
+
+    // Original version without iterator tracking (for internal use)
+    void rebalance_after_erase(node_base* node) {
+        node_base* dummy_node = nullptr;
+        size_type dummy_pos = 0;
+        rebalance_after_erase_with_iterator(node, dummy_node, dummy_pos);
     }
 
     // Main erase implementation
@@ -3611,11 +3649,50 @@ class btree_map
             }
         }
 
-        // Fall back to lower_bound - move key from internal storage instead of copying
+        // Use iterator tracking through rebalancing instead of lower_bound
         auto* leaf = static_cast<leaf_node*>(pos._node);
-        Key erased_key = std::move(leaf->slots[pos._pos].first);
-        erase_impl(pos._node, pos._pos);
-        return lower_bound(erased_key);
+        size_type erase_pos = pos._pos;
+
+        // Remove the element
+        remove_slot_from_leaf(leaf, erase_pos);
+        --_size;
+
+        // Handle root leaf becoming empty
+        if (leaf == _root && leaf->count == 0) {
+            delete leaf;
+            _root = nullptr;
+            return end();
+        }
+
+        // Determine initial "next" position
+        node_base* res_node = leaf;
+        size_type res_pos = erase_pos;
+        bool need_advance = (erase_pos >= leaf->count);
+
+        // Rebalance if needed, tracking iterator position
+        if (leaf != _root && leaf->count < kMinLeafSlots) {
+            rebalance_after_erase_with_iterator(leaf, res_node, res_pos);
+        }
+
+        // Build result iterator
+        if (_root == nullptr) {
+            return end();
+        }
+
+        // If position is past end of node, advance to next element
+        auto* res_leaf = static_cast<leaf_node*>(res_node);
+        if (need_advance || res_pos >= res_leaf->count) {
+            // Go to last valid position and increment
+            if (res_leaf->count > 0) {
+                iterator it(res_leaf, res_leaf->count - 1);
+                ++it;
+                return it;
+            } else {
+                return end();
+            }
+        }
+
+        return iterator(res_node, res_pos);
     }
 
     auto erase(const_iterator pos) -> iterator { return erase(iterator(const_cast<node_base*>(pos._node), pos._pos)); }
