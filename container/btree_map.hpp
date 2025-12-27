@@ -1728,9 +1728,8 @@ class btree_map
             if constexpr (std::is_trivially_copyable_v<storage_type>) {
                 std::memmove(&leaf->slots[pos + 1], &leaf->slots[pos], (count - pos) * sizeof(storage_type));
             } else {
-                for (size_type i = count; i > pos; --i) {
-                    leaf->slots[i] = std::move(leaf->slots[i - 1]);
-                }
+                // Use std::move_backward for potentially better optimization
+                std::move_backward(&leaf->slots[pos], &leaf->slots[count], &leaf->slots[count + 1]);
             }
         }
         leaf->slots[pos].first = std::forward<K>(key);
@@ -1748,9 +1747,8 @@ class btree_map
             if constexpr (std::is_trivially_copyable_v<storage_type>) {
                 std::memmove(&node->slots[pos + 1], &node->slots[pos], (count - pos) * sizeof(storage_type));
             } else {
-                for (size_type i = count; i > pos; --i) {
-                    node->slots[i] = std::move(node->slots[i - 1]);
-                }
+                // Use std::move_backward for potentially better optimization
+                std::move_backward(&node->slots[pos], &node->slots[count], &node->slots[count + 1]);
             }
             // Move children pointers
             std::memmove(&node->children[pos + 2], &node->children[pos + 1], (count - pos) * sizeof(node_base*));
