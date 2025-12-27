@@ -3505,7 +3505,36 @@ class btree_map
             }
         }
 
-        // Complex case: might need rebalancing, fall back to lower_bound
+        // Complex case: might need rebalancing
+        // Optimization: if next element is in a different subtree (not sibling), it survives rebalancing
+        iterator next = pos;
+        ++next;
+
+        if (next != end() && next._node != pos._node) {
+            // Next is in a different node - check if it's a sibling (could be affected by rebalancing)
+            auto* pos_leaf = static_cast<leaf_node*>(pos._node);
+            bool next_is_safe = true;
+
+            if (pos_leaf->parent != nullptr) {
+                // Check if next's leaf is the right sibling of pos's leaf
+                // Right sibling could be merged during rebalancing
+                auto* parent = static_cast<internal_node*>(pos_leaf->parent);
+                size_type pos_idx = pos_leaf->position;
+
+                // The right sibling is at position pos_idx + 1
+                if (pos_idx < parent->count && parent->children[pos_idx + 1] == next._node) {
+                    next_is_safe = false;  // Next is in right sibling, could be affected
+                }
+            }
+
+            if (next_is_safe) {
+                // Next is safe - won't be affected by rebalancing
+                erase_impl(pos._node, pos._pos);
+                return next;
+            }
+        }
+
+        // Fall back to lower_bound with key copy
         Key erased_key = pos->first;
         erase_impl(pos._node, pos._pos);
         return lower_bound(erased_key);
