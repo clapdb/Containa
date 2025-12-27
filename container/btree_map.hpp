@@ -1512,12 +1512,14 @@ class btree_map
         }
 #endif
 #endif
-        // For string-like types, binary search reduces expensive comparisons
+        // For string-like types, binary search is better because:
+        // - Reduces expensive string comparisons from O(n) to O(log n)
+        // - Sequential insert patterns benefit from fewer comparisons
         if constexpr (string_like<Key>) {
             return binary_search_in_slots(leaf->slots, leaf->count, key);
         }
-        // Linear search is faster than binary search for non-SIMD types at typical node sizes
-        // (sequential access, better branch prediction, prefetching)
+        // Linear search is faster for small fixed-size types at typical node sizes
+        // (sequential access, better cache prefetching, early exit)
         return linear_search_in_slots(leaf->slots, leaf->count, key);
     }
 
@@ -1647,7 +1649,7 @@ class btree_map
         if constexpr (string_like<Key>) {
             return binary_search_in_slots(internal->slots, internal->count, key);
         }
-        // Linear search is faster than binary search for non-SIMD types at typical node sizes
+        // Linear search is faster for non-SIMD types at typical node sizes
         return linear_search_in_slots(internal->slots, internal->count, key);
     }
 
