@@ -86,6 +86,15 @@ namespace stdb::container {
  *   Compare - Comparison function (default: std::less<Key>)
  *   TargetNodeSize - Target node size in bytes (default: 256)
  */
+
+// Concept to detect string-like types (have data() and size(), expensive comparison)
+// Binary search is preferred for these types to reduce comparison count
+template <typename T>
+concept string_like = requires(const T& a) {
+    { a.data() };
+    { a.size() } -> std::convertible_to<std::size_t>;
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 template <typename Key, typename Value>
@@ -1497,6 +1506,10 @@ class btree_map
         }
 #endif
 #endif
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_in_slots(leaf->slots, leaf->count, key);
+        }
         // Linear search is faster than binary search for non-SIMD types at typical node sizes
         // (sequential access, better branch prediction, prefetching)
         return linear_search_in_slots(leaf->slots, leaf->count, key);
@@ -1624,6 +1637,10 @@ class btree_map
         }
 #endif
 #endif
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_in_slots(internal->slots, internal->count, key);
+        }
         // Linear search is faster than binary search for non-SIMD types at typical node sizes
         return linear_search_in_slots(internal->slots, internal->count, key);
     }
@@ -2698,22 +2715,15 @@ class btree_map
     }
 
     // try_emplace - only constructs value if key doesn't exist (C++17)
+    // Single traversal: finds position and inserts in one pass
     template <typename... Args>
     auto try_emplace(const Key& key, Args&&... args) -> std::pair<iterator, bool> {
-        auto it = find(key);
-        if (it != end()) {
-            return {it, false};  // Key exists, don't construct value
-        }
-        return insert_impl(key, Value(std::forward<Args>(args)...));
+        return try_emplace_impl(key, std::forward<Args>(args)...);
     }
 
     template <typename... Args>
     auto try_emplace(Key&& key, Args&&... args) -> std::pair<iterator, bool> {
-        auto it = find(key);
-        if (it != end()) {
-            return {it, false};  // Key exists, don't construct value
-        }
-        return insert_impl(std::move(key), Value(std::forward<Args>(args)...));
+        return try_emplace_impl(std::move(key), std::forward<Args>(args)...);
     }
 
     // try_emplace with hint (hint is ignored)
@@ -2746,6 +2756,8 @@ class btree_map
                 return {iterator(node, pos), false};  // Key already exists
             }
 
+            // Prefetch next node before traversing
+            __builtin_prefetch(internal->children[pos], 0, 3);
             node = internal->children[pos];
         }
 
@@ -2761,6 +2773,43 @@ class btree_map
         // Insert and get the position where it was inserted
         auto [inserted_node, inserted_pos] =
           insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+        ++_size;
+
+        return {iterator(inserted_node, inserted_pos), true};
+    }
+
+    // try_emplace implementation - single traversal, constructs value only if needed
+    template <typename K, typename... Args>
+    __attribute__((hot)) auto try_emplace_impl(K&& key, Args&&... args) -> std::pair<iterator, bool> {
+        if (_root == nullptr) [[unlikely]] {
+            _root = create_leaf();
+        }
+
+        // Find insertion point - traverse to leaf
+        node_base* node = _root;
+        while (!node->is_leaf_node()) [[likely]] {
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = lower_bound_in_internal(internal, key);
+
+            if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                return {iterator(node, pos), false};  // Key exists
+            }
+
+            // Prefetch next node before traversing
+            __builtin_prefetch(internal->children[pos], 0, 3);
+            node = internal->children[pos];
+        }
+
+        auto* leaf = static_cast<leaf_node*>(node);
+        size_type pos = lower_bound_in_leaf(leaf, key);
+
+        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+            return {iterator(leaf, pos), false};  // Key exists
+        }
+
+        // Key doesn't exist - now construct value and insert
+        auto [inserted_node, inserted_pos] =
+          insert_and_split_impl(leaf, pos, std::forward<K>(key), Value(std::forward<Args>(args)...));
         ++_size;
 
         return {iterator(inserted_node, inserted_pos), true};
@@ -2786,6 +2835,8 @@ class btree_map
                 }
             }
 
+            // Prefetch next node before traversing
+            __builtin_prefetch(internal->children[pos], 0, 3);
             node = internal->children[pos];
         }
 
@@ -2802,9 +2853,18 @@ class btree_map
         return const_iterator(const_cast<btree_map*>(this)->find(key));
     }
 
-    // operator[]
+    // operator[] - uses try_emplace to avoid constructing Value if key exists
     auto operator[](const Key& key) -> Value& {
-        auto [it, inserted] = insert(key, Value{});
+        auto [it, inserted] = try_emplace(key);
+        if (it._node->is_leaf_node()) {
+            return static_cast<leaf_node*>(it._node)->value(it._pos);
+        }
+        return static_cast<internal_node*>(it._node)->value(it._pos);
+    }
+
+    // operator[] with rvalue key - avoids key copy
+    auto operator[](Key&& key) -> Value& {
+        auto [it, inserted] = try_emplace(std::move(key));
         if (it._node->is_leaf_node()) {
             return static_cast<leaf_node*>(it._node)->value(it._pos);
         }
@@ -2864,6 +2924,8 @@ class btree_map
                     result = iterator(internal, pos);
                 }
             }
+            // Prefetch next node before traversing
+            __builtin_prefetch(internal->children[pos], 0, 3);
             node = internal->children[pos];
         }
     }
