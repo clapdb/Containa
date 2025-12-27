@@ -3128,8 +3128,10 @@ class btree_map
                 return {iterator(node, pos), false};  // Key already exists
             }
 
-            // Prefetch next node before traversing
-            __builtin_prefetch(internal->children[pos], 0, 3);
+            // Prefetch next node before traversing (skip for strings - doesn't help)
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
 
@@ -3185,8 +3187,10 @@ class btree_map
                 return {iterator(node, pos), false};  // Key exists
             }
 
-            // Prefetch next node before traversing
-            __builtin_prefetch(internal->children[pos], 0, 3);
+            // Prefetch next node before traversing (skip for strings - doesn't help)
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
 
@@ -3242,7 +3246,9 @@ class btree_map
                 return {iterator(node, pos), false};
             }
 
-            __builtin_prefetch(internal->children[pos], 0, 3);
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
 
@@ -3350,8 +3356,10 @@ class btree_map
                 }
             }
 
-            // Prefetch next node before traversing
-            __builtin_prefetch(internal->children[pos], 0, 3);
+            // Prefetch next node before traversing (skip for strings - doesn't help)
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
 
@@ -3439,8 +3447,10 @@ class btree_map
                     result = iterator(internal, pos);
                 }
             }
-            // Prefetch next node before traversing
-            __builtin_prefetch(internal->children[pos], 0, 3);
+            // Prefetch next node before traversing (skip for strings - doesn't help)
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
     }
