@@ -175,6 +175,12 @@ class btree_map
     static constexpr size_type kInternalSlots = calculate_internal_slots();
     static constexpr size_type kMaxSlots = kLeafSlots > kInternalSlots ? kLeafSlots : kInternalSlots;
 
+    // Minimum slots before underflow (except root)
+    // For B-tree merges: 2*(min-1) + 1 <= max_slots, so min <= (max_slots+1)/2
+    // But we use min-1 for the underflowing node, so effective formula is max_slots/2
+    static constexpr size_type kMinLeafSlots = kLeafSlots / 2;
+    static constexpr size_type kMinInternalSlots = kInternalSlots / 2;
+
     struct node_base
     {
         node_base* parent = nullptr;
@@ -2052,6 +2058,331 @@ class btree_map
         }
     }
 
+    // ==================== Deletion Helpers ====================
+
+    // Remove slot at position from leaf node (shifts remaining elements)
+    void remove_slot_from_leaf(leaf_node* leaf, size_type pos) {
+        for (size_type i = pos; i < leaf->count - 1; ++i) {
+            leaf->slots[i] = std::move(leaf->slots[i + 1]);
+        }
+        --leaf->count;
+    }
+
+    // Remove slot at position from internal node (shifts remaining elements and children)
+    void remove_slot_from_internal(internal_node* node, size_type pos) {
+        for (size_type i = pos; i < node->count - 1; ++i) {
+            node->slots[i] = std::move(node->slots[i + 1]);
+            node->children[i + 1] = node->children[i + 2];
+            if (node->children[i + 1]) {
+                node->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+            }
+        }
+        --node->count;
+    }
+
+    // Get the rightmost (maximum) key in subtree rooted at node
+    auto get_predecessor(node_base* node) -> std::pair<node_base*, size_type> {
+        while (!node->is_leaf_node()) {
+            auto* internal = static_cast<internal_node*>(node);
+            node = internal->children[internal->count];
+        }
+        auto* leaf = static_cast<leaf_node*>(node);
+        return {leaf, leaf->count - 1};
+    }
+
+    // Get the leftmost (minimum) key in subtree rooted at node
+    auto get_successor(node_base* node) -> std::pair<node_base*, size_type> {
+        while (!node->is_leaf_node()) {
+            auto* internal = static_cast<internal_node*>(node);
+            node = internal->children[0];
+        }
+        return {node, 0};
+    }
+
+    // Check if leaf node can spare an element
+    [[nodiscard]] auto can_spare_leaf(const leaf_node* leaf) const noexcept -> bool {
+        return leaf->count > kMinLeafSlots;
+    }
+
+    // Check if internal node can spare an element
+    [[nodiscard]] auto can_spare_internal(const internal_node* node) const noexcept -> bool {
+        return node->count > kMinInternalSlots;
+    }
+
+    // Borrow from left sibling for leaf
+    // In B-tree: parent separator moves down to leaf, left sibling's last key moves up to parent
+    void borrow_from_left_leaf(leaf_node* leaf, leaf_node* left_sibling, internal_node* parent, size_type parent_pos) {
+        // Shift leaf elements right to make room at position 0
+        for (size_type i = leaf->count; i > 0; --i) {
+            leaf->slots[i] = std::move(leaf->slots[i - 1]);
+        }
+        ++leaf->count;
+
+        // Move parent separator down to leaf[0]
+        leaf->slots[0] = std::move(parent->slots[parent_pos - 1]);
+
+        // Move left sibling's last element up to parent
+        parent->slots[parent_pos - 1] = std::move(left_sibling->slots[left_sibling->count - 1]);
+        --left_sibling->count;
+    }
+
+    // Borrow from right sibling for leaf
+    // In B-tree: parent separator moves down to leaf, right sibling's first key moves up to parent
+    void borrow_from_right_leaf(leaf_node* leaf, leaf_node* right_sibling, internal_node* parent, size_type parent_pos) {
+        // Move parent separator down to end of leaf
+        leaf->slots[leaf->count] = std::move(parent->slots[parent_pos]);
+        ++leaf->count;
+
+        // Move right sibling's first element up to parent
+        parent->slots[parent_pos] = std::move(right_sibling->slots[0]);
+
+        // Shift right sibling elements left
+        for (size_type i = 0; i < right_sibling->count - 1; ++i) {
+            right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+        }
+        --right_sibling->count;
+    }
+
+    // Merge leaf with right sibling
+    // In B-tree: parent separator moves down, then all right elements move to left
+    void merge_leaves(leaf_node* left, leaf_node* right, internal_node* parent, size_type parent_pos) {
+        // Move parent separator down to left leaf
+        left->slots[left->count] = std::move(parent->slots[parent_pos]);
+        ++left->count;
+
+        // Move all elements from right to left
+        for (size_type i = 0; i < right->count; ++i) {
+            left->slots[left->count + i] = std::move(right->slots[i]);
+        }
+        left->count += right->count;
+
+        // Remove separator from parent (this also removes children[parent_pos + 1])
+        remove_slot_from_internal(parent, parent_pos);
+
+        // Delete right node
+        delete right;
+    }
+
+    // Borrow from left sibling for internal node
+    void borrow_from_left_internal(internal_node* node, internal_node* left_sibling, internal_node* parent,
+                                   size_type parent_pos) {
+        // Shift node elements and children right
+        node->children[node->count + 1] = node->children[node->count];
+        if (node->children[node->count + 1]) {
+            node->children[node->count + 1]->position = static_cast<uint16_t>(node->count + 1);
+        }
+        for (size_type i = node->count; i > 0; --i) {
+            node->slots[i] = std::move(node->slots[i - 1]);
+            node->children[i] = node->children[i - 1];
+            if (node->children[i]) {
+                node->children[i]->position = static_cast<uint16_t>(i);
+            }
+        }
+        ++node->count;
+
+        // Move parent separator down
+        node->slots[0] = std::move(parent->slots[parent_pos - 1]);
+
+        // Move child from left sibling
+        node->children[0] = left_sibling->children[left_sibling->count];
+        if (node->children[0]) {
+            node->children[0]->parent = node;
+            node->children[0]->position = 0;
+        }
+
+        // Move element from left sibling up to parent
+        parent->slots[parent_pos - 1] = std::move(left_sibling->slots[left_sibling->count - 1]);
+        left_sibling->children[left_sibling->count] = nullptr;
+        --left_sibling->count;
+    }
+
+    // Borrow from right sibling for internal node
+    void borrow_from_right_internal(internal_node* node, internal_node* right_sibling, internal_node* parent,
+                                    size_type parent_pos) {
+        // Move parent separator down
+        node->slots[node->count] = std::move(parent->slots[parent_pos]);
+        ++node->count;
+
+        // Move child from right sibling
+        node->children[node->count] = right_sibling->children[0];
+        if (node->children[node->count]) {
+            node->children[node->count]->parent = node;
+            node->children[node->count]->position = static_cast<uint16_t>(node->count);
+        }
+
+        // Move element from right sibling up to parent
+        parent->slots[parent_pos] = std::move(right_sibling->slots[0]);
+
+        // Shift right sibling elements and children left
+        for (size_type i = 0; i < right_sibling->count - 1; ++i) {
+            right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+            right_sibling->children[i] = right_sibling->children[i + 1];
+            if (right_sibling->children[i]) {
+                right_sibling->children[i]->position = static_cast<uint16_t>(i);
+            }
+        }
+        right_sibling->children[right_sibling->count - 1] = right_sibling->children[right_sibling->count];
+        if (right_sibling->children[right_sibling->count - 1]) {
+            right_sibling->children[right_sibling->count - 1]->position =
+              static_cast<uint16_t>(right_sibling->count - 1);
+        }
+        --right_sibling->count;
+    }
+
+    // Merge internal node with right sibling
+    void merge_internal_nodes(internal_node* left, internal_node* right, internal_node* parent, size_type parent_pos) {
+        // Move parent separator down
+        left->slots[left->count] = std::move(parent->slots[parent_pos]);
+        ++left->count;
+
+        // Move all elements and children from right to left
+        for (size_type i = 0; i < right->count; ++i) {
+            left->slots[left->count + i] = std::move(right->slots[i]);
+            left->children[left->count + i] = right->children[i];
+            if (left->children[left->count + i]) {
+                left->children[left->count + i]->parent = left;
+                left->children[left->count + i]->position = static_cast<uint16_t>(left->count + i);
+            }
+        }
+        left->children[left->count + right->count] = right->children[right->count];
+        if (left->children[left->count + right->count]) {
+            left->children[left->count + right->count]->parent = left;
+            left->children[left->count + right->count]->position = static_cast<uint16_t>(left->count + right->count);
+        }
+        left->count += right->count;
+
+        // Remove separator from parent
+        remove_slot_from_internal(parent, parent_pos);
+
+        // Delete right node
+        delete right;
+    }
+
+    // Rebalance after deletion - handles underflow
+    void rebalance_after_erase(node_base* node) {
+        while (node != _root) {
+            auto* parent = static_cast<internal_node*>(node->parent);
+            size_type pos = node->position;
+
+            bool is_leaf = node->is_leaf_node();
+            size_type min_slots = is_leaf ? kMinLeafSlots : kMinInternalSlots;
+
+            if (node->count >= min_slots) {
+                return;  // No underflow
+            }
+
+            // Try to borrow from left sibling
+            if (pos > 0) {
+                node_base* left_sibling = parent->children[pos - 1];
+                if (is_leaf) {
+                    auto* left_leaf = static_cast<leaf_node*>(left_sibling);
+                    if (can_spare_leaf(left_leaf)) {
+                        borrow_from_left_leaf(static_cast<leaf_node*>(node), left_leaf, parent, pos);
+                        return;
+                    }
+                } else {
+                    auto* left_internal = static_cast<internal_node*>(left_sibling);
+                    if (can_spare_internal(left_internal)) {
+                        borrow_from_left_internal(static_cast<internal_node*>(node), left_internal, parent, pos);
+                        return;
+                    }
+                }
+            }
+
+            // Try to borrow from right sibling
+            if (pos < parent->count) {
+                node_base* right_sibling = parent->children[pos + 1];
+                if (is_leaf) {
+                    auto* right_leaf = static_cast<leaf_node*>(right_sibling);
+                    if (can_spare_leaf(right_leaf)) {
+                        borrow_from_right_leaf(static_cast<leaf_node*>(node), right_leaf, parent, pos);
+                        return;
+                    }
+                } else {
+                    auto* right_internal = static_cast<internal_node*>(right_sibling);
+                    if (can_spare_internal(right_internal)) {
+                        borrow_from_right_internal(static_cast<internal_node*>(node), right_internal, parent, pos);
+                        return;
+                    }
+                }
+            }
+
+            // Must merge - prefer merging with left sibling
+            if (pos > 0) {
+                node_base* left_sibling = parent->children[pos - 1];
+                if (is_leaf) {
+                    merge_leaves(static_cast<leaf_node*>(left_sibling), static_cast<leaf_node*>(node), parent, pos - 1);
+                } else {
+                    merge_internal_nodes(static_cast<internal_node*>(left_sibling), static_cast<internal_node*>(node),
+                                         parent, pos - 1);
+                }
+            } else {
+                // Merge with right sibling
+                node_base* right_sibling = parent->children[pos + 1];
+                if (is_leaf) {
+                    merge_leaves(static_cast<leaf_node*>(node), static_cast<leaf_node*>(right_sibling), parent, pos);
+                } else {
+                    merge_internal_nodes(static_cast<internal_node*>(node), static_cast<internal_node*>(right_sibling),
+                                         parent, pos);
+                }
+            }
+
+            // Check if parent needs rebalancing
+            if (parent == _root && parent->count == 0) {
+                // Root became empty, promote the merged child as new root
+                _root = parent->children[0];
+                if (_root) {
+                    _root->parent = nullptr;
+                }
+                delete parent;
+                return;
+            }
+
+            node = parent;
+        }
+    }
+
+    // Main erase implementation
+    void erase_impl(node_base* node, size_type pos) {
+        if (node->is_leaf_node()) {
+            // Simple case: remove from leaf
+            auto* leaf = static_cast<leaf_node*>(node);
+            remove_slot_from_leaf(leaf, pos);
+            --_size;
+
+            // Handle root leaf becoming empty
+            if (leaf == _root && leaf->count == 0) {
+                delete leaf;
+                _root = nullptr;
+                return;
+            }
+
+            // Rebalance if needed
+            if (leaf != _root) {
+                rebalance_after_erase(leaf);
+            }
+        } else {
+            // Internal node: replace with predecessor and delete predecessor
+            auto* internal = static_cast<internal_node*>(node);
+            auto [pred_node, pred_pos] = get_predecessor(internal->children[pos]);
+            auto* pred_leaf = static_cast<leaf_node*>(pred_node);
+
+            // Replace key-value with predecessor
+            internal->slots[pos] = std::move(pred_leaf->slots[pred_pos]);
+
+            // Remove predecessor from leaf
+            remove_slot_from_leaf(pred_leaf, pred_pos);
+            --_size;
+
+            // Rebalance predecessor's leaf if needed
+            if (pred_leaf != _root) {
+                rebalance_after_erase(pred_leaf);
+            }
+        }
+    }
+
+    // ==================== End Deletion Helpers ====================
+
     // Find the leftmost leaf
     [[nodiscard]] auto leftmost_leaf() const noexcept -> const leaf_node* {
         if (_root == nullptr) return nullptr;
@@ -2993,28 +3324,14 @@ class btree_map
 
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return rend(); }
 
-    // Erase by key (basic implementation - can be optimized)
+    // Erase by key - O(log n) with proper B-tree rebalancing
     auto erase(const Key& key) -> size_type {
         auto it = find(key);
         if (it == end()) {
             return 0;
         }
 
-        // For now, rebuild tree without this element (simple but not optimal)
-        // TODO: Implement proper B-tree deletion with rebalancing
-        std::vector<std::pair<Key, Value>> elements;
-        elements.reserve(_size - 1);
-        for (const auto& [k, v] : *this) {
-            if (_comp(k, key) || _comp(key, k)) {
-                elements.emplace_back(k, v);
-            }
-        }
-
-        clear();
-        for (const auto& [k, v] : elements) {
-            insert(k, v);
-        }
-
+        erase_impl(it._node, it._pos);
         return 1;
     }
 
@@ -3024,16 +3341,17 @@ class btree_map
             return end();
         }
 
-        // Get key to erase and next key (if any)
-        Key key_to_erase = pos->first;
-        ++pos;
+        // Get next key before erasing (tree may rebalance)
+        auto next = pos;
+        ++next;
         Key next_key{};
-        bool has_next = (pos != end());
+        bool has_next = (next != end());
         if (has_next) {
-            next_key = pos->first;
+            next_key = next->first;
         }
 
-        erase(key_to_erase);
+        // Direct erase without extra find()
+        erase_impl(pos._node, pos._pos);
 
         if (has_next) {
             return find(next_key);
