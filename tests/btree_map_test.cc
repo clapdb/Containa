@@ -40,6 +40,37 @@ TEST_CASE("btree_map::basic") {
         CHECK_EQ(map.at(3), "three");
     }
 
+    SUBCASE("range constructor from vector") {
+        std::vector<std::pair<int, std::string>> vec{{1, "one"}, {2, "two"}, {3, "three"}};
+        btree_map<int, std::string> map(vec.begin(), vec.end());
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(1), "one");
+        CHECK_EQ(map.at(2), "two");
+        CHECK_EQ(map.at(3), "three");
+    }
+
+    SUBCASE("range constructor from std::map") {
+        std::map<int, int> stdmap{{1, 10}, {2, 20}, {3, 30}};
+        btree_map<int, int> map(stdmap.begin(), stdmap.end());
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(1), 10);
+        CHECK_EQ(map.at(2), 20);
+        CHECK_EQ(map.at(3), 30);
+    }
+
+    SUBCASE("range constructor with custom comparator") {
+        std::vector<std::pair<int, int>> vec{{1, 10}, {2, 20}, {3, 30}};
+        btree_map<int, int, std::greater<int>> map(vec.begin(), vec.end(), std::greater<int>{});
+        CHECK_EQ(map.size(), 3);
+        // Check reverse order iteration
+        auto it = map.begin();
+        CHECK_EQ(it->first, 3);
+        ++it;
+        CHECK_EQ(it->first, 2);
+        ++it;
+        CHECK_EQ(it->first, 1);
+    }
+
     SUBCASE("copy constructor") {
         btree_map<int, int> map1{{1, 10}, {2, 20}, {3, 30}};
         btree_map<int, int> map2(map1);
@@ -144,6 +175,32 @@ TEST_CASE("btree_map::insert") {
             CHECK_EQ(v, expected * 10);
             ++expected;
         }
+    }
+
+    SUBCASE("insert initializer_list") {
+        btree_map<int, std::string> map;
+        map.insert({{1, "one"}, {2, "two"}, {3, "three"}});
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map[1], "one");
+        CHECK_EQ(map[2], "two");
+        CHECK_EQ(map[3], "three");
+
+        // Insert with duplicates - should ignore duplicates
+        map.insert({{2, "TWO"}, {4, "four"}, {5, "five"}});
+        CHECK_EQ(map.size(), 5);
+        CHECK_EQ(map[2], "two");  // Original preserved
+        CHECK_EQ(map[4], "four");
+        CHECK_EQ(map[5], "five");
+    }
+
+    SUBCASE("insert iterator range") {
+        std::vector<std::pair<int, int>> vec = {{10, 100}, {20, 200}, {30, 300}};
+        btree_map<int, int> map;
+        map.insert(vec.begin(), vec.end());
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map[10], 100);
+        CHECK_EQ(map[20], 200);
+        CHECK_EQ(map[30], 300);
     }
 }
 
@@ -430,6 +487,82 @@ TEST_CASE("btree_map::string_keys") {
     }
 }
 
+TEST_CASE("btree_map::heterogeneous_lookup") {
+    // Use std::less<> for transparent comparison
+    btree_map<std::string, int, std::less<>> map;
+
+    map["apple"] = 1;
+    map["banana"] = 2;
+    map["cherry"] = 3;
+    map["date"] = 4;
+
+    SUBCASE("find with string_view") {
+        std::string_view sv = "banana";
+        auto it = map.find(sv);
+        CHECK(it != map.end());
+        CHECK_EQ(it->second, 2);
+
+        auto it2 = map.find(std::string_view("notfound"));
+        CHECK(it2 == map.end());
+    }
+
+    SUBCASE("find with const char*") {
+        auto it = map.find("cherry");
+        CHECK(it != map.end());
+        CHECK_EQ(it->second, 3);
+    }
+
+    SUBCASE("contains with string_view") {
+        CHECK(map.contains(std::string_view("apple")));
+        CHECK_FALSE(map.contains(std::string_view("grape")));
+    }
+
+    SUBCASE("count with string_view") {
+        CHECK_EQ(map.count(std::string_view("date")), 1);
+        CHECK_EQ(map.count(std::string_view("fig")), 0);
+    }
+
+    SUBCASE("lower_bound with string_view") {
+        auto it = map.lower_bound(std::string_view("banana"));
+        CHECK(it != map.end());
+        CHECK_EQ(it->first, "banana");
+
+        auto it2 = map.lower_bound(std::string_view("blueberry"));
+        CHECK(it2 != map.end());
+        CHECK_EQ(it2->first, "cherry");
+    }
+
+    SUBCASE("upper_bound with string_view") {
+        auto it = map.upper_bound(std::string_view("banana"));
+        CHECK(it != map.end());
+        CHECK_EQ(it->first, "cherry");
+    }
+
+    SUBCASE("equal_range with string_view") {
+        auto [lb, ub] = map.equal_range(std::string_view("cherry"));
+        CHECK(lb != map.end());
+        CHECK_EQ(lb->first, "cherry");
+        CHECK(ub != map.end());
+        CHECK_EQ(ub->first, "date");
+    }
+
+    SUBCASE("erase with string_view") {
+        CHECK_EQ(map.erase(std::string_view("banana")), 1);
+        CHECK_EQ(map.size(), 3);
+        CHECK_FALSE(map.contains(std::string_view("banana")));
+
+        CHECK_EQ(map.erase(std::string_view("notexist")), 0);
+        CHECK_EQ(map.size(), 3);
+    }
+
+    SUBCASE("const find with string_view") {
+        const auto& cmap = map;
+        auto it = cmap.find(std::string_view("apple"));
+        CHECK(it != cmap.end());
+        CHECK_EQ(it->second, 1);
+    }
+}
+
 TEST_CASE("btree_map::string_string") {
     btree_map<std::string, std::string> map;
 
@@ -540,6 +673,178 @@ TEST_CASE("btree_map::complex_types") {
         CHECK_EQ(map.at(1).y, 20);
         CHECK_EQ(map.at(2).x, 30);
         CHECK_EQ(map.at(2).y, 40);
+    }
+}
+
+TEST_CASE("btree_map::node_handle") {
+    btree_map<int, std::string> map;
+    map[1] = "one";
+    map[2] = "two";
+    map[3] = "three";
+
+    SUBCASE("extract by iterator") {
+        auto it = map.find(2);
+        auto nh = map.extract(it);
+
+        CHECK_FALSE(nh.empty());
+        CHECK_EQ(nh.key(), 2);
+        CHECK_EQ(nh.mapped(), "two");
+        CHECK_EQ(map.size(), 2);
+        CHECK_FALSE(map.contains(2));
+    }
+
+    SUBCASE("extract by key") {
+        auto nh = map.extract(2);
+
+        CHECK_FALSE(nh.empty());
+        CHECK_EQ(nh.key(), 2);
+        CHECK_EQ(nh.mapped(), "two");
+        CHECK_EQ(map.size(), 2);
+    }
+
+    SUBCASE("extract non-existent key") {
+        auto nh = map.extract(999);
+        CHECK(nh.empty());
+        CHECK_EQ(map.size(), 3);
+    }
+
+    SUBCASE("insert node handle") {
+        auto nh = map.extract(2);
+        CHECK_EQ(map.size(), 2);
+
+        btree_map<int, std::string> map2;
+        map2[10] = "ten";
+
+        auto result = map2.insert(std::move(nh));
+        CHECK(result.inserted);
+        CHECK_EQ(result.position->first, 2);
+        CHECK_EQ(result.position->second, "two");
+        CHECK(result.node.empty());
+        CHECK_EQ(map2.size(), 2);
+    }
+
+    SUBCASE("insert duplicate key") {
+        btree_map<int, std::string> map2;
+        map2[2] = "TWO";  // Duplicate key
+
+        auto nh = map.extract(2);
+        auto result = map2.insert(std::move(nh));
+
+        CHECK_FALSE(result.inserted);
+        CHECK_EQ(result.position->second, "TWO");  // Original value preserved
+        CHECK_FALSE(result.node.empty());  // Node returned back
+        CHECK_EQ(result.node.mapped(), "two");
+    }
+
+    SUBCASE("extract_and_get_next") {
+        auto it = map.find(2);
+        auto [nh, next] = map.extract_and_get_next(it);
+
+        CHECK_FALSE(nh.empty());
+        CHECK_EQ(nh.key(), 2);
+        CHECK(next != map.end());
+        CHECK_EQ(next->first, 3);
+        CHECK_EQ(map.size(), 2);
+    }
+
+    SUBCASE("node handle move semantics") {
+        auto nh1 = map.extract(1);
+        CHECK_FALSE(nh1.empty());
+
+        auto nh2 = std::move(nh1);
+        CHECK(nh1.empty());  // NOLINT: testing moved-from state
+        CHECK_FALSE(nh2.empty());
+        CHECK_EQ(nh2.key(), 1);
+    }
+
+    SUBCASE("insert empty node handle") {
+        btree_map<int, std::string>::node_type nh;
+        CHECK(nh.empty());
+
+        auto result = map.insert(std::move(nh));
+        CHECK_FALSE(result.inserted);
+        CHECK(result.position == map.end());
+        CHECK_EQ(map.size(), 3);
+    }
+}
+
+TEST_CASE("btree_map::allocator") {
+    SUBCASE("default allocator") {
+        btree_map<int, int> map;
+        auto alloc = map.get_allocator();
+        CHECK((std::is_same_v<decltype(alloc), std::allocator<std::pair<const int, int>>>));
+    }
+
+    SUBCASE("allocator_type alias") {
+        using map_type = btree_map<std::string, int>;
+        CHECK((std::is_same_v<map_type::allocator_type, std::allocator<std::pair<const std::string, int>>>));
+    }
+
+    SUBCASE("custom allocator template parameter") {
+        // Just test that it compiles with a custom allocator
+        using custom_alloc = std::allocator<std::pair<const int, std::string>>;
+        btree_map<int, std::string, std::less<int>, custom_alloc> map;
+        map[1] = "one";
+        map[2] = "two";
+        CHECK_EQ(map.size(), 2);
+        CHECK_EQ(map.at(1), "one");
+    }
+
+    SUBCASE("constructor with allocator") {
+        std::allocator<std::pair<const int, int>> alloc;
+        btree_map<int, int> map(alloc);
+        map[1] = 10;
+        CHECK_EQ(map.size(), 1);
+        CHECK_EQ(map.at(1), 10);
+    }
+
+    SUBCASE("constructor with comparator and allocator") {
+        std::allocator<std::pair<const int, int>> alloc;
+        btree_map<int, int, std::greater<int>> map(std::greater<int>{}, alloc);
+        map[1] = 10;
+        map[2] = 20;
+        CHECK_EQ(map.size(), 2);
+        // Check reverse order
+        auto it = map.begin();
+        CHECK_EQ(it->first, 2);
+    }
+
+    SUBCASE("initializer list with allocator") {
+        std::allocator<std::pair<const int, std::string>> alloc;
+        btree_map<int, std::string> map({{1, "one"}, {2, "two"}}, alloc);
+        CHECK_EQ(map.size(), 2);
+        CHECK_EQ(map.at(1), "one");
+    }
+
+    SUBCASE("copy constructor with allocator") {
+        btree_map<int, int> map1;
+        map1[1] = 10;
+        map1[2] = 20;
+
+        std::allocator<std::pair<const int, int>> alloc;
+        btree_map<int, int> map2(map1, alloc);
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2.at(1), 10);
+        CHECK_EQ(map2.at(2), 20);
+    }
+
+    SUBCASE("move constructor with allocator") {
+        btree_map<int, int> map1;
+        map1[1] = 10;
+        map1[2] = 20;
+
+        std::allocator<std::pair<const int, int>> alloc;
+        btree_map<int, int> map2(std::move(map1), alloc);
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2.at(1), 10);
+    }
+
+    SUBCASE("range constructor with allocator") {
+        std::vector<std::pair<int, std::string>> vec{{1, "one"}, {2, "two"}};
+        std::allocator<std::pair<const int, std::string>> alloc;
+        btree_map<int, std::string> map(vec.begin(), vec.end(), alloc);
+        CHECK_EQ(map.size(), 2);
+        CHECK_EQ(map.at(1), "one");
     }
 }
 
@@ -655,6 +960,612 @@ TEST_CASE("btree_map::compare_with_std_map") {
     }
     CHECK(bit == bmap.end());
     CHECK(sit == smap.end());
+}
+
+// ============================================================================
+// Iterator Tests (absl-style)
+// ============================================================================
+
+TEST_CASE("btree_map::iterator_validity") {
+    btree_map<int, int> map;
+    for (int i = 0; i < 100; ++i) {
+        map[i] = i * 10;
+    }
+
+    SUBCASE("iterator equality") {
+        auto it1 = map.begin();
+        auto it2 = map.begin();
+        CHECK(it1 == it2);
+
+        ++it1;
+        CHECK(it1 != it2);
+
+        ++it2;
+        CHECK(it1 == it2);
+    }
+
+    SUBCASE("const_iterator from iterator") {
+        btree_map<int, int>::iterator it = map.begin();
+        btree_map<int, int>::const_iterator cit = it;
+        CHECK(cit == map.cbegin());
+    }
+
+    SUBCASE("iterator to end and back") {
+        auto it = map.begin();
+        size_t count = 0;
+        while (it != map.end()) {
+            ++it;
+            ++count;
+        }
+        CHECK_EQ(count, map.size());
+
+        // Go backwards using reverse iterator
+        auto rit = map.rbegin();
+        count = 0;
+        while (rit != map.rend()) {
+            ++rit;
+            ++count;
+        }
+        CHECK_EQ(count, map.size());
+    }
+
+    SUBCASE("iterator increment/decrement") {
+        auto it = map.find(50);
+        CHECK(it != map.end());
+        CHECK_EQ(it->first, 50);
+
+        ++it;
+        CHECK_EQ(it->first, 51);
+
+        --it;
+        CHECK_EQ(it->first, 50);
+
+        auto it2 = it++;
+        CHECK_EQ(it2->first, 50);
+        CHECK_EQ(it->first, 51);
+
+        auto it3 = it--;
+        CHECK_EQ(it3->first, 51);
+        CHECK_EQ(it->first, 50);
+    }
+
+    SUBCASE("reverse iterator base") {
+        auto rit = map.rbegin();
+        ++rit;  // Now points to second-to-last element
+        auto it = rit.base();
+        CHECK((it == map.end() || it->first == 99));
+    }
+}
+
+TEST_CASE("btree_map::iterator_edge_cases") {
+    SUBCASE("empty map iterators") {
+        btree_map<int, int> map;
+        CHECK(map.begin() == map.end());
+        CHECK(map.cbegin() == map.cend());
+        CHECK(map.rbegin() == map.rend());
+        CHECK(map.crbegin() == map.crend());
+    }
+
+    SUBCASE("single element iteration") {
+        btree_map<int, int> map;
+        map[42] = 100;
+
+        auto it = map.begin();
+        CHECK_EQ(it->first, 42);
+        CHECK_EQ(it->second, 100);
+        ++it;
+        CHECK(it == map.end());
+
+        auto rit = map.rbegin();
+        CHECK_EQ(rit->first, 42);
+        ++rit;
+        CHECK(rit == map.rend());
+    }
+
+    SUBCASE("find returns correct iterator") {
+        btree_map<int, int> map;
+        for (int i = 0; i < 50; ++i) {
+            map[i * 2] = i;  // Even numbers only
+        }
+
+        // Find existing key
+        auto it = map.find(10);
+        CHECK(it != map.end());
+        CHECK_EQ(it->first, 10);
+
+        // Find non-existing key
+        auto it2 = map.find(11);  // Odd number
+        CHECK(it2 == map.end());
+    }
+}
+
+// ============================================================================
+// Edge Cases and Stress Tests
+// ============================================================================
+
+TEST_CASE("btree_map::stress_random_operations") {
+    btree_map<int, int> map;
+    std::map<int, int> ref;  // Reference implementation
+    std::mt19937 rng(12345);
+    std::uniform_int_distribution<int> key_dist(0, 1000);
+    std::uniform_int_distribution<int> op_dist(0, 2);  // 0: insert, 1: erase, 2: find
+
+    for (int i = 0; i < 10000; ++i) {
+        int key = key_dist(rng);
+        int op = op_dist(rng);
+
+        switch (op) {
+            case 0: {  // Insert
+                int value = i;
+                auto [it1, ins1] = map.insert(key, value);
+                auto [it2, ins2] = ref.insert({key, value});
+                CHECK_EQ(ins1, ins2);
+                break;
+            }
+            case 1: {  // Erase
+                size_t cnt1 = map.erase(key);
+                size_t cnt2 = ref.erase(key);
+                CHECK_EQ(cnt1, cnt2);
+                break;
+            }
+            case 2: {  // Find
+                auto it1 = map.find(key);
+                auto it2 = ref.find(key);
+                CHECK_EQ(it1 != map.end(), it2 != ref.end());
+                if (it1 != map.end()) {
+                    CHECK_EQ(it1->first, it2->first);
+                    CHECK_EQ(it1->second, it2->second);
+                }
+                break;
+            }
+        }
+
+        // Periodically verify size
+        if (i % 1000 == 0) {
+            CHECK_EQ(map.size(), ref.size());
+        }
+    }
+
+    // Final verification
+    CHECK_EQ(map.size(), ref.size());
+    auto bit = map.begin();
+    auto rit = ref.begin();
+    while (bit != map.end()) {
+        CHECK_EQ(bit->first, rit->first);
+        CHECK_EQ(bit->second, rit->second);
+        ++bit;
+        ++rit;
+    }
+}
+
+TEST_CASE("btree_map::stress_sequential_operations") {
+    SUBCASE("sequential insert then erase all") {
+        btree_map<int, int> map;
+        constexpr int N = 5000;
+
+        // Insert
+        for (int i = 0; i < N; ++i) {
+            map[i] = i * 2;
+        }
+        CHECK_EQ(map.size(), N);
+
+        // Verify order
+        int expected = 0;
+        for (auto& [k, v] : map) {
+            CHECK_EQ(k, expected);
+            CHECK_EQ(v, expected * 2);
+            ++expected;
+        }
+
+        // Erase all
+        for (int i = 0; i < N; ++i) {
+            CHECK_EQ(map.erase(i), 1);
+        }
+        CHECK(map.empty());
+    }
+
+    SUBCASE("reverse sequential insert") {
+        btree_map<int, int> map;
+        constexpr int N = 5000;
+
+        // Insert in reverse
+        for (int i = N - 1; i >= 0; --i) {
+            map[i] = i;
+        }
+        CHECK_EQ(map.size(), N);
+
+        // Verify order (should still be ascending)
+        int expected = 0;
+        for (auto& [k, v] : map) {
+            CHECK_EQ(k, expected);
+            ++expected;
+        }
+    }
+
+    SUBCASE("interleaved insert and erase") {
+        btree_map<int, int> map;
+
+        for (int round = 0; round < 10; ++round) {
+            // Insert 100 elements
+            for (int i = round * 100; i < (round + 1) * 100; ++i) {
+                map[i] = i;
+            }
+            // Erase half
+            for (int i = round * 100; i < round * 100 + 50; ++i) {
+                map.erase(i);
+            }
+        }
+
+        CHECK_EQ(map.size(), 500);  // 50 remaining per round * 10 rounds
+    }
+}
+
+// ============================================================================
+// Special Type Tests
+// ============================================================================
+
+// Note: Types without default constructors are not currently supported as values
+// because leaf_node uses a fixed array that requires default construction.
+// This is a known limitation compared to absl::btree_map.
+
+// Type with expensive copy (to test move optimization)
+struct ExpensiveCopy {
+    std::string data;
+    static int copy_count;
+    static int move_count;
+
+    ExpensiveCopy() : data("default") {}
+    ExpensiveCopy(const std::string& s) : data(s) {}
+    ExpensiveCopy(const ExpensiveCopy& other) : data(other.data) { ++copy_count; }
+    ExpensiveCopy(ExpensiveCopy&& other) noexcept : data(std::move(other.data)) { ++move_count; }
+    ExpensiveCopy& operator=(const ExpensiveCopy& other) {
+        data = other.data;
+        ++copy_count;
+        return *this;
+    }
+    ExpensiveCopy& operator=(ExpensiveCopy&& other) noexcept {
+        data = std::move(other.data);
+        ++move_count;
+        return *this;
+    }
+};
+
+int ExpensiveCopy::copy_count = 0;
+int ExpensiveCopy::move_count = 0;
+
+TEST_CASE("btree_map::expensive_copy_value") {
+    ExpensiveCopy::copy_count = 0;
+    ExpensiveCopy::move_count = 0;
+
+    btree_map<int, ExpensiveCopy> map;
+
+    // emplace should minimize copies
+    map.emplace(1, ExpensiveCopy("one"));
+    map.emplace(2, ExpensiveCopy("two"));
+
+    CHECK_EQ(map.size(), 2);
+    CHECK_EQ(map.at(1).data, "one");
+    CHECK_EQ(map.at(2).data, "two");
+
+    // Check that moves are preferred over copies
+    CHECK_GT(ExpensiveCopy::move_count, 0);
+}
+
+TEST_CASE("btree_map::string_key_optimizations") {
+    btree_map<std::string, int> map;
+
+    // Insert many strings to trigger tree splits
+    for (int i = 0; i < 1000; ++i) {
+        map["key_" + std::to_string(i)] = i;
+    }
+    CHECK_EQ(map.size(), 1000);
+
+    // Verify ordering
+    std::string prev;
+    for (auto& [k, v] : map) {
+        CHECK(prev < k);
+        prev = k;
+    }
+
+    // Find operations
+    CHECK(map.contains("key_500"));
+    CHECK_FALSE(map.contains("key_9999"));
+
+    // Erase and verify
+    map.erase("key_500");
+    CHECK_FALSE(map.contains("key_500"));
+    CHECK_EQ(map.size(), 999);
+}
+
+// ============================================================================
+// Merge and Swap Tests
+// ============================================================================
+
+TEST_CASE("btree_map::merge_operations") {
+    SUBCASE("merge non-overlapping") {
+        btree_map<int, int> map1, map2;
+        for (int i = 0; i < 50; ++i) {
+            map1[i] = i;
+            map2[i + 100] = i + 100;
+        }
+
+        size_t orig_size = map1.size() + map2.size();
+        map1.merge(map2);
+
+        CHECK_EQ(map1.size(), orig_size);
+        CHECK(map2.empty());
+    }
+
+    SUBCASE("merge with duplicates") {
+        btree_map<int, int> map1, map2;
+        for (int i = 0; i < 50; ++i) {
+            map1[i] = i;
+            map2[i + 25] = i + 1000;  // Keys 25-74, overlaps 25-49
+        }
+
+        map1.merge(map2);
+
+        // map1 should have 75 elements (0-74)
+        CHECK_EQ(map1.size(), 75);
+        // map2 should have 25 elements left (25-49 duplicates)
+        CHECK_EQ(map2.size(), 25);
+
+        // Verify original values preserved for duplicates
+        CHECK_EQ(map1[30], 30);  // Original, not 1005
+    }
+
+    SUBCASE("merge with different comparator") {
+        btree_map<int, int, std::less<int>> map1;
+        btree_map<int, int, std::greater<int>> map2;
+
+        for (int i = 0; i < 20; ++i) {
+            map1[i] = i;
+            map2[i + 20] = i + 20;
+        }
+
+        map1.merge(map2);
+        CHECK_EQ(map1.size(), 40);
+        CHECK(map2.empty());
+
+        // Verify ordering in map1 (ascending)
+        int prev = -1;
+        for (auto& [k, v] : map1) {
+            CHECK_GT(k, prev);
+            prev = k;
+        }
+    }
+}
+
+TEST_CASE("btree_map::swap_operations") {
+    btree_map<int, std::string> map1, map2;
+
+    map1[1] = "one";
+    map1[2] = "two";
+    map2[10] = "ten";
+
+    swap(map1, map2);
+
+    CHECK_EQ(map1.size(), 1);
+    CHECK_EQ(map2.size(), 2);
+    CHECK_EQ(map1.at(10), "ten");
+    CHECK_EQ(map2.at(1), "one");
+
+    // Member swap
+    map1.swap(map2);
+    CHECK_EQ(map1.size(), 2);
+    CHECK_EQ(map2.size(), 1);
+}
+
+// ============================================================================
+// Emplace and Try_emplace Tests
+// ============================================================================
+
+TEST_CASE("btree_map::emplace_variations") {
+    btree_map<std::string, std::string> map;
+
+    SUBCASE("emplace new key") {
+        auto [it, inserted] = map.emplace("key", "value");
+        CHECK(inserted);
+        CHECK_EQ(it->first, "key");
+        CHECK_EQ(it->second, "value");
+    }
+
+    SUBCASE("emplace existing key") {
+        map["key"] = "original";
+        auto [it, inserted] = map.emplace("key", "new_value");
+        CHECK_FALSE(inserted);
+        CHECK_EQ(it->second, "original");
+    }
+
+    SUBCASE("emplace_hint at correct position") {
+        for (int i = 0; i < 100; ++i) {
+            map.emplace(std::to_string(i), std::to_string(i));
+        }
+
+        auto hint = map.find("050");
+        auto it = map.emplace_hint(hint, "051", "inserted");
+        CHECK_EQ(it->first, "051");
+    }
+}
+
+TEST_CASE("btree_map::try_emplace_variations") {
+    SUBCASE("try_emplace with piecewise construct") {
+        btree_map<int, std::string> map;
+
+        auto [it1, ins1] = map.try_emplace(1, "hello");
+        CHECK(ins1);
+        CHECK_EQ(it1->second, "hello");
+
+        auto [it2, ins2] = map.try_emplace(1, "world");
+        CHECK_FALSE(ins2);
+        CHECK_EQ(it2->second, "hello");  // Not modified
+    }
+
+    SUBCASE("try_emplace with move key") {
+        btree_map<std::string, int> map;
+
+        std::string key = "moveable";
+        auto [it, inserted] = map.try_emplace(std::move(key), 42);
+        CHECK(inserted);
+        // Key may or may not be moved depending on implementation
+        CHECK((key.empty() || key == "moveable"));
+    }
+}
+
+// ============================================================================
+// Insert_or_assign Tests
+// ============================================================================
+
+TEST_CASE("btree_map::insert_or_assign") {
+    btree_map<int, std::string> map;
+
+    SUBCASE("insert new") {
+        auto [it, inserted] = map.insert_or_assign(1, "one");
+        CHECK(inserted);
+        CHECK_EQ(it->second, "one");
+    }
+
+    SUBCASE("assign existing") {
+        map[1] = "original";
+        auto [it, inserted] = map.insert_or_assign(1, "updated");
+        CHECK_FALSE(inserted);
+        CHECK_EQ(it->second, "updated");
+    }
+
+    SUBCASE("with hint") {
+        for (int i = 0; i < 10; ++i) {
+            map[i] = std::to_string(i);
+        }
+
+        auto hint = map.find(5);
+        auto it = map.insert_or_assign(hint, 5, "five_updated");
+        CHECK_EQ(it->second, "five_updated");
+    }
+}
+
+// ============================================================================
+// Equal_range and Bounds Tests
+// ============================================================================
+
+TEST_CASE("btree_map::bounds_operations") {
+    btree_map<int, int> map;
+    for (int i = 0; i < 100; i += 2) {  // Even numbers 0, 2, 4, ...
+        map[i] = i;
+    }
+
+    SUBCASE("lower_bound") {
+        auto it = map.lower_bound(50);
+        CHECK_EQ(it->first, 50);
+
+        auto it2 = map.lower_bound(51);  // Odd, should get next even
+        CHECK_EQ(it2->first, 52);
+
+        auto it3 = map.lower_bound(100);  // Past last
+        CHECK(it3 == map.end());
+    }
+
+    SUBCASE("upper_bound") {
+        auto it = map.upper_bound(50);
+        CHECK_EQ(it->first, 52);
+
+        auto it2 = map.upper_bound(98);  // Last element
+        CHECK(it2 == map.end());
+    }
+
+    SUBCASE("equal_range existing") {
+        auto [lb, ub] = map.equal_range(50);
+        CHECK_EQ(lb->first, 50);
+        CHECK_EQ(ub->first, 52);
+    }
+
+    SUBCASE("equal_range non-existing") {
+        auto [lb, ub] = map.equal_range(51);  // Doesn't exist
+        CHECK(lb == ub);
+        CHECK_EQ(lb->first, 52);
+    }
+}
+
+// ============================================================================
+// Comparison Operators Tests
+// ============================================================================
+
+TEST_CASE("btree_map::comparison_operators") {
+    btree_map<int, int> map1, map2, map3;
+
+    for (int i = 0; i < 10; ++i) {
+        map1[i] = i;
+        map2[i] = i;
+        map3[i] = i + 1;  // Different values
+    }
+
+    SUBCASE("equality") {
+        CHECK(map1 == map2);
+        CHECK_FALSE(map1 == map3);
+        CHECK(map1 != map3);
+    }
+
+    SUBCASE("less than") {
+        btree_map<int, int> smaller, larger;
+        smaller[1] = 1;
+        larger[1] = 2;
+
+        CHECK(smaller < larger);
+        CHECK_FALSE(larger < smaller);
+        CHECK(smaller <= larger);
+        CHECK(larger >= smaller);
+    }
+
+    SUBCASE("lexicographic ordering") {
+        btree_map<int, int> a, b;
+        a[1] = 1;
+        a[2] = 2;
+        b[1] = 1;
+        b[2] = 3;
+
+        CHECK(a < b);  // Same prefix, but a[2] < b[2]
+    }
+
+    SUBCASE("size difference") {
+        btree_map<int, int> shorter, longer;
+        shorter[1] = 1;
+        longer[1] = 1;
+        longer[2] = 2;
+
+        CHECK(shorter < longer);  // Shorter is less when prefix matches
+    }
+}
+
+// ============================================================================
+// Erase_if Tests
+// ============================================================================
+
+TEST_CASE("btree_map::erase_if") {
+    btree_map<int, int> map;
+    for (int i = 0; i < 100; ++i) {
+        map[i] = i;
+    }
+
+    SUBCASE("erase even keys") {
+        auto erased = erase_if(map, [](const auto& kv) { return kv.first % 2 == 0; });
+        CHECK_EQ(erased, 50);
+        CHECK_EQ(map.size(), 50);
+
+        for (auto& [k, v] : map) {
+            CHECK(k % 2 == 1);
+        }
+    }
+
+    SUBCASE("erase nothing") {
+        auto erased = erase_if(map, [](const auto&) { return false; });
+        CHECK_EQ(erased, 0);
+        CHECK_EQ(map.size(), 100);
+    }
+
+    SUBCASE("erase everything") {
+        auto erased = erase_if(map, [](const auto&) { return true; });
+        CHECK_EQ(erased, 100);
+        CHECK(map.empty());
+    }
 }
 
 }  // namespace stdb::container
