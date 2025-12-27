@@ -2031,35 +2031,35 @@ class btree_map
             }
 
             // Node is full - try to rebalance to siblings before splitting
-            // Skip rebalancing for sequential append at rightmost leaf (common case for sorted inserts)
+            // For string types: skip rebalance for non-rightmost inserts (cache miss overhead > benefit)
             if (leaf->parent != nullptr) {
                 auto* parent = static_cast<internal_node*>(leaf->parent);
                 size_type node_pos = leaf->position;
                 bool is_rightmost = (node_pos == parent->count);
+                bool is_append = (pos == leaf->count);
 
-                // Try left sibling first (skip for rightmost leaf with append - just split is faster)
-                if (node_pos > 0 && !(is_rightmost && pos == leaf->count)) {
+                // For strings, skip rebalance for random inserts (high cache miss cost)
+                // Only consider rebalance for rightmost append (sorted insert pattern)
+                if constexpr (string_like<Key>) {
+                    if (!(is_rightmost && is_append)) {
+                        goto do_split;
+                    }
+                }
+
+                // Try left sibling first (skip for rightmost append - just split is faster)
+                if (node_pos > 0 && !(is_rightmost && is_append)) {
                     auto* left_sibling = static_cast<leaf_node*>(parent->children[node_pos - 1]);
                     size_type left_space = kLeafSlots - left_sibling->count;
-                    // Need at least 2 slots: 1 for rebalancing to make room in leaf, 1 for possible insertion in left
                     if (left_space >= 1) {
-                        // Move just 1 element to make room - simpler and always correct
                         size_type to_move = 1;
-
-                        // After rebalance: left gets 1 element (separator), leaf[0] becomes new separator
-                        // Remaining in leaf: leaf[1..count-1] shifted to [0..count-2]
-                        size_type new_leaf_count = leaf->count - to_move;  // leaf->count - 1
+                        size_type new_leaf_count = leaf->count - to_move;
 
                         if (pos == 0 && left_space >= 2) {
-                            // Special case: inserting at position 0, element goes to left sibling
-                            // After rebalance, we insert the new element at left_sibling's end
                             size_type old_left_count = left_sibling->count;
                             rebalance_leaf_right_to_left(leaf, left_sibling, parent, node_pos, to_move);
-                            // Insert at position: old_left_count + 1 (after separator)
                             insert_into_leaf(left_sibling, old_left_count + 1, std::forward<K>(key), std::forward<V>(value));
                             return {left_sibling, old_left_count + 1};
                         } else if (pos >= to_move) {
-                            // Element stays in leaf (pos >= 1)
                             rebalance_leaf_right_to_left(leaf, left_sibling, parent, node_pos, to_move);
                             size_type new_pos = pos - to_move;
                             insert_into_leaf(leaf, new_pos, std::forward<K>(key), std::forward<V>(value));
@@ -2073,20 +2073,14 @@ class btree_map
                     auto* right_sibling = static_cast<leaf_node*>(parent->children[node_pos + 1]);
                     size_type right_space = kLeafSlots - right_sibling->count;
                     if (right_space >= 1) {
-                        // Move just 1 element to make room
                         size_type to_move = 1;
+                        size_type new_leaf_count = leaf->count - to_move;
 
-                        // After rebalance: leaf loses 1 from end, leaf[count-1] becomes new separator
-                        size_type new_leaf_count = leaf->count - to_move;  // leaf->count - 1
-
-                        if (pos == leaf->count && right_space >= 2) {
-                            // Special case: inserting at the very end, element goes to right sibling
+                        if (is_append && right_space >= 2) {
                             rebalance_leaf_left_to_right(leaf, right_sibling, parent, node_pos, to_move);
-                            // Insert at position 0 of right sibling
                             insert_into_leaf(right_sibling, 0, std::forward<K>(key), std::forward<V>(value));
                             return {right_sibling, 0};
                         } else if (pos <= new_leaf_count) {
-                            // Element stays in leaf
                             rebalance_leaf_left_to_right(leaf, right_sibling, parent, node_pos, to_move);
                             insert_into_leaf(leaf, pos, std::forward<K>(key), std::forward<V>(value));
                             return {leaf, pos};
@@ -2095,6 +2089,7 @@ class btree_map
                 }
             }
 
+            do_split:
             // Rebalancing not possible - need to split
             auto* new_right = create_leaf();
             size_type mid = (leaf->count + 1) / 2;  // Include new element in count
@@ -3453,8 +3448,7 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // For cheap-to-compare types: always check (comparison is cheap)
-        // For string-like types: only check when tree is deep (comparison is expensive)
+        // For string-like types: only check when tree has depth > 1 (comparison is expensive)
         if constexpr (string_like<Key>) {
             if (!_root->is_leaf_node()) {
                 auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
