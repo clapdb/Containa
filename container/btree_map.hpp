@@ -3155,6 +3155,24 @@ class btree_map
     __attribute__((hot)) auto try_emplace_impl(K&& key, Args&&... args) -> std::pair<iterator, bool> {
         if (_root == nullptr) [[unlikely]] {
             _root = create_leaf();
+            auto* leaf = static_cast<leaf_node*>(_root);
+            leaf->slots[0] = storage_type(std::forward<K>(key), Value(std::forward<Args>(args)...));
+            leaf->count = 1;
+            ++_size;
+            return {iterator(leaf, 0), true};
+        }
+
+        // Fast path: check if key > max key (sequential append case)
+        // Only for cheap-to-compare types - strings have expensive comparison
+        if constexpr (!string_like<Key>) {
+            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                // Key is greater than all existing keys - append to rightmost leaf
+                auto [inserted_node, inserted_pos] = insert_and_split_impl(
+                  right_leaf, right_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
+                ++_size;
+                return {iterator(inserted_node, inserted_pos), true};
+            }
         }
 
         // Find insertion point - traverse to leaf
@@ -3192,6 +3210,24 @@ class btree_map
     __attribute__((hot)) auto insert_or_assign_impl(K&& key, V&& value) -> std::pair<iterator, bool> {
         if (_root == nullptr) [[unlikely]] {
             _root = create_leaf();
+            auto* leaf = static_cast<leaf_node*>(_root);
+            leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
+            leaf->count = 1;
+            ++_size;
+            return {iterator(leaf, 0), true};
+        }
+
+        // Fast path: check if key > max key (sequential append case)
+        // Only for cheap-to-compare types - strings have expensive comparison
+        if constexpr (!string_like<Key>) {
+            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                // Key is greater than all existing keys - append to rightmost leaf
+                auto [inserted_node, inserted_pos] =
+                  insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                ++_size;
+                return {iterator(inserted_node, inserted_pos), true};
+            }
         }
 
         // Find insertion point - traverse to leaf
