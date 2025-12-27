@@ -3021,6 +3021,16 @@ class btree_map
         return insert_impl(std::move(kv.first), std::move(kv.second));
     }
 
+    // Insert with hint - uses hint for O(1) amortized insertion for sequential patterns
+    // Hint is used for optimization; correctness is guaranteed even if hint is wrong
+    auto insert(const_iterator hint, const value_type& kv) -> iterator {
+        return insert_with_hint_impl(hint, kv.first, kv.second);
+    }
+
+    auto insert(const_iterator hint, value_type&& kv) -> iterator {
+        return insert_with_hint_impl(hint, std::move(kv.first), std::move(kv.second));
+    }
+
     // Emplace - construct in place
     template <typename... Args>
     auto emplace(Args&&... args) -> std::pair<iterator, bool> {
@@ -3028,10 +3038,11 @@ class btree_map
         return insert_impl(std::move(val.first), std::move(val.second));
     }
 
-    // emplace_hint - hint is ignored, just calls emplace (C++11)
+    // emplace_hint - uses hint for O(1) amortized insertion for sequential patterns (C++11)
     template <typename... Args>
-    auto emplace_hint([[maybe_unused]] const_iterator hint, Args&&... args) -> iterator {
-        return emplace(std::forward<Args>(args)...).first;
+    auto emplace_hint(const_iterator hint, Args&&... args) -> iterator {
+        value_type val(std::forward<Args>(args)...);
+        return insert_with_hint_impl(hint, std::move(val.first), std::move(val.second));
     }
 
     // insert_or_assign - inserts or updates value (C++17)
@@ -3196,6 +3207,73 @@ class btree_map
         ++_size;
 
         return {iterator(inserted_node, inserted_pos), true};
+    }
+
+    // Insert with hint implementation - O(1) when hint is correct for sequential inserts
+    template <typename K, typename V>
+    __attribute__((hot)) auto insert_with_hint_impl(const_iterator hint, K&& key, V&& value) -> iterator {
+        if (_root == nullptr) [[unlikely]] {
+            _root = create_leaf();
+            auto* leaf = static_cast<leaf_node*>(_root);
+            leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
+            leaf->count = 1;
+            ++_size;
+            return iterator(leaf, 0);
+        }
+
+        // Fast path: hint is end() and key > all existing keys (append case)
+        if (hint._node == nullptr) {
+            // Hint is end() - check if we can append to rightmost leaf
+            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+            if (right_leaf != nullptr && right_leaf->count > 0) {
+                // Check if key > last key (most common case for sequential insert)
+                if (_comp(right_leaf->key(right_leaf->count - 1), key)) {
+                    // Can append at end of rightmost leaf
+                    auto [inserted_node, inserted_pos] =
+                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                    ++_size;
+                    return iterator(inserted_node, inserted_pos);
+                }
+            }
+        } else if (hint._node->is_leaf_node()) {
+            // Hint points to a leaf position
+            auto* hint_leaf = const_cast<leaf_node*>(static_cast<const leaf_node*>(hint._node));
+            size_type hint_pos = hint._pos;
+
+            // Check if hint is correct: prev_key < key < hint_key (or key < first_key)
+            bool key_less_than_hint = (hint_pos < hint_leaf->count) && _comp(key, hint_leaf->key(hint_pos));
+            bool key_greater_than_prev = true;
+
+            if (hint_pos > 0) {
+                // Check previous key in same leaf
+                key_greater_than_prev = _comp(hint_leaf->key(hint_pos - 1), key);
+            } else if (hint_leaf->parent != nullptr) {
+                // Need to check parent's separator
+                auto* parent = static_cast<internal_node*>(hint_leaf->parent);
+                if (hint_leaf->position > 0) {
+                    key_greater_than_prev = _comp(parent->key(hint_leaf->position - 1), key);
+                }
+            }
+
+            if (key_less_than_hint && key_greater_than_prev) {
+                // Hint is correct! Insert directly at hint position
+                auto [inserted_node, inserted_pos] =
+                  insert_and_split_impl(hint_leaf, hint_pos, std::forward<K>(key), std::forward<V>(value));
+                ++_size;
+                return iterator(inserted_node, inserted_pos);
+            }
+
+            // Check for duplicate key at hint position
+            if (hint_pos < hint_leaf->count && !_comp(key, hint_leaf->key(hint_pos)) &&
+                !_comp(hint_leaf->key(hint_pos), key)) {
+                // Key already exists at hint
+                return iterator(hint_leaf, hint_pos);
+            }
+        }
+
+        // Hint is not useful - fall back to normal insert
+        auto [it, inserted] = insert_impl(std::forward<K>(key), std::forward<V>(value));
+        return it;
     }
 
    public:
