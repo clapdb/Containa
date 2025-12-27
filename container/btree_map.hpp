@@ -3568,133 +3568,60 @@ class btree_map
     }
 
     // Erase by iterator - returns iterator to next element
+    // Simplified structure following absl's approach
     auto erase(iterator pos) -> iterator {
         if (pos == end()) {
             return end();
         }
 
-        // For leaf nodes, we can often avoid a full tree traversal
-        if (pos._node->is_leaf_node()) {
-            auto* leaf = static_cast<leaf_node*>(pos._node);
-            size_type erase_pos = pos._pos;
-
-            // Check if this is a simple case: leaf won't underflow
-            // (count > kMinLeafSlots or node is root)
-            bool simple_case = (leaf->count > kMinLeafSlots) || (leaf == _root);
-
-            if (simple_case) {
-                // Simple case: just remove and return next position
-                remove_slot_from_leaf(leaf, erase_pos);
-                --_size;
-
-                if (leaf->count == 0) {
-                    // Root became empty
-                    delete leaf;
-                    _root = nullptr;
-                    return end();
-                }
-
-                if (erase_pos < leaf->count) {
-                    // There's a next element in the same leaf
-                    return iterator(leaf, erase_pos);
-                } else {
-                    // Need to find next leaf - traverse up
-                    iterator it(leaf, leaf->count - 1);
-                    ++it;  // Move to next element
-                    if (it._node == nullptr) return end();
-                    return it;
-                }
-            }
-        }
-
-        // Complex case: might need rebalancing
-        // For internal nodes, use erase_impl which handles predecessor replacement
+        // Handle internal node: replace with predecessor, then erase from leaf
         if (!pos._node->is_leaf_node()) {
-            // Internal node deletion: find next, then use erase_impl
             iterator next = pos;
             ++next;
             erase_impl(pos._node, pos._pos);
-            // After internal delete, the next element is still valid
-            // (predecessor replacement doesn't affect elements after the deleted one)
             return next;
         }
 
-        // Leaf node: check if next is safe from rebalancing
+        // Leaf node deletion
         auto* leaf = static_cast<leaf_node*>(pos._node);
-        iterator next = pos;
-        ++next;
-
-        if (next != end() && next._node != leaf) {
-            // Next is in a different node - check if it's in right sibling AND could be merged
-            bool next_is_safe = true;
-
-            if (leaf->parent != nullptr) {
-                auto* parent = static_cast<internal_node*>(leaf->parent);
-                size_type pos_idx = leaf->position;
-
-                // Check if next is in the right sibling
-                if (pos_idx < parent->count && parent->children[pos_idx + 1] == next._node) {
-                    // Right sibling merge only happens when pos_idx == 0
-                    // (rebalance_after_erase prefers merging with left sibling)
-                    // If pos_idx > 0, we merge left, so right sibling is safe
-                    if (pos_idx == 0) {
-                        // Could merge with right sibling - check if it's actually needed
-                        auto* right_sibling = static_cast<leaf_node*>(parent->children[1]);
-                        if (leaf->count > kMinLeafSlots || right_sibling->count > kMinLeafSlots + 1) {
-                            next_is_safe = true;  // Won't merge with right
-                        } else {
-                            next_is_safe = false;  // Will merge with right sibling
-                        }
-                    }
-                }
-            }
-
-            if (next_is_safe) {
-                erase_impl(pos._node, pos._pos);
-                return next;
-            }
-        }
-
-        // Use iterator tracking through rebalancing
         size_type erase_pos = pos._pos;
 
         // Remove the element
         remove_slot_from_leaf(leaf, erase_pos);
         --_size;
 
-        // Handle root leaf becoming empty
+        // Handle empty root
         if (leaf == _root && leaf->count == 0) {
             delete leaf;
             _root = nullptr;
             return end();
         }
 
-        // Determine initial "next" position
+        // Track result position through potential rebalancing
         node_base* res_node = leaf;
         size_type res_pos = erase_pos;
-        bool need_advance = (erase_pos >= leaf->count);
+        bool was_last = (erase_pos >= leaf->count);
 
-        // Rebalance if needed, tracking iterator position
-        if (leaf != _root && leaf->count < kMinLeafSlots) {
+        // Rebalance if needed (function returns early if no underflow)
+        if (leaf != _root) {
             rebalance_after_erase_with_iterator(leaf, res_node, res_pos);
         }
 
-        // Build result iterator
+        // Handle tree becoming empty during rebalance
         if (_root == nullptr) {
             return end();
         }
 
-        // If position is past end of node, advance to next element
+        // Build result iterator
         auto* res_leaf = static_cast<leaf_node*>(res_node);
-        if (need_advance || res_pos >= res_leaf->count) {
-            // Go to last valid position and increment
+        if (was_last || res_pos >= res_leaf->count) {
+            // Erased last element in node - advance to next
             if (res_leaf->count > 0) {
                 iterator it(res_leaf, res_leaf->count - 1);
                 ++it;
                 return it;
-            } else {
-                return end();
             }
+            return end();
         }
 
         return iterator(res_node, res_pos);
