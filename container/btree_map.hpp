@@ -1989,12 +1989,14 @@ class btree_map
             }
 
             // Node is full - try to rebalance to siblings before splitting
+            // Skip rebalancing for sequential append at rightmost leaf (common case for sorted inserts)
             if (leaf->parent != nullptr) {
                 auto* parent = static_cast<internal_node*>(leaf->parent);
                 size_type node_pos = leaf->position;
+                bool is_rightmost = (node_pos == parent->count);
 
-                // Try left sibling first (if inserting near the beginning, this is better)
-                if (node_pos > 0) {
+                // Try left sibling first (skip for rightmost leaf with append - just split is faster)
+                if (node_pos > 0 && !(is_rightmost && pos == leaf->count)) {
                     auto* left_sibling = static_cast<leaf_node*>(parent->children[node_pos - 1]);
                     size_type left_space = kLeafSlots - left_sibling->count;
                     // Need at least 2 slots: 1 for rebalancing to make room in leaf, 1 for possible insertion in left
@@ -3409,12 +3411,21 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
-        // For shallow trees, just do normal traversal
-        if (!_root->is_leaf_node()) {
+        // For cheap-to-compare types: always check (comparison is cheap)
+        // For string-like types: only check when tree is deep (comparison is expensive)
+        if constexpr (string_like<Key>) {
+            if (!_root->is_leaf_node()) {
+                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                    auto [inserted_node, inserted_pos] =
+                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                    ++_size;
+                    return {iterator(inserted_node, inserted_pos), true};
+                }
+            }
+        } else {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
-                // Key is greater than all existing keys - append to rightmost leaf
                 auto [inserted_node, inserted_pos] =
                   insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
                 ++_size;
@@ -3470,11 +3481,19 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
-        if (!_root->is_leaf_node()) {
+        if constexpr (string_like<Key>) {
+            if (!_root->is_leaf_node()) {
+                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                    auto [inserted_node, inserted_pos] = insert_and_split_impl(
+                      right_leaf, right_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
+                    ++_size;
+                    return {iterator(inserted_node, inserted_pos), true};
+                }
+            }
+        } else {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
-                // Key is greater than all existing keys - append to rightmost leaf
                 auto [inserted_node, inserted_pos] = insert_and_split_impl(
                   right_leaf, right_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
                 ++_size;
@@ -3527,11 +3546,19 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
-        if (!_root->is_leaf_node()) {
+        if constexpr (string_like<Key>) {
+            if (!_root->is_leaf_node()) {
+                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                    auto [inserted_node, inserted_pos] =
+                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                    ++_size;
+                    return {iterator(inserted_node, inserted_pos), true};
+                }
+            }
+        } else {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
-                // Key is greater than all existing keys - append to rightmost leaf
                 auto [inserted_node, inserted_pos] =
                   insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
                 ++_size;
