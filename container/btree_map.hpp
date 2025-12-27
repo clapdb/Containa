@@ -1680,6 +1680,42 @@ class btree_map
         }
     }
 
+    // Deep copy a node and all its children - O(n) tree copy
+    [[nodiscard]] auto deep_copy_node(const node_base* src, node_base* parent) -> node_base* {
+        if (src == nullptr) return nullptr;
+
+        if (src->is_leaf_node()) {
+            const auto* src_leaf = static_cast<const leaf_node*>(src);
+            auto* dst_leaf = create_leaf();
+            dst_leaf->parent = parent;
+            dst_leaf->position = src_leaf->position;
+            dst_leaf->count = src_leaf->count;
+
+            // Copy all slots
+            for (size_type i = 0; i < src_leaf->count; ++i) {
+                dst_leaf->slots[i] = src_leaf->slots[i];
+            }
+            return dst_leaf;
+        } else {
+            const auto* src_internal = static_cast<const internal_node*>(src);
+            auto* dst_internal = create_internal();
+            dst_internal->parent = parent;
+            dst_internal->position = src_internal->position;
+            dst_internal->count = src_internal->count;
+
+            // Copy all slots
+            for (size_type i = 0; i < src_internal->count; ++i) {
+                dst_internal->slots[i] = src_internal->slots[i];
+            }
+
+            // Recursively copy children
+            for (size_type i = 0; i <= src_internal->count; ++i) {
+                dst_internal->children[i] = deep_copy_node(src_internal->children[i], dst_internal);
+            }
+            return dst_internal;
+        }
+    }
+
     // Insert key-value into a leaf node at position (node must have space)
     // Uses perfect forwarding for efficient insertion of rvalues
     template <typename K, typename V>
@@ -2924,11 +2960,9 @@ class btree_map
 
     ~btree_map() { destroy_node(_root); }
 
-    // Copy constructor
-    btree_map(const btree_map& other) : _comp(other._comp) {
-        for (const auto& [k, v] : other) {
-            insert(k, v);
-        }
+    // Copy constructor - O(n) deep copy of tree structure
+    btree_map(const btree_map& other) : _comp(other._comp), _size(other._size) {
+        _root = deep_copy_node(other._root, nullptr);
     }
 
     // Move constructor
@@ -2937,14 +2971,13 @@ class btree_map
         other._size = 0;
     }
 
-    // Copy assignment
+    // Copy assignment - O(n) deep copy of tree structure
     auto operator=(const btree_map& other) -> btree_map& {
         if (this != &other) {
-            clear();
+            destroy_node(_root);
             _comp = other._comp;
-            for (const auto& [k, v] : other) {
-                insert(k, v);
-            }
+            _size = other._size;
+            _root = deep_copy_node(other._root, nullptr);
         }
         return *this;
     }
@@ -3002,36 +3035,15 @@ class btree_map
     }
 
     // insert_or_assign - inserts or updates value (C++17)
+    // Single traversal implementation for optimal performance
     template <typename M>
     auto insert_or_assign(const Key& key, M&& value) -> std::pair<iterator, bool> {
-        auto it = find(key);
-        if (it != end()) {
-            // Key exists - update value
-            if (it._node->is_leaf_node()) {
-                static_cast<leaf_node*>(it._node)->value(it._pos) = std::forward<M>(value);
-            } else {
-                static_cast<internal_node*>(it._node)->value(it._pos) = std::forward<M>(value);
-            }
-            return {it, false};
-        }
-        // Key doesn't exist - insert
-        return insert_impl(key, std::forward<M>(value));
+        return insert_or_assign_impl(key, std::forward<M>(value));
     }
 
     template <typename M>
     auto insert_or_assign(Key&& key, M&& value) -> std::pair<iterator, bool> {
-        auto it = find(key);
-        if (it != end()) {
-            // Key exists - update value
-            if (it._node->is_leaf_node()) {
-                static_cast<leaf_node*>(it._node)->value(it._pos) = std::forward<M>(value);
-            } else {
-                static_cast<internal_node*>(it._node)->value(it._pos) = std::forward<M>(value);
-            }
-            return {it, false};
-        }
-        // Key doesn't exist - insert
-        return insert_impl(std::move(key), std::forward<M>(value));
+        return insert_or_assign_impl(std::move(key), std::forward<M>(value));
     }
 
     // insert_or_assign with hint (hint is ignored)
@@ -3141,6 +3153,46 @@ class btree_map
         // Key doesn't exist - now construct value and insert
         auto [inserted_node, inserted_pos] =
           insert_and_split_impl(leaf, pos, std::forward<K>(key), Value(std::forward<Args>(args)...));
+        ++_size;
+
+        return {iterator(inserted_node, inserted_pos), true};
+    }
+
+    // insert_or_assign implementation - single traversal, updates if exists, inserts if not
+    template <typename K, typename V>
+    __attribute__((hot)) auto insert_or_assign_impl(K&& key, V&& value) -> std::pair<iterator, bool> {
+        if (_root == nullptr) [[unlikely]] {
+            _root = create_leaf();
+        }
+
+        // Find insertion point - traverse to leaf
+        node_base* node = _root;
+        while (!node->is_leaf_node()) [[likely]] {
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = lower_bound_in_internal(internal, key);
+
+            if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                // Key exists in internal node - update value
+                internal->value(pos) = std::forward<V>(value);
+                return {iterator(node, pos), false};
+            }
+
+            __builtin_prefetch(internal->children[pos], 0, 3);
+            node = internal->children[pos];
+        }
+
+        auto* leaf = static_cast<leaf_node*>(node);
+        size_type pos = lower_bound_in_leaf(leaf, key);
+
+        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+            // Key exists in leaf - update value
+            leaf->value(pos) = std::forward<V>(value);
+            return {iterator(leaf, pos), false};
+        }
+
+        // Key doesn't exist - insert
+        auto [inserted_node, inserted_pos] =
+          insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
         ++_size;
 
         return {iterator(inserted_node, inserted_pos), true};
@@ -3341,59 +3393,82 @@ class btree_map
             return end();
         }
 
-        // Get next key before erasing (tree may rebalance)
-        auto next = pos;
-        ++next;
-        Key next_key{};
-        bool has_next = (next != end());
-        if (has_next) {
-            next_key = next->first;
+        // For leaf nodes, we can often avoid a full tree traversal
+        if (pos._node->is_leaf_node()) {
+            auto* leaf = static_cast<leaf_node*>(pos._node);
+            size_type erase_pos = pos._pos;
+
+            // Check if this is a simple case: leaf won't underflow
+            // (count > kMinLeafSlots or node is root)
+            bool simple_case = (leaf->count > kMinLeafSlots) || (leaf == _root);
+
+            if (simple_case) {
+                // Simple case: just remove and return next position
+                remove_slot_from_leaf(leaf, erase_pos);
+                --_size;
+
+                if (leaf->count == 0) {
+                    // Root became empty
+                    delete leaf;
+                    _root = nullptr;
+                    return end();
+                }
+
+                if (erase_pos < leaf->count) {
+                    // There's a next element in the same leaf
+                    return iterator(leaf, erase_pos);
+                } else {
+                    // Need to find next leaf - traverse up
+                    iterator it(leaf, leaf->count - 1);
+                    ++it;  // Move to next element
+                    if (it._node == nullptr) return end();
+                    return it;
+                }
+            }
         }
 
-        // Direct erase without extra find()
+        // Complex case: might need rebalancing, fall back to lower_bound
+        Key erased_key = pos->first;
         erase_impl(pos._node, pos._pos);
-
-        if (has_next) {
-            return find(next_key);
-        }
-        return end();
+        return lower_bound(erased_key);
     }
 
     auto erase(const_iterator pos) -> iterator { return erase(iterator(const_cast<node_base*>(pos._node), pos._pos)); }
 
-    // Erase range [first, last)
+    // Erase range [first, last) - uses optimized erase(iterator)
     auto erase(const_iterator first, const_iterator last) -> iterator {
-        // Collect all keys to erase
-        std::vector<Key> keys_to_erase;
-        for (auto it = first; it != last; ++it) {
-            keys_to_erase.push_back(it->first);
-        }
+        // Convert to non-const iterator
+        auto it = iterator(const_cast<node_base*>(first._node), first._pos);
+        auto last_it = iterator(const_cast<node_base*>(last._node), last._pos);
 
-        // Get key after last (if any) to return iterator
-        Key next_key{};
-        bool has_next = (last != end());
-        if (has_next) {
-            next_key = last->first;
+        while (it != last_it && it != end()) {
+            it = erase(it);
         }
-
-        // Erase all keys
-        for (const auto& k : keys_to_erase) {
-            erase(k);
-        }
-
-        if (has_next) {
-            return find(next_key);
-        }
-        return end();
+        return it;
     }
 
     // equal_range - returns pair of iterators (lower_bound, upper_bound)
+    // Optimized: single traversal since this is a unique-key map
     [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
-        return {lower_bound(key), upper_bound(key)};
+        auto lb = lower_bound(key);
+        if (lb == end() || _comp(key, lb->first)) {
+            // Key not found: lower_bound == upper_bound
+            return {lb, lb};
+        }
+        // Key found: upper_bound is next element
+        auto ub = lb;
+        ++ub;
+        return {lb, ub};
     }
 
     [[nodiscard]] auto equal_range(const Key& key) const -> std::pair<const_iterator, const_iterator> {
-        return {lower_bound(key), upper_bound(key)};
+        auto lb = lower_bound(key);
+        if (lb == end() || _comp(key, lb->first)) {
+            return {lb, lb};
+        }
+        auto ub = lb;
+        ++ub;
+        return {lb, ub};
     }
 
     // swap
