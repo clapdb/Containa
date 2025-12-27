@@ -1718,6 +1718,153 @@ class btree_map
         }
     }
 
+    // ==================== Rebalance Before Split Helpers ====================
+
+    // Move elements from a full leaf to its left sibling to make room for insertion
+    // Returns the new insertion position (may be in left sibling or original node)
+    // to_move: number of elements to move (including the separator)
+    void rebalance_leaf_right_to_left(leaf_node* leaf, leaf_node* left_sibling, internal_node* parent,
+                                      size_type parent_pos, size_type to_move) {
+        // Move parent separator down to left sibling's end
+        left_sibling->slots[left_sibling->count] = std::move(parent->slots[parent_pos - 1]);
+        ++left_sibling->count;
+
+        // Move (to_move - 1) elements from leaf to left sibling
+        for (size_type i = 0; i < to_move - 1; ++i) {
+            left_sibling->slots[left_sibling->count + i] = std::move(leaf->slots[i]);
+        }
+        left_sibling->count += static_cast<uint16_t>(to_move - 1);
+
+        // New separator is the element at position (to_move - 1) in leaf
+        parent->slots[parent_pos - 1] = std::move(leaf->slots[to_move - 1]);
+
+        // Shift remaining elements in leaf to the beginning
+        size_type remaining = leaf->count - to_move;
+        if constexpr (std::is_trivially_copyable_v<storage_type>) {
+            std::memmove(&leaf->slots[0], &leaf->slots[to_move], remaining * sizeof(storage_type));
+        } else {
+            for (size_type i = 0; i < remaining; ++i) {
+                leaf->slots[i] = std::move(leaf->slots[to_move + i]);
+            }
+        }
+        leaf->count = static_cast<uint16_t>(remaining);
+    }
+
+    // Move elements from a full leaf to its right sibling to make room for insertion
+    void rebalance_leaf_left_to_right(leaf_node* leaf, leaf_node* right_sibling, internal_node* parent,
+                                      size_type parent_pos, size_type to_move) {
+        // Shift right sibling elements to make room
+        size_type right_count = right_sibling->count;
+        if constexpr (std::is_trivially_copyable_v<storage_type>) {
+            std::memmove(&right_sibling->slots[to_move], &right_sibling->slots[0], right_count * sizeof(storage_type));
+        } else {
+            for (size_type i = right_count; i > 0; --i) {
+                right_sibling->slots[i + to_move - 1] = std::move(right_sibling->slots[i - 1]);
+            }
+        }
+
+        // Move parent separator to right sibling's first position
+        right_sibling->slots[to_move - 1] = std::move(parent->slots[parent_pos]);
+
+        // Move (to_move - 1) elements from leaf end to right sibling beginning
+        size_type start = leaf->count - (to_move - 1);
+        for (size_type i = 0; i < to_move - 1; ++i) {
+            right_sibling->slots[i] = std::move(leaf->slots[start + i]);
+        }
+        right_sibling->count += static_cast<uint16_t>(to_move);
+
+        // New separator is the element before what we moved
+        parent->slots[parent_pos] = std::move(leaf->slots[start - 1]);
+        leaf->count = static_cast<uint16_t>(start - 1);
+    }
+
+    // Move elements from a full internal node to its left sibling
+    void rebalance_internal_right_to_left(internal_node* node, internal_node* left_sibling, internal_node* parent,
+                                          size_type parent_pos, size_type to_move) {
+        // Move parent separator down to left sibling
+        left_sibling->slots[left_sibling->count] = std::move(parent->slots[parent_pos - 1]);
+        ++left_sibling->count;
+
+        // Move children and slots from node to left sibling
+        left_sibling->children[left_sibling->count] = node->children[0];
+        if (left_sibling->children[left_sibling->count]) {
+            left_sibling->children[left_sibling->count]->parent = left_sibling;
+            left_sibling->children[left_sibling->count]->position = static_cast<uint16_t>(left_sibling->count);
+        }
+
+        for (size_type i = 0; i < to_move - 1; ++i) {
+            left_sibling->slots[left_sibling->count + i] = std::move(node->slots[i]);
+            left_sibling->children[left_sibling->count + i + 1] = node->children[i + 1];
+            if (left_sibling->children[left_sibling->count + i + 1]) {
+                left_sibling->children[left_sibling->count + i + 1]->parent = left_sibling;
+                left_sibling->children[left_sibling->count + i + 1]->position =
+                  static_cast<uint16_t>(left_sibling->count + i + 1);
+            }
+        }
+        left_sibling->count += static_cast<uint16_t>(to_move - 1);
+
+        // New separator
+        parent->slots[parent_pos - 1] = std::move(node->slots[to_move - 1]);
+
+        // Shift remaining elements in node
+        size_type remaining = node->count - to_move;
+        for (size_type i = 0; i < remaining; ++i) {
+            node->slots[i] = std::move(node->slots[to_move + i]);
+            node->children[i] = node->children[to_move + i];
+            if (node->children[i]) {
+                node->children[i]->position = static_cast<uint16_t>(i);
+            }
+        }
+        node->children[remaining] = node->children[node->count];
+        if (node->children[remaining]) {
+            node->children[remaining]->position = static_cast<uint16_t>(remaining);
+        }
+        node->count = static_cast<uint16_t>(remaining);
+    }
+
+    // Move elements from a full internal node to its right sibling
+    void rebalance_internal_left_to_right(internal_node* node, internal_node* right_sibling, internal_node* parent,
+                                          size_type parent_pos, size_type to_move) {
+        size_type right_count = right_sibling->count;
+
+        // Shift right sibling elements to make room
+        for (size_type i = right_count; i > 0; --i) {
+            right_sibling->slots[i + to_move - 1] = std::move(right_sibling->slots[i - 1]);
+            right_sibling->children[i + to_move] = right_sibling->children[i];
+            if (right_sibling->children[i + to_move]) {
+                right_sibling->children[i + to_move]->position = static_cast<uint16_t>(i + to_move);
+            }
+        }
+        right_sibling->children[to_move] = right_sibling->children[0];
+        if (right_sibling->children[to_move]) {
+            right_sibling->children[to_move]->position = static_cast<uint16_t>(to_move);
+        }
+
+        // Move parent separator to right sibling
+        right_sibling->slots[to_move - 1] = std::move(parent->slots[parent_pos]);
+
+        // Move elements and children from node to right sibling
+        size_type start = node->count - (to_move - 1);
+        for (size_type i = 0; i < to_move - 1; ++i) {
+            right_sibling->slots[i] = std::move(node->slots[start + i]);
+            right_sibling->children[i] = node->children[start + i];
+            if (right_sibling->children[i]) {
+                right_sibling->children[i]->parent = right_sibling;
+                right_sibling->children[i]->position = static_cast<uint16_t>(i);
+            }
+        }
+        right_sibling->children[to_move - 1] = node->children[node->count];
+        if (right_sibling->children[to_move - 1]) {
+            right_sibling->children[to_move - 1]->parent = right_sibling;
+            right_sibling->children[to_move - 1]->position = static_cast<uint16_t>(to_move - 1);
+        }
+        right_sibling->count += static_cast<uint16_t>(to_move);
+
+        // New separator
+        parent->slots[parent_pos] = std::move(node->slots[start - 1]);
+        node->count = static_cast<uint16_t>(start - 1);
+    }
+
     // Insert key-value into a leaf node at position (node must have space)
     // Uses perfect forwarding for efficient insertion of rvalues
     template <typename K, typename V>
@@ -1841,7 +1988,70 @@ class btree_map
                 return {leaf, pos};
             }
 
-            // Need to split - create new right node first
+            // Node is full - try to rebalance to siblings before splitting
+            if (leaf->parent != nullptr) {
+                auto* parent = static_cast<internal_node*>(leaf->parent);
+                size_type node_pos = leaf->position;
+
+                // Try left sibling first (if inserting near the beginning, this is better)
+                if (node_pos > 0) {
+                    auto* left_sibling = static_cast<leaf_node*>(parent->children[node_pos - 1]);
+                    size_type left_space = kLeafSlots - left_sibling->count;
+                    // Need at least 2 slots: 1 for rebalancing to make room in leaf, 1 for possible insertion in left
+                    if (left_space >= 1) {
+                        // Move just 1 element to make room - simpler and always correct
+                        size_type to_move = 1;
+
+                        // After rebalance: left gets 1 element (separator), leaf[0] becomes new separator
+                        // Remaining in leaf: leaf[1..count-1] shifted to [0..count-2]
+                        size_type new_leaf_count = leaf->count - to_move;  // leaf->count - 1
+
+                        if (pos == 0 && left_space >= 2) {
+                            // Special case: inserting at position 0, element goes to left sibling
+                            // After rebalance, we insert the new element at left_sibling's end
+                            size_type old_left_count = left_sibling->count;
+                            rebalance_leaf_right_to_left(leaf, left_sibling, parent, node_pos, to_move);
+                            // Insert at position: old_left_count + 1 (after separator)
+                            insert_into_leaf(left_sibling, old_left_count + 1, std::forward<K>(key), std::forward<V>(value));
+                            return {left_sibling, old_left_count + 1};
+                        } else if (pos >= to_move) {
+                            // Element stays in leaf (pos >= 1)
+                            rebalance_leaf_right_to_left(leaf, left_sibling, parent, node_pos, to_move);
+                            size_type new_pos = pos - to_move;
+                            insert_into_leaf(leaf, new_pos, std::forward<K>(key), std::forward<V>(value));
+                            return {leaf, new_pos};
+                        }
+                    }
+                }
+
+                // Try right sibling
+                if (node_pos < parent->count) {
+                    auto* right_sibling = static_cast<leaf_node*>(parent->children[node_pos + 1]);
+                    size_type right_space = kLeafSlots - right_sibling->count;
+                    if (right_space >= 1) {
+                        // Move just 1 element to make room
+                        size_type to_move = 1;
+
+                        // After rebalance: leaf loses 1 from end, leaf[count-1] becomes new separator
+                        size_type new_leaf_count = leaf->count - to_move;  // leaf->count - 1
+
+                        if (pos == leaf->count && right_space >= 2) {
+                            // Special case: inserting at the very end, element goes to right sibling
+                            rebalance_leaf_left_to_right(leaf, right_sibling, parent, node_pos, to_move);
+                            // Insert at position 0 of right sibling
+                            insert_into_leaf(right_sibling, 0, std::forward<K>(key), std::forward<V>(value));
+                            return {right_sibling, 0};
+                        } else if (pos <= new_leaf_count) {
+                            // Element stays in leaf
+                            rebalance_leaf_left_to_right(leaf, right_sibling, parent, node_pos, to_move);
+                            insert_into_leaf(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+                            return {leaf, pos};
+                        }
+                    }
+                }
+            }
+
+            // Rebalancing not possible - need to split
             auto* new_right = create_leaf();
             size_type mid = (leaf->count + 1) / 2;  // Include new element in count
 
@@ -1979,7 +2189,63 @@ class btree_map
                 return {internal, pos};
             }
 
-            // Need to split internal node
+            // Node is full - try to rebalance to siblings before splitting
+            if (internal->parent != nullptr) {
+                auto* parent_node = static_cast<internal_node*>(internal->parent);
+                size_type node_pos = internal->position;
+
+                // Try left sibling first
+                if (node_pos > 0) {
+                    auto* left_sibling = static_cast<internal_node*>(parent_node->children[node_pos - 1]);
+                    size_type left_space = kInternalSlots - left_sibling->count;
+                    if (left_space >= 1) {
+                        size_type to_move = 1;  // Move just 1 to make room
+                        size_type new_node_count = internal->count - to_move;
+
+                        if (pos == 0 && left_space >= 2) {
+                            // Element goes into left sibling
+                            size_type old_left_count = left_sibling->count;
+                            rebalance_internal_right_to_left(internal, left_sibling, parent_node, node_pos, to_move);
+                            insert_into_internal(left_sibling, old_left_count + 1, std::forward<K>(key),
+                                                 std::forward<V>(value), right_child);
+                            return {left_sibling, old_left_count + 1};
+                        } else if (pos >= to_move) {
+                            // Element stays in internal
+                            rebalance_internal_right_to_left(internal, left_sibling, parent_node, node_pos, to_move);
+                            size_type new_pos = pos - to_move;
+                            insert_into_internal(internal, new_pos, std::forward<K>(key), std::forward<V>(value),
+                                                 right_child);
+                            return {internal, new_pos};
+                        }
+                    }
+                }
+
+                // Try right sibling
+                if (node_pos < parent_node->count) {
+                    auto* right_sibling = static_cast<internal_node*>(parent_node->children[node_pos + 1]);
+                    size_type right_space = kInternalSlots - right_sibling->count;
+                    if (right_space >= 1) {
+                        size_type to_move = 1;
+                        size_type new_node_count = internal->count - to_move;
+
+                        if (pos == internal->count && right_space >= 2) {
+                            // Element goes into right sibling
+                            rebalance_internal_left_to_right(internal, right_sibling, parent_node, node_pos, to_move);
+                            insert_into_internal(right_sibling, 0, std::forward<K>(key), std::forward<V>(value),
+                                                 right_child);
+                            return {right_sibling, 0};
+                        } else if (pos <= new_node_count) {
+                            // Element stays in internal
+                            rebalance_internal_left_to_right(internal, right_sibling, parent_node, node_pos, to_move);
+                            insert_into_internal(internal, pos, std::forward<K>(key), std::forward<V>(value),
+                                                 right_child);
+                            return {internal, pos};
+                        }
+                    }
+                }
+            }
+
+            // Rebalancing not possible - need to split
             auto* new_right = create_internal();
             size_type mid = (internal->count + 1) / 2;
 
