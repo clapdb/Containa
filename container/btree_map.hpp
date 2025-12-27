@@ -3608,18 +3608,29 @@ class btree_map
         }
 
         // Complex case: might need rebalancing
-        // Optimization: if next element is in a different subtree (not sibling), it survives rebalancing
+        // For internal nodes, use erase_impl which handles predecessor replacement
+        if (!pos._node->is_leaf_node()) {
+            // Internal node deletion: find next, then use erase_impl
+            iterator next = pos;
+            ++next;
+            erase_impl(pos._node, pos._pos);
+            // After internal delete, the next element is still valid
+            // (predecessor replacement doesn't affect elements after the deleted one)
+            return next;
+        }
+
+        // Leaf node: check if next is safe from rebalancing
+        auto* leaf = static_cast<leaf_node*>(pos._node);
         iterator next = pos;
         ++next;
 
-        if (next != end() && next._node != pos._node) {
+        if (next != end() && next._node != leaf) {
             // Next is in a different node - check if it's in right sibling AND could be merged
-            auto* pos_leaf = static_cast<leaf_node*>(pos._node);
             bool next_is_safe = true;
 
-            if (pos_leaf->parent != nullptr) {
-                auto* parent = static_cast<internal_node*>(pos_leaf->parent);
-                size_type pos_idx = pos_leaf->position;
+            if (leaf->parent != nullptr) {
+                auto* parent = static_cast<internal_node*>(leaf->parent);
+                size_type pos_idx = leaf->position;
 
                 // Check if next is in the right sibling
                 if (pos_idx < parent->count && parent->children[pos_idx + 1] == next._node) {
@@ -3628,29 +3639,23 @@ class btree_map
                     // If pos_idx > 0, we merge left, so right sibling is safe
                     if (pos_idx == 0) {
                         // Could merge with right sibling - check if it's actually needed
-                        // Merge happens when: can't borrow from left (pos_idx=0 means no left)
-                        // AND can't borrow from right (right sibling can't spare)
                         auto* right_sibling = static_cast<leaf_node*>(parent->children[1]);
-                        // If right sibling can spare OR we won't underflow, next is safe
-                        if (pos_leaf->count > kMinLeafSlots || right_sibling->count > kMinLeafSlots + 1) {
+                        if (leaf->count > kMinLeafSlots || right_sibling->count > kMinLeafSlots + 1) {
                             next_is_safe = true;  // Won't merge with right
                         } else {
                             next_is_safe = false;  // Will merge with right sibling
                         }
                     }
-                    // else: pos_idx > 0, will merge with left if needed, right sibling safe
                 }
             }
 
             if (next_is_safe) {
-                // Next is safe - won't be affected by rebalancing
                 erase_impl(pos._node, pos._pos);
                 return next;
             }
         }
 
-        // Use iterator tracking through rebalancing instead of lower_bound
-        auto* leaf = static_cast<leaf_node*>(pos._node);
+        // Use iterator tracking through rebalancing
         size_type erase_pos = pos._pos;
 
         // Remove the element
