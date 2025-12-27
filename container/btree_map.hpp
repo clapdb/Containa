@@ -1390,6 +1390,31 @@ class btree_map
         return lo;
     }
 
+    // Three-way binary search for string-like types
+    // Returns {position, exact_match} - avoids extra equality check after search
+    // This is faster for strings because compare() gives <0/0/>0 in one call
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_three_way(
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept
+      -> std::pair<size_type, bool> {
+        BTREE_ASSUME(count <= 32);
+
+        size_type lo = 0;
+        size_type hi = count;
+        while (lo < hi) {
+            size_type mid = lo + ((hi - lo) >> 1);
+            int cmp = key.compare(slots[mid].first);
+            if (cmp > 0) {
+                lo = mid + 1;
+            } else if (cmp < 0) {
+                hi = mid;
+            } else {
+                return {mid, true};  // Exact match found during search
+            }
+        }
+        return {lo, false};  // No exact match
+    }
+
     // Specialized search for leaf node
     [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_in_leaf(
       const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
@@ -1659,6 +1684,23 @@ class btree_map
             return lower_bound_in_leaf(static_cast<const leaf_node*>(node), key);
         }
         return lower_bound_in_internal(static_cast<const internal_node*>(node), key);
+    }
+
+    // Three-way search for leaf node (string-like types only)
+    // Returns {position, exact_match} - uses compare() to avoid extra equality check
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_with_match_in_leaf(
+      const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept
+      -> std::pair<size_type, bool> {
+        static_assert(string_like<Key>, "Only for string-like types");
+        return binary_search_three_way(leaf->slots, leaf->count, key);
+    }
+
+    // Three-way search for internal node (string-like types only)
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto lower_bound_with_match_in_internal(
+      const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept
+      -> std::pair<size_type, bool> {
+        static_assert(string_like<Key>, "Only for string-like types");
+        return binary_search_three_way(internal->slots, internal->count, key);
     }
 
     // Create a new leaf node
@@ -3435,37 +3477,65 @@ class btree_map
 
         // Find insertion point - traverse to leaf using specialized search
         node_base* node = _root;
-        while (!node->is_leaf_node()) [[likely]] {
-            auto* internal = static_cast<internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
 
-            // Check for exact match (single comparison optimization)
-            if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
-                return {iterator(node, pos), false};  // Key already exists
+        // For string-like types, use three-way comparison to avoid extra equality check
+        if constexpr (string_like<Key>) {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
+
+                if (exact_match) [[unlikely]] {
+                    return {iterator(node, pos), false};  // Key already exists
+                }
+
+                node = internal->children[pos];
             }
 
-            // Prefetch next node before traversing (skip for strings - doesn't help)
-            if constexpr (!string_like<Key>) {
+            // Now at leaf
+            auto* leaf = static_cast<leaf_node*>(node);
+            auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
+
+            if (exact_match) [[unlikely]] {
+                return {iterator(leaf, pos), false};  // Key already exists
+            }
+
+            // Insert and get the position where it was inserted
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
+        } else {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                size_type pos = lower_bound_in_internal(internal, key);
+
+                // Check for exact match (single comparison optimization)
+                if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                    return {iterator(node, pos), false};  // Key already exists
+                }
+
+                // Prefetch next node before traversing
                 __builtin_prefetch(internal->children[pos], 0, 3);
+                node = internal->children[pos];
             }
-            node = internal->children[pos];
+
+            // Now at leaf - use specialized search
+            auto* leaf = static_cast<leaf_node*>(node);
+            size_type pos = lower_bound_in_leaf(leaf, key);
+
+            // Check for exact match
+            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+                return {iterator(leaf, pos), false};  // Key already exists
+            }
+
+            // Insert and get the position where it was inserted
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
         }
-
-        // Now at leaf - use specialized search
-        auto* leaf = static_cast<leaf_node*>(node);
-        size_type pos = lower_bound_in_leaf(leaf, key);
-
-        // Check for exact match
-        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
-            return {iterator(leaf, pos), false};  // Key already exists
-        }
-
-        // Insert and get the position where it was inserted
-        auto [inserted_node, inserted_pos] =
-          insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
-        ++_size;
-
-        return {iterator(inserted_node, inserted_pos), true};
     }
 
     // try_emplace implementation - single traversal, constructs value only if needed
@@ -3503,34 +3573,61 @@ class btree_map
 
         // Find insertion point - traverse to leaf
         node_base* node = _root;
-        while (!node->is_leaf_node()) [[likely]] {
-            auto* internal = static_cast<internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
 
-            if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
-                return {iterator(node, pos), false};  // Key exists
+        // For string-like types, use three-way comparison to avoid extra equality check
+        if constexpr (string_like<Key>) {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
+
+                if (exact_match) [[unlikely]] {
+                    return {iterator(node, pos), false};  // Key exists
+                }
+
+                node = internal->children[pos];
             }
 
-            // Prefetch next node before traversing (skip for strings - doesn't help)
-            if constexpr (!string_like<Key>) {
+            auto* leaf = static_cast<leaf_node*>(node);
+            auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
+
+            if (exact_match) [[unlikely]] {
+                return {iterator(leaf, pos), false};  // Key exists
+            }
+
+            // Key doesn't exist - now construct value and insert
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), Value(std::forward<Args>(args)...));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
+        } else {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                size_type pos = lower_bound_in_internal(internal, key);
+
+                if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                    return {iterator(node, pos), false};  // Key exists
+                }
+
+                // Prefetch next node before traversing
                 __builtin_prefetch(internal->children[pos], 0, 3);
+                node = internal->children[pos];
             }
-            node = internal->children[pos];
+
+            auto* leaf = static_cast<leaf_node*>(node);
+            size_type pos = lower_bound_in_leaf(leaf, key);
+
+            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+                return {iterator(leaf, pos), false};  // Key exists
+            }
+
+            // Key doesn't exist - now construct value and insert
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), Value(std::forward<Args>(args)...));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
         }
-
-        auto* leaf = static_cast<leaf_node*>(node);
-        size_type pos = lower_bound_in_leaf(leaf, key);
-
-        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
-            return {iterator(leaf, pos), false};  // Key exists
-        }
-
-        // Key doesn't exist - now construct value and insert
-        auto [inserted_node, inserted_pos] =
-          insert_and_split_impl(leaf, pos, std::forward<K>(key), Value(std::forward<Args>(args)...));
-        ++_size;
-
-        return {iterator(inserted_node, inserted_pos), true};
     }
 
     // insert_or_assign implementation - single traversal, updates if exists, inserts if not
@@ -3568,37 +3665,68 @@ class btree_map
 
         // Find insertion point - traverse to leaf
         node_base* node = _root;
-        while (!node->is_leaf_node()) [[likely]] {
-            auto* internal = static_cast<internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
 
-            if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
-                // Key exists in internal node - update value
-                internal->value(pos) = std::forward<V>(value);
-                return {iterator(node, pos), false};
+        // For string-like types, use three-way comparison to avoid extra equality check
+        if constexpr (string_like<Key>) {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
+
+                if (exact_match) [[unlikely]] {
+                    // Key exists in internal node - update value
+                    internal->value(pos) = std::forward<V>(value);
+                    return {iterator(node, pos), false};
+                }
+
+                node = internal->children[pos];
             }
 
-            if constexpr (!string_like<Key>) {
+            auto* leaf = static_cast<leaf_node*>(node);
+            auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
+
+            if (exact_match) [[unlikely]] {
+                // Key exists in leaf - update value
+                leaf->value(pos) = std::forward<V>(value);
+                return {iterator(leaf, pos), false};
+            }
+
+            // Key doesn't exist - insert
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
+        } else {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                size_type pos = lower_bound_in_internal(internal, key);
+
+                if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                    // Key exists in internal node - update value
+                    internal->value(pos) = std::forward<V>(value);
+                    return {iterator(node, pos), false};
+                }
+
                 __builtin_prefetch(internal->children[pos], 0, 3);
+                node = internal->children[pos];
             }
-            node = internal->children[pos];
+
+            auto* leaf = static_cast<leaf_node*>(node);
+            size_type pos = lower_bound_in_leaf(leaf, key);
+
+            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+                // Key exists in leaf - update value
+                leaf->value(pos) = std::forward<V>(value);
+                return {iterator(leaf, pos), false};
+            }
+
+            // Key doesn't exist - insert
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+
+            return {iterator(inserted_node, inserted_pos), true};
         }
-
-        auto* leaf = static_cast<leaf_node*>(node);
-        size_type pos = lower_bound_in_leaf(leaf, key);
-
-        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
-            // Key exists in leaf - update value
-            leaf->value(pos) = std::forward<V>(value);
-            return {iterator(leaf, pos), false};
-        }
-
-        // Key doesn't exist - insert
-        auto [inserted_node, inserted_pos] =
-          insert_and_split_impl(leaf, pos, std::forward<K>(key), std::forward<V>(value));
-        ++_size;
-
-        return {iterator(inserted_node, inserted_pos), true};
     }
 
     // Insert with hint implementation - O(1) when hint is correct for sequential inserts
@@ -3676,32 +3804,51 @@ class btree_map
             return end();
         }
 
-        // Traverse internal nodes - most trees are shallow (2-4 levels)
-        while (!node->is_leaf_node()) [[likely]] {
-            auto* internal = static_cast<internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
+        // For string-like types, use three-way comparison to avoid extra equality check
+        if constexpr (string_like<Key>) {
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
 
-            // Check for exact match in internal node (rare for most insertions)
-            if (pos < internal->count) [[likely]] {
-                if (!_comp(key, internal->key(pos))) [[unlikely]] {
+                if (exact_match) [[unlikely]] {
                     return iterator(internal, pos);
                 }
+
+                node = internal->children[pos];
             }
 
-            // Prefetch next node before traversing (skip for strings - doesn't help)
-            if constexpr (!string_like<Key>) {
+            auto* leaf = static_cast<leaf_node*>(node);
+            auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
+            if (exact_match) [[likely]] {
+                return iterator(leaf, pos);
+            }
+            return end();
+        } else {
+            // Traverse internal nodes - most trees are shallow (2-4 levels)
+            while (!node->is_leaf_node()) [[likely]] {
+                auto* internal = static_cast<internal_node*>(node);
+                size_type pos = lower_bound_in_internal(internal, key);
+
+                // Check for exact match in internal node (rare for most insertions)
+                if (pos < internal->count) [[likely]] {
+                    if (!_comp(key, internal->key(pos))) [[unlikely]] {
+                        return iterator(internal, pos);
+                    }
+                }
+
+                // Prefetch next node before traversing
                 __builtin_prefetch(internal->children[pos], 0, 3);
+                node = internal->children[pos];
             }
-            node = internal->children[pos];
-        }
 
-        // At leaf node - most finds end here
-        auto* leaf = static_cast<leaf_node*>(node);
-        size_type pos = lower_bound_in_leaf(leaf, key);
-        if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[likely]] {
-            return iterator(leaf, pos);
+            // At leaf node - most finds end here
+            auto* leaf = static_cast<leaf_node*>(node);
+            size_type pos = lower_bound_in_leaf(leaf, key);
+            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[likely]] {
+                return iterator(leaf, pos);
+            }
+            return end();
         }
-        return end();
     }
 
     [[nodiscard]] auto find(const Key& key) const -> const_iterator {
