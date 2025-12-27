@@ -3097,6 +3097,24 @@ class btree_map
     __attribute__((hot)) auto insert_impl(K&& key, V&& value) -> std::pair<iterator, bool> {
         if (_root == nullptr) [[unlikely]] {
             _root = create_leaf();
+            auto* leaf = static_cast<leaf_node*>(_root);
+            leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
+            leaf->count = 1;
+            ++_size;
+            return {iterator(leaf, 0), true};
+        }
+
+        // Fast path: check if key > max key (sequential append case)
+        // Only for cheap-to-compare types - strings have expensive comparison
+        if constexpr (!string_like<Key>) {
+            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                // Key is greater than all existing keys - append to rightmost leaf
+                auto [inserted_node, inserted_pos] =
+                  insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                ++_size;
+                return {iterator(inserted_node, inserted_pos), true};
+            }
         }
 
         // Find insertion point - traverse to leaf using specialized search
@@ -3511,19 +3529,32 @@ class btree_map
         ++next;
 
         if (next != end() && next._node != pos._node) {
-            // Next is in a different node - check if it's a sibling (could be affected by rebalancing)
+            // Next is in a different node - check if it's in right sibling AND could be merged
             auto* pos_leaf = static_cast<leaf_node*>(pos._node);
             bool next_is_safe = true;
 
             if (pos_leaf->parent != nullptr) {
-                // Check if next's leaf is the right sibling of pos's leaf
-                // Right sibling could be merged during rebalancing
                 auto* parent = static_cast<internal_node*>(pos_leaf->parent);
                 size_type pos_idx = pos_leaf->position;
 
-                // The right sibling is at position pos_idx + 1
+                // Check if next is in the right sibling
                 if (pos_idx < parent->count && parent->children[pos_idx + 1] == next._node) {
-                    next_is_safe = false;  // Next is in right sibling, could be affected
+                    // Right sibling merge only happens when pos_idx == 0
+                    // (rebalance_after_erase prefers merging with left sibling)
+                    // If pos_idx > 0, we merge left, so right sibling is safe
+                    if (pos_idx == 0) {
+                        // Could merge with right sibling - check if it's actually needed
+                        // Merge happens when: can't borrow from left (pos_idx=0 means no left)
+                        // AND can't borrow from right (right sibling can't spare)
+                        auto* right_sibling = static_cast<leaf_node*>(parent->children[1]);
+                        // If right sibling can spare OR we won't underflow, next is safe
+                        if (pos_leaf->count > kMinLeafSlots || right_sibling->count > kMinLeafSlots + 1) {
+                            next_is_safe = true;  // Won't merge with right
+                        } else {
+                            next_is_safe = false;  // Will merge with right sibling
+                        }
+                    }
+                    // else: pos_idx > 0, will merge with left if needed, right sibling safe
                 }
             }
 
@@ -3534,8 +3565,9 @@ class btree_map
             }
         }
 
-        // Fall back to lower_bound with key copy
-        Key erased_key = pos->first;
+        // Fall back to lower_bound - move key from internal storage instead of copying
+        auto* leaf = static_cast<leaf_node*>(pos._node);
+        Key erased_key = std::move(leaf->slots[pos._pos].first);
         erase_impl(pos._node, pos._pos);
         return lower_bound(erased_key);
     }
