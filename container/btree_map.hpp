@@ -3409,8 +3409,9 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only for cheap-to-compare types - strings have expensive comparison
-        if constexpr (!string_like<Key>) {
+        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
+        // For shallow trees, just do normal traversal
+        if (!_root->is_leaf_node()) {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
                 // Key is greater than all existing keys - append to rightmost leaf
@@ -3469,8 +3470,8 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only for cheap-to-compare types - strings have expensive comparison
-        if constexpr (!string_like<Key>) {
+        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
+        if (!_root->is_leaf_node()) {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
                 // Key is greater than all existing keys - append to rightmost leaf
@@ -3526,8 +3527,8 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // Only for cheap-to-compare types - strings have expensive comparison
-        if constexpr (!string_like<Key>) {
+        // Only worthwhile when tree has depth > 1 (i.e., root is internal node)
+        if (!_root->is_leaf_node()) {
             auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
             if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
                 // Key is greater than all existing keys - append to rightmost leaf
