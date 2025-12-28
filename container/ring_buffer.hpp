@@ -397,6 +397,36 @@ class ring_buffer
     [[nodiscard]] auto rend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(begin()); }
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(cbegin()); }
 
+    // Search operations (no SIMD - circular buffer is not contiguous)
+    [[nodiscard]] auto find(const_reference value) noexcept -> iterator {
+        for (size_type i = 0; i < _size; ++i) {
+            if ((*this)[i] == value) return iterator(this, i);
+        }
+        return end();
+    }
+
+    [[nodiscard]] auto find(const_reference value) const noexcept -> const_iterator {
+        for (size_type i = 0; i < _size; ++i) {
+            if ((*this)[i] == value) return const_iterator(this, i);
+        }
+        return cend();
+    }
+
+    [[nodiscard]] auto contains(const_reference value) const noexcept -> bool {
+        for (size_type i = 0; i < _size; ++i) {
+            if ((*this)[i] == value) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] auto count(const_reference value) const noexcept -> size_type {
+        size_type result = 0;
+        for (size_type i = 0; i < _size; ++i) {
+            if ((*this)[i] == value) ++result;
+        }
+        return result;
+    }
+
     // Swap
     void swap(ring_buffer& other) noexcept {
         ring_buffer temp(std::move(*this));
@@ -410,16 +440,6 @@ class ring_buffer
         for (size_type i = 0; i < _size; ++i) {
             *out++ = (*this)[i];
         }
-    }
-
-    // Check if a value exists
-    [[nodiscard]] auto contains(const value_type& value) const -> bool {
-        for (size_type i = 0; i < _size; ++i) {
-            if ((*this)[i] == value) {
-                return true;
-            }
-        }
-        return false;
     }
 };
 
