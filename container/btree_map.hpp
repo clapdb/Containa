@@ -1766,10 +1766,30 @@ class btree_map
     }
 
     // Create a new leaf node
-    [[nodiscard]] auto create_leaf() -> leaf_node* { return new leaf_node(); }
+    [[nodiscard]] auto create_leaf() -> leaf_node* {
+        leaf_node* ptr = std::allocator_traits<leaf_allocator_type>::allocate(_leaf_alloc, 1);
+        std::allocator_traits<leaf_allocator_type>::construct(_leaf_alloc, ptr);
+        return ptr;
+    }
 
     // Create a new internal node
-    [[nodiscard]] auto create_internal() -> internal_node* { return new internal_node(); }
+    [[nodiscard]] auto create_internal() -> internal_node* {
+        internal_node* ptr = std::allocator_traits<internal_allocator_type>::allocate(_internal_alloc, 1);
+        std::allocator_traits<internal_allocator_type>::construct(_internal_alloc, ptr);
+        return ptr;
+    }
+
+    // Destroy a leaf node
+    void destroy_leaf(leaf_node* node) {
+        std::allocator_traits<leaf_allocator_type>::destroy(_leaf_alloc, node);
+        std::allocator_traits<leaf_allocator_type>::deallocate(_leaf_alloc, node, 1);
+    }
+
+    // Destroy an internal node
+    void destroy_internal(internal_node* node) {
+        std::allocator_traits<internal_allocator_type>::destroy(_internal_alloc, node);
+        std::allocator_traits<internal_allocator_type>::deallocate(_internal_alloc, node, 1);
+    }
 
     // Destroy a node recursively
     void destroy_node(node_base* node) {
@@ -1780,9 +1800,9 @@ class btree_map
             for (size_type i = 0; i <= internal->count; ++i) {
                 destroy_node(internal->children[i]);
             }
-            delete internal;
+            destroy_internal(internal);
         } else {
-            delete static_cast<leaf_node*>(node);
+            destroy_leaf(static_cast<leaf_node*>(node));
         }
     }
 
@@ -2563,7 +2583,7 @@ class btree_map
         remove_slot_from_internal(parent, parent_pos);
 
         // Delete right node
-        delete right;
+        destroy_leaf(right);
     }
 
     // Borrow from left sibling for internal node
@@ -2658,7 +2678,7 @@ class btree_map
         remove_slot_from_internal(parent, parent_pos);
 
         // Delete right node
-        delete right;
+        destroy_internal(right);
     }
 
     // Rebalance after deletion - handles underflow and tracks iterator position
@@ -2768,7 +2788,7 @@ class btree_map
                 if (_root) {
                     _root->parent = nullptr;
                 }
-                delete parent;
+                destroy_internal(parent);
                 return;
             }
 
@@ -2793,7 +2813,7 @@ class btree_map
 
             // Handle root leaf becoming empty
             if (leaf == _root && leaf->count == 0) {
-                delete leaf;
+                destroy_leaf(leaf);
                 _root = nullptr;
                 return;
             }
@@ -4330,7 +4350,7 @@ class btree_map
 
         // Handle empty root
         if (leaf == _root && leaf->count == 0) {
-            delete leaf;
+            destroy_leaf(leaf);
             _root = nullptr;
             return end();
         }
