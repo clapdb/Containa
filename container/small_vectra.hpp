@@ -537,6 +537,50 @@ class small_vectra
     [[nodiscard]] auto rend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(begin()); }
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(cbegin()); }
 
+    // SIMD-accelerated search operations
+    [[nodiscard]] auto find(const_reference value) noexcept -> iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(_start, size(), value);
+            return iterator(_start + idx);
+        } else {
+            for (T* p = _start; p != _finish; ++p) {
+                if (*p == value) return iterator(p);
+            }
+            return end();
+        }
+    }
+
+    [[nodiscard]] auto find(const_reference value) const noexcept -> const_iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(_start, size(), value);
+            return const_iterator(_start + idx);
+        } else {
+            for (const T* p = _start; p != _finish; ++p) {
+                if (*p == value) return const_iterator(p);
+            }
+            return cend();
+        }
+    }
+
+    [[nodiscard]] auto contains(const_reference value) const noexcept -> bool {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            return simd::simd_find(_start, size(), value) < size();
+        } else {
+            for (const T* p = _start; p != _finish; ++p) {
+                if (*p == value) return true;
+            }
+            return false;
+        }
+    }
+
+    [[nodiscard]] auto count(const_reference value) const noexcept -> size_type {
+        size_type result = 0;
+        for (const T* p = _start; p != _finish; ++p) {
+            if (*p == value) ++result;
+        }
+        return result;
+    }
+
     // Modifiers
     template <Safety safety = Safety::Safe>
     void push_back(const value_type& value) {
@@ -820,10 +864,15 @@ class small_vectra
 template <typename T, std::size_t N>
 auto operator==(const small_vectra<T, N>& lhs, const small_vectra<T, N>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[i]) return false;
+    if (lhs.size() == 0) return true;
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
+    } else {
+        for (std::size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i] != rhs[i]) return false;
+        }
+        return true;
     }
-    return true;
 }
 
 template <typename T, std::size_t N>
