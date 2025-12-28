@@ -693,6 +693,50 @@ class devectra
     [[nodiscard]] auto rend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(begin()); }
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return std::make_reverse_iterator(cbegin()); }
 
+    // SIMD-accelerated search operations
+    [[nodiscard]] auto find(const_reference value) noexcept -> iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(data_start(), _size, value);
+            return iterator(data_start() + idx);
+        } else {
+            for (T* p = data_start(); p != data_end(); ++p) {
+                if (*p == value) return iterator(p);
+            }
+            return end();
+        }
+    }
+
+    [[nodiscard]] auto find(const_reference value) const noexcept -> const_iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(data_start(), _size, value);
+            return const_iterator(data_start() + idx);
+        } else {
+            for (const T* p = data_start(); p != data_end(); ++p) {
+                if (*p == value) return const_iterator(p);
+            }
+            return cend();
+        }
+    }
+
+    [[nodiscard]] auto contains(const_reference value) const noexcept -> bool {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            return simd::simd_find(data_start(), _size, value) < _size;
+        } else {
+            for (const T* p = data_start(); p != data_end(); ++p) {
+                if (*p == value) return true;
+            }
+            return false;
+        }
+    }
+
+    [[nodiscard]] auto count(const_reference value) const noexcept -> size_type {
+        size_type result = 0;
+        for (const T* p = data_start(); p != data_end(); ++p) {
+            if (*p == value) ++result;
+        }
+        return result;
+    }
+
     // Swap
     void swap(devectra& other) noexcept {
         std::swap(_buffer, other._buffer);
@@ -808,10 +852,15 @@ class devectra
 template <typename T>
 auto operator==(const devectra<T>& lhs, const devectra<T>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[i]) return false;
+    if (lhs.size() == 0) return true;
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
+    } else {
+        for (std::size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i] != rhs[i]) return false;
+        }
+        return true;
     }
-    return true;
 }
 
 template <typename T>

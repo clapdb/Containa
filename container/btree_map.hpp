@@ -105,13 +105,38 @@ struct is_transparent_comparator<T, std::void_t<typename T::is_transparent>> : s
 template <typename T>
 inline constexpr bool is_transparent_comparator_v = is_transparent_comparator<T>::value;
 
+// Compressed pair that uses [[no_unique_address]] for empty types
+// This optimizes btree_set storage where Value is an empty type
+template <typename First, typename Second>
+struct compressed_pair
+{
+    First first;
+    [[no_unique_address]] Second second;
+
+    compressed_pair() = default;
+    compressed_pair(const compressed_pair&) = default;
+    compressed_pair(compressed_pair&&) noexcept = default;
+    compressed_pair& operator=(const compressed_pair&) = default;
+    compressed_pair& operator=(compressed_pair&&) noexcept = default;
+
+    template <typename F, typename S>
+    constexpr compressed_pair(F&& f, S&& s) : first(std::forward<F>(f)), second(std::forward<S>(s)) {}
+
+    constexpr compressed_pair(const First& f, const Second& s) : first(f), second(s) {}
+    constexpr compressed_pair(First&& f, Second&& s) : first(std::move(f)), second(std::move(s)) {}
+
+    // Conversion to std::pair for API compatibility
+    operator std::pair<const First, Second>() const { return {first, second}; }
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 template <typename Key, typename Value>
 constexpr std::size_t optimal_node_size() {
     constexpr std::size_t header_size = 24;  // parent + count + position + is_leaf + padding
     constexpr std::size_t target_slots = 15;
-    constexpr std::size_t pair_size = sizeof(std::pair<Key, Value>);
+    // Use compressed_pair size for accurate calculation
+    constexpr std::size_t pair_size = sizeof(compressed_pair<Key, Value>);
     constexpr std::size_t min_size = header_size + pair_size * target_slots;
     // Round up to power of 2 for cache alignment
     if (min_size <= 256) return 256;
@@ -202,11 +227,13 @@ class btree_map
 
    private:
     // Storage type without const (for internal manipulation)
-    using storage_type = std::pair<Key, Value>;
+    // Uses compressed_pair for [[no_unique_address]] optimization of empty value types
+    using storage_type = compressed_pair<Key, Value>;
 
     // Calculate optimal number of slots per node
     // Node layout: [header] + [slots (key-value pairs)] + [children for internal]
-    static constexpr size_type kNodeHeaderSize = sizeof(void*) * 2 + 8;  // parent + padding
+    // node_base is: parent(8) + count(2) + position(2) + is_leaf(1) + padding(3) = 16 bytes
+    static constexpr size_type kNodeHeaderSize = 16;
     static constexpr size_type kMinSlots = 4;
 
     // Calculate slots for leaf node (no child pointers)
@@ -2485,8 +2512,15 @@ class btree_map
 
     // Remove slot at position from leaf node (shifts remaining elements)
     void remove_slot_from_leaf(leaf_node* leaf, size_type pos) {
-        for (size_type i = pos; i < leaf->count - 1; ++i) {
-            leaf->slots[i] = std::move(leaf->slots[i + 1]);
+        size_type remaining = leaf->count - 1 - pos;
+        if (remaining > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&leaf->slots[pos], &leaf->slots[pos + 1], remaining * sizeof(storage_type));
+            } else {
+                for (size_type i = pos; i < leaf->count - 1; ++i) {
+                    leaf->slots[i] = std::move(leaf->slots[i + 1]);
+                }
+            }
         }
         --leaf->count;
     }
@@ -2536,8 +2570,14 @@ class btree_map
     // In B-tree: parent separator moves down to leaf, left sibling's last key moves up to parent
     void borrow_from_left_leaf(leaf_node* leaf, leaf_node* left_sibling, internal_node* parent, size_type parent_pos) {
         // Shift leaf elements right to make room at position 0
-        for (size_type i = leaf->count; i > 0; --i) {
-            leaf->slots[i] = std::move(leaf->slots[i - 1]);
+        if (leaf->count > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&leaf->slots[1], &leaf->slots[0], leaf->count * sizeof(storage_type));
+            } else {
+                for (size_type i = leaf->count; i > 0; --i) {
+                    leaf->slots[i] = std::move(leaf->slots[i - 1]);
+                }
+            }
         }
         ++leaf->count;
 
@@ -2560,8 +2600,15 @@ class btree_map
         parent->slots[parent_pos] = std::move(right_sibling->slots[0]);
 
         // Shift right sibling elements left
-        for (size_type i = 0; i < right_sibling->count - 1; ++i) {
-            right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+        size_type remaining = right_sibling->count - 1;
+        if (remaining > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&right_sibling->slots[0], &right_sibling->slots[1], remaining * sizeof(storage_type));
+            } else {
+                for (size_type i = 0; i < remaining; ++i) {
+                    right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+                }
+            }
         }
         --right_sibling->count;
     }
@@ -2574,8 +2621,14 @@ class btree_map
         ++left->count;
 
         // Move all elements from right to left
-        for (size_type i = 0; i < right->count; ++i) {
-            left->slots[left->count + i] = std::move(right->slots[i]);
+        if (right->count > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memcpy(&left->slots[left->count], &right->slots[0], right->count * sizeof(storage_type));
+            } else {
+                for (size_type i = 0; i < right->count; ++i) {
+                    left->slots[left->count + i] = std::move(right->slots[i]);
+                }
+            }
         }
         left->count += right->count;
 
@@ -2694,7 +2747,7 @@ class btree_map
             bool is_leaf = node->is_leaf_node();
             size_type min_slots = is_leaf ? kMinLeafSlots : kMinInternalSlots;
 
-            if (node->count >= min_slots) {
+            if (node->count >= min_slots) [[likely]] {
                 return;  // No underflow
             }
 
@@ -2899,19 +2952,22 @@ class btree_map
                     return;  // More elements in current leaf
                 }
 
-                // Move to parent and find next
-                while (_node->parent != nullptr) {
-                    size_type parent_pos = _node->position;
-                    _node = _node->parent;
-                    if (parent_pos < _node->count) {
+                // Past end of this leaf, look for next in parents
+                node_base* current = leaf;
+                while (current->parent != nullptr) {
+                    size_type parent_pos = current->position;
+                    auto* parent = current->parent;
+                    if (parent_pos < parent->count) {
                         // Found next key in parent
+                        _node = parent;
                         _pos = parent_pos;
                         return;
                     }
+                    current = parent;
                 }
-                // End of tree
-                _node = nullptr;
-                _pos = 0;
+                // End of tree - stay at this leaf with pos = count (end representation)
+                // _node is still leaf, _pos is already count
+                return;
             } else {
                 // Internal node: go to next subtree's leftmost leaf
                 auto* internal = static_cast<internal_node*>(_node);
@@ -2939,14 +2995,8 @@ class btree_map
                     size_type child_pos = _node->position;
                     _node = _node->parent;
                     if (child_pos > 0) {
-                        // Go to the rightmost element of the left subtree
-                        auto* internal = static_cast<internal_node*>(_node);
+                        // Return to parent key at pos = child_pos - 1
                         _pos = child_pos - 1;
-                        // Check if parent key or need to descend
-                        node_base* child = internal->children[child_pos];
-                        // We came from child at child_pos, so previous is either parent[child_pos-1]
-                        // or the rightmost in children[child_pos-1] subtree
-                        // Actually, for a B-tree, we return to parent key at pos = child_pos - 1
                         return;
                     }
                 }
@@ -3036,16 +3086,20 @@ class btree_map
                     return;
                 }
 
-                while (_node->parent != nullptr) {
-                    size_type parent_pos = _node->position;
-                    _node = _node->parent;
-                    if (parent_pos < _node->count) {
+                // Past end of this leaf, look for next in parents
+                const node_base* current = leaf;
+                while (current->parent != nullptr) {
+                    size_type parent_pos = current->position;
+                    auto* parent = current->parent;
+                    if (parent_pos < parent->count) {
+                        _node = parent;
                         _pos = parent_pos;
                         return;
                     }
+                    current = parent;
                 }
-                _node = nullptr;
-                _pos = 0;
+                // End of tree - stay at this leaf with pos = count
+                return;
             } else {
                 auto* internal = static_cast<const internal_node*>(_node);
                 const node_base* child = internal->children[_pos + 1];
@@ -4270,9 +4324,17 @@ class btree_map
 
     [[nodiscard]] auto cbegin() const noexcept -> const_iterator { return begin(); }
 
-    [[nodiscard]] auto end() noexcept -> iterator { return iterator(nullptr, 0); }
+    [[nodiscard]] auto end() noexcept -> iterator {
+        auto* rm = const_cast<leaf_node*>(rightmost_leaf());
+        if (rm == nullptr) return iterator(nullptr, 0);
+        return iterator(static_cast<node_base*>(rm), rm->count);
+    }
 
-    [[nodiscard]] auto end() const noexcept -> const_iterator { return const_iterator(nullptr, 0); }
+    [[nodiscard]] auto end() const noexcept -> const_iterator {
+        auto* rm = rightmost_leaf();
+        if (rm == nullptr) return const_iterator(nullptr, 0);
+        return const_iterator(static_cast<const node_base*>(rm), rm->count);
+    }
 
     [[nodiscard]] auto cend() const noexcept -> const_iterator { return end(); }
 
@@ -4344,6 +4406,9 @@ class btree_map
         auto* leaf = static_cast<leaf_node*>(pos._node);
         size_type erase_pos = pos._pos;
 
+        // Check if rebalancing will be needed BEFORE removing element
+        bool will_underflow = (leaf != _root && leaf->count <= kMinLeafSlots);
+
         // Remove the element
         remove_slot_from_leaf(leaf, erase_pos);
         --_size;
@@ -4355,34 +4420,40 @@ class btree_map
             return end();
         }
 
-        // Track result position through potential rebalancing
-        node_base* res_node = leaf;
-        size_type res_pos = erase_pos;
-        bool was_last = (erase_pos >= leaf->count);
-
-        // Rebalance if needed (function returns early if no underflow)
-        if (leaf != _root) {
+        // Rebalance if needed
+        if (will_underflow) {
+            node_base* res_node = leaf;
+            size_type res_pos = erase_pos;
+            bool was_last = (erase_pos >= leaf->count);
             rebalance_after_erase_with_iterator(leaf, res_node, res_pos);
+
+            if (_root == nullptr) {
+                return end();
+            }
+
+            auto* res_leaf = static_cast<leaf_node*>(res_node);
+            if (was_last || res_pos >= res_leaf->count) {
+                if (res_leaf->count > 0) {
+                    iterator it(res_leaf, res_leaf->count - 1);
+                    ++it;
+                    return it;
+                }
+                return end();
+            }
+            return iterator(res_node, res_pos);
         }
 
-        // Handle tree becoming empty during rebalance
-        if (_root == nullptr) {
-            return end();
-        }
-
-        // Build result iterator
-        auto* res_leaf = static_cast<leaf_node*>(res_node);
-        if (was_last || res_pos >= res_leaf->count) {
-            // Erased last element in node - advance to next
-            if (res_leaf->count > 0) {
-                iterator it(res_leaf, res_leaf->count - 1);
+        // No rebalancing needed - element at erase_pos is now the next element
+        if (erase_pos >= leaf->count) {
+            // Erased last element - advance to next node
+            if (leaf->count > 0) {
+                iterator it(leaf, leaf->count - 1);
                 ++it;
                 return it;
             }
             return end();
         }
-
-        return iterator(res_node, res_pos);
+        return iterator(leaf, erase_pos);
     }
 
     auto erase(const_iterator pos) -> iterator { return erase(iterator(const_cast<node_base*>(pos._node), pos._pos)); }
@@ -4598,6 +4669,203 @@ class btree_map
             insert(std::forward<decltype(elem)>(elem));
         }
     }
+
+    // insert_sorted - optimized insert for pre-sorted input (ascending order)
+    // PRECONDITION: Input range must be sorted in ascending order according to Compare
+    // PRECONDITION: All keys in input must be greater than existing keys in the map
+    // This avoids the comparison check and tree traversal for each insert
+    template <typename InputIt>
+        requires requires(InputIt it) {
+            { *it } -> std::convertible_to<value_type>;
+            ++it;
+        }
+    void insert_sorted(InputIt first, InputIt last) {
+        if (first == last) return;
+
+        // Handle empty tree
+        if (_root == nullptr) [[unlikely]] {
+            _root = create_leaf();
+        }
+
+        // Cache the rightmost leaf - only traverse once
+        leaf_node* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+
+        while (first != last) {
+            // Fill current leaf as much as possible
+            size_type available = kLeafSlots - right_leaf->count;
+
+            while (available > 0 && first != last) {
+                const auto& [key, value] = *first;
+                right_leaf->slots[right_leaf->count] = storage_type(key, value);
+                ++right_leaf->count;
+                ++_size;
+                --available;
+                ++first;
+            }
+
+            // If we've exhausted input, we're done
+            if (first == last) break;
+
+            // Leaf is full, need to split - use optimized append split
+            right_leaf = split_rightmost_leaf_for_append(right_leaf);
+        }
+    }
+
+   private:
+    // Optimized split for appending to rightmost leaf
+    // Returns the new rightmost leaf (which is the new right sibling)
+    // Optimization: Don't move elements - just take last element as median
+    // and start fresh in right. Left stays nearly full, no memcpy needed.
+    leaf_node* split_rightmost_leaf_for_append(leaf_node* leaf) {
+        // Create new empty right sibling
+        auto* new_right = create_leaf();
+        new_right->count = 0;
+
+        // Take the last element of left as median (goes to parent only)
+        --leaf->count;
+        Key median_key = std::move(leaf->slots[leaf->count].first);
+        Value median_value = std::move(leaf->slots[leaf->count].second);
+
+        // Left keeps [0, count-1], right starts empty
+        // This is much faster than moving half the elements
+
+        // Now propagate split up the tree
+        propagate_split_to_parent(leaf, new_right, std::move(median_key), std::move(median_value));
+
+        return new_right;
+    }
+
+    // Propagate a leaf split up to parent nodes
+    void propagate_split_to_parent(node_base* left_child, node_base* right_child, Key median_key, Value median_value) {
+        if (left_child->parent == nullptr) {
+            // Splitting the root - create new root
+            auto* new_root = create_internal();
+            new_root->slots[0] = storage_type(std::move(median_key), std::move(median_value));
+            new_root->children[0] = left_child;
+            new_root->children[1] = right_child;
+            new_root->count = 1;
+
+            left_child->parent = new_root;
+            left_child->position = 0;
+            right_child->parent = new_root;
+            right_child->position = 1;
+
+            _root = new_root;
+            return;
+        }
+
+        auto* parent = static_cast<internal_node*>(left_child->parent);
+        size_type insert_pos = left_child->position;
+
+        if (parent->count < kInternalSlots) {
+            // Parent has room - insert directly
+            // Shift elements right
+            for (size_type i = parent->count; i > insert_pos; --i) {
+                parent->slots[i] = std::move(parent->slots[i - 1]);
+                parent->children[i + 1] = parent->children[i];
+                if (parent->children[i + 1]) {
+                    parent->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+                }
+            }
+            parent->slots[insert_pos] = storage_type(std::move(median_key), std::move(median_value));
+            parent->children[insert_pos + 1] = right_child;
+            right_child->parent = parent;
+            right_child->position = static_cast<uint16_t>(insert_pos + 1);
+            ++parent->count;
+        } else {
+            // Parent is full - need to split parent too
+            split_internal_for_append(parent, insert_pos, right_child, std::move(median_key), std::move(median_value));
+        }
+    }
+
+    // Split internal node when inserting at the rightmost position
+    void split_internal_for_append(internal_node* internal, size_type insert_pos,
+                                   node_base* new_child, Key key, Value value) {
+        auto* new_right = create_internal();
+        size_type mid = kInternalSlots / 2;
+
+        Key parent_median_key;
+        Value parent_median_value;
+
+        if (insert_pos >= mid) {
+            // New element goes to right half or becomes median
+            parent_median_key = std::move(internal->slots[mid].first);
+            parent_median_value = std::move(internal->slots[mid].second);
+
+            // Move elements after mid to new_right
+            size_type right_idx = 0;
+            for (size_type i = mid + 1; i < internal->count; ++i) {
+                if (i == insert_pos) {
+                    new_right->slots[right_idx] = storage_type(std::move(key), std::move(value));
+                    new_right->children[right_idx + 1] = new_child;
+                    new_child->parent = new_right;
+                    new_child->position = static_cast<uint16_t>(right_idx + 1);
+                    ++right_idx;
+                }
+                new_right->slots[right_idx] = std::move(internal->slots[i]);
+                ++right_idx;
+            }
+            // Move children
+            for (size_type i = mid + 1; i <= internal->count; ++i) {
+                size_type dest = i - mid - 1;
+                if (i > insert_pos) dest++;
+                new_right->children[dest] = internal->children[i];
+                if (new_right->children[dest]) {
+                    new_right->children[dest]->parent = new_right;
+                    new_right->children[dest]->position = static_cast<uint16_t>(dest);
+                }
+            }
+
+            // Handle insertion at the very end
+            if (insert_pos >= internal->count) {
+                new_right->slots[right_idx] = storage_type(std::move(key), std::move(value));
+                new_right->children[right_idx + 1] = new_child;
+                new_child->parent = new_right;
+                new_child->position = static_cast<uint16_t>(right_idx + 1);
+                ++right_idx;
+            }
+
+            new_right->count = static_cast<uint16_t>(right_idx);
+            internal->count = static_cast<uint16_t>(mid);
+        } else {
+            // New element goes to left half
+            parent_median_key = std::move(internal->slots[mid - 1].first);
+            parent_median_value = std::move(internal->slots[mid - 1].second);
+
+            // Move elements from mid to new_right
+            for (size_type i = mid; i < internal->count; ++i) {
+                new_right->slots[i - mid] = std::move(internal->slots[i]);
+            }
+            for (size_type i = mid; i <= internal->count; ++i) {
+                new_right->children[i - mid] = internal->children[i];
+                if (new_right->children[i - mid]) {
+                    new_right->children[i - mid]->parent = new_right;
+                    new_right->children[i - mid]->position = static_cast<uint16_t>(i - mid);
+                }
+            }
+            new_right->count = static_cast<uint16_t>(internal->count - mid);
+            internal->count = static_cast<uint16_t>(mid - 1);
+
+            // Insert into left half
+            for (size_type i = internal->count; i > insert_pos; --i) {
+                internal->slots[i] = std::move(internal->slots[i - 1]);
+                internal->children[i + 1] = internal->children[i];
+                if (internal->children[i + 1]) {
+                    internal->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+                }
+            }
+            internal->slots[insert_pos] = storage_type(std::move(key), std::move(value));
+            internal->children[insert_pos + 1] = new_child;
+            new_child->parent = internal;
+            new_child->position = static_cast<uint16_t>(insert_pos + 1);
+            ++internal->count;
+        }
+
+        // Propagate split up
+        propagate_split_to_parent(internal, new_right, std::move(parent_median_key), std::move(parent_median_value));
+    }
+
+   public:
 
     // Comparison operators
     friend auto operator==(const btree_map& lhs, const btree_map& rhs) -> bool {
