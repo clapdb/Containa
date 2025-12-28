@@ -4670,6 +4670,203 @@ class btree_map
         }
     }
 
+    // insert_sorted - optimized insert for pre-sorted input (ascending order)
+    // PRECONDITION: Input range must be sorted in ascending order according to Compare
+    // PRECONDITION: All keys in input must be greater than existing keys in the map
+    // This avoids the comparison check and tree traversal for each insert
+    template <typename InputIt>
+        requires requires(InputIt it) {
+            { *it } -> std::convertible_to<value_type>;
+            ++it;
+        }
+    void insert_sorted(InputIt first, InputIt last) {
+        if (first == last) return;
+
+        // Handle empty tree
+        if (_root == nullptr) [[unlikely]] {
+            _root = create_leaf();
+        }
+
+        // Cache the rightmost leaf - only traverse once
+        leaf_node* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+
+        while (first != last) {
+            // Fill current leaf as much as possible
+            size_type available = kLeafSlots - right_leaf->count;
+
+            while (available > 0 && first != last) {
+                const auto& [key, value] = *first;
+                right_leaf->slots[right_leaf->count] = storage_type(key, value);
+                ++right_leaf->count;
+                ++_size;
+                --available;
+                ++first;
+            }
+
+            // If we've exhausted input, we're done
+            if (first == last) break;
+
+            // Leaf is full, need to split - use optimized append split
+            right_leaf = split_rightmost_leaf_for_append(right_leaf);
+        }
+    }
+
+   private:
+    // Optimized split for appending to rightmost leaf
+    // Returns the new rightmost leaf (which is the new right sibling)
+    // Optimization: Don't move elements - just take last element as median
+    // and start fresh in right. Left stays nearly full, no memcpy needed.
+    leaf_node* split_rightmost_leaf_for_append(leaf_node* leaf) {
+        // Create new empty right sibling
+        auto* new_right = create_leaf();
+        new_right->count = 0;
+
+        // Take the last element of left as median (goes to parent only)
+        --leaf->count;
+        Key median_key = std::move(leaf->slots[leaf->count].first);
+        Value median_value = std::move(leaf->slots[leaf->count].second);
+
+        // Left keeps [0, count-1], right starts empty
+        // This is much faster than moving half the elements
+
+        // Now propagate split up the tree
+        propagate_split_to_parent(leaf, new_right, std::move(median_key), std::move(median_value));
+
+        return new_right;
+    }
+
+    // Propagate a leaf split up to parent nodes
+    void propagate_split_to_parent(node_base* left_child, node_base* right_child, Key median_key, Value median_value) {
+        if (left_child->parent == nullptr) {
+            // Splitting the root - create new root
+            auto* new_root = create_internal();
+            new_root->slots[0] = storage_type(std::move(median_key), std::move(median_value));
+            new_root->children[0] = left_child;
+            new_root->children[1] = right_child;
+            new_root->count = 1;
+
+            left_child->parent = new_root;
+            left_child->position = 0;
+            right_child->parent = new_root;
+            right_child->position = 1;
+
+            _root = new_root;
+            return;
+        }
+
+        auto* parent = static_cast<internal_node*>(left_child->parent);
+        size_type insert_pos = left_child->position;
+
+        if (parent->count < kInternalSlots) {
+            // Parent has room - insert directly
+            // Shift elements right
+            for (size_type i = parent->count; i > insert_pos; --i) {
+                parent->slots[i] = std::move(parent->slots[i - 1]);
+                parent->children[i + 1] = parent->children[i];
+                if (parent->children[i + 1]) {
+                    parent->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+                }
+            }
+            parent->slots[insert_pos] = storage_type(std::move(median_key), std::move(median_value));
+            parent->children[insert_pos + 1] = right_child;
+            right_child->parent = parent;
+            right_child->position = static_cast<uint16_t>(insert_pos + 1);
+            ++parent->count;
+        } else {
+            // Parent is full - need to split parent too
+            split_internal_for_append(parent, insert_pos, right_child, std::move(median_key), std::move(median_value));
+        }
+    }
+
+    // Split internal node when inserting at the rightmost position
+    void split_internal_for_append(internal_node* internal, size_type insert_pos,
+                                   node_base* new_child, Key key, Value value) {
+        auto* new_right = create_internal();
+        size_type mid = kInternalSlots / 2;
+
+        Key parent_median_key;
+        Value parent_median_value;
+
+        if (insert_pos >= mid) {
+            // New element goes to right half or becomes median
+            parent_median_key = std::move(internal->slots[mid].first);
+            parent_median_value = std::move(internal->slots[mid].second);
+
+            // Move elements after mid to new_right
+            size_type right_idx = 0;
+            for (size_type i = mid + 1; i < internal->count; ++i) {
+                if (i == insert_pos) {
+                    new_right->slots[right_idx] = storage_type(std::move(key), std::move(value));
+                    new_right->children[right_idx + 1] = new_child;
+                    new_child->parent = new_right;
+                    new_child->position = static_cast<uint16_t>(right_idx + 1);
+                    ++right_idx;
+                }
+                new_right->slots[right_idx] = std::move(internal->slots[i]);
+                ++right_idx;
+            }
+            // Move children
+            for (size_type i = mid + 1; i <= internal->count; ++i) {
+                size_type dest = i - mid - 1;
+                if (i > insert_pos) dest++;
+                new_right->children[dest] = internal->children[i];
+                if (new_right->children[dest]) {
+                    new_right->children[dest]->parent = new_right;
+                    new_right->children[dest]->position = static_cast<uint16_t>(dest);
+                }
+            }
+
+            // Handle insertion at the very end
+            if (insert_pos >= internal->count) {
+                new_right->slots[right_idx] = storage_type(std::move(key), std::move(value));
+                new_right->children[right_idx + 1] = new_child;
+                new_child->parent = new_right;
+                new_child->position = static_cast<uint16_t>(right_idx + 1);
+                ++right_idx;
+            }
+
+            new_right->count = static_cast<uint16_t>(right_idx);
+            internal->count = static_cast<uint16_t>(mid);
+        } else {
+            // New element goes to left half
+            parent_median_key = std::move(internal->slots[mid - 1].first);
+            parent_median_value = std::move(internal->slots[mid - 1].second);
+
+            // Move elements from mid to new_right
+            for (size_type i = mid; i < internal->count; ++i) {
+                new_right->slots[i - mid] = std::move(internal->slots[i]);
+            }
+            for (size_type i = mid; i <= internal->count; ++i) {
+                new_right->children[i - mid] = internal->children[i];
+                if (new_right->children[i - mid]) {
+                    new_right->children[i - mid]->parent = new_right;
+                    new_right->children[i - mid]->position = static_cast<uint16_t>(i - mid);
+                }
+            }
+            new_right->count = static_cast<uint16_t>(internal->count - mid);
+            internal->count = static_cast<uint16_t>(mid - 1);
+
+            // Insert into left half
+            for (size_type i = internal->count; i > insert_pos; --i) {
+                internal->slots[i] = std::move(internal->slots[i - 1]);
+                internal->children[i + 1] = internal->children[i];
+                if (internal->children[i + 1]) {
+                    internal->children[i + 1]->position = static_cast<uint16_t>(i + 1);
+                }
+            }
+            internal->slots[insert_pos] = storage_type(std::move(key), std::move(value));
+            internal->children[insert_pos + 1] = new_child;
+            new_child->parent = internal;
+            new_child->position = static_cast<uint16_t>(insert_pos + 1);
+            ++internal->count;
+        }
+
+        // Propagate split up
+        propagate_split_to_parent(internal, new_right, std::move(parent_median_key), std::move(parent_median_value));
+    }
+
+   public:
+
     // Comparison operators
     friend auto operator==(const btree_map& lhs, const btree_map& rhs) -> bool {
         if (lhs.size() != rhs.size()) return false;

@@ -461,6 +461,36 @@ class btree_set
     }
 #endif
 
+    // insert_sorted - optimized insert for pre-sorted input (ascending order)
+    // PRECONDITION: Input range must be sorted in ascending order according to Compare
+    // PRECONDITION: All keys in input must be greater than existing keys in the set
+    template <typename InputIt>
+    requires requires(InputIt it) {
+        { *it } -> std::convertible_to<Key>;
+        ++it;
+    }
+    void insert_sorted(InputIt first, InputIt last) {
+        if (first == last) return;
+
+        // Create a transform iterator that wraps keys as pairs
+        struct PairIterator {
+            InputIt it;
+            using value_type = std::pair<const Key, btree_set_empty_value>;
+            using reference = value_type;
+            using pointer = const value_type*;
+            using difference_type = std::ptrdiff_t;
+            using iterator_category = std::input_iterator_tag;
+
+            PairIterator& operator++() { ++it; return *this; }
+            PairIterator operator++(int) { auto tmp = *this; ++it; return tmp; }
+            reference operator*() const { return {*it, btree_set_empty_value{}}; }
+            bool operator==(const PairIterator& other) const { return it == other.it; }
+            bool operator!=(const PairIterator& other) const { return it != other.it; }
+        };
+
+        _map.insert_sorted(PairIterator{first}, PairIterator{last});
+    }
+
     // Emplace
     template <typename... Args>
     auto emplace(Args&&... args) -> std::pair<iterator, bool> {
