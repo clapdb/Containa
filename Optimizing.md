@@ -73,9 +73,67 @@ Containa uses a hybrid search strategy optimized for different key types:
 
 ### Performance Benchmarks
 
-Tested with clang++ -O3 -march=native on 10,000 elements:
+Tested with clang++ -O3 -march=native on 100,000 elements:
 
-#### Containa vs Abseil btree_map (Find operation)
+#### Integer Keys (int → int)
+
+| Operation | Abseil | Containa | Speedup |
+|-----------|--------|----------|---------|
+| Sorted insert | 6.15 ms | 1.45 ms | **4.2x** |
+| Random insert | 12.57 ms | 9.15 ms | **1.37x** |
+| Find | 7.58 ms | 6.62 ms | **1.14x** |
+| Iterate | 0.51 ms | 0.12 ms | **4.1x** |
+
+#### String Keys (string → int)
+
+| Operation | Abseil | Containa | Speedup |
+|-----------|--------|----------|---------|
+| Sorted insert | 8.82 ms | 4.70 ms | **1.88x** |
+| Random insert | 27.4 ms | 25.5 ms | **1.07x** |
+| Find | 21.9 ms | 19.9 ms | **1.10x** |
+| Iterate | 1.08 ms | 0.19 ms | **5.6x** |
+
+### Large Scale Benchmarks
+
+Performance at scale (1M and 10M elements) to verify behavior under memory pressure:
+
+#### Integer Keys - 1M elements
+
+| Operation | Abseil | Containa | Speedup |
+|-----------|--------|----------|---------|
+| Sorted insert | 65.1 ms | 12.8 ms | **5.1x** |
+| Random insert | 152 ms | 127 ms | **1.20x** |
+| Find | 121 ms | 117 ms | **1.04x** |
+| Iterate | 7.9 ms | 2.1 ms | **3.8x** |
+| Erase | 284 ms | 251 ms | **1.13x** |
+
+#### Integer Keys - 10M elements
+
+| Operation | Abseil | Containa | Speedup |
+|-----------|--------|----------|---------|
+| Sorted insert | 687 ms | 172 ms | **4.0x** |
+| Random insert | 2.75 s | 2.79 s | ~1.0x |
+| Find | 2.33 s | 2.54 s | 0.92x |
+| Iterate | 100 ms | 41 ms | **2.4x** |
+| Erase | 5.18 s | 5.38 s | ~1.0x |
+
+#### String Keys - 1M elements
+
+| Operation | Abseil | Containa | Speedup |
+|-----------|--------|----------|---------|
+| Sorted insert | 85 ms | 40 ms | **2.1x** |
+| Random insert | 451 ms | 385 ms | **1.17x** |
+| Find | 409 ms | 365 ms | **1.12x** |
+| Iterate | 27.9 ms | 5.5 ms | **5.1x** |
+
+#### Scaling Observations
+
+- **Sorted insert** maintains 4-5x advantage even at 10M elements
+- **Iteration** remains 2-5x faster at all scales
+- **Random operations** at 10M elements become cache-miss dominated, reducing SIMD advantages
+- Memory bandwidth becomes the bottleneck above ~1M elements for random access patterns
+
+#### Find by Type (10,000 elements)
 
 | Type     | Abseil | Containa | Speedup |
 |----------|--------|----------|---------|
@@ -139,14 +197,19 @@ if (it != map.end()) {
 | Search (non-SIMD) | Linear search | Binary search |
 | SIMD support | int8-64, float, double | No |
 | Memory layout | Key-value pairs together | Key-value pairs together |
-| Deletion | Rebuild (simple) | Proper rebalancing |
-| Code size | ~2000 lines | ~3000 lines |
+| Deletion | Proper rebalancing | Proper rebalancing |
+| Custom allocator | Yes (allocator_traits) | Yes |
+| Heterogeneous lookup | Yes (is_transparent) | Yes |
+| Node handle API | Yes (C++17) | Yes |
+| Code size | ~4500 lines | ~3000 lines |
 | Dependencies | None (header-only) | Abseil base libs |
 
 #### Key findings:
+- **Sorted insert**: Containa is 1.9-4.2x faster (optimized sequential append path)
+- **Random insert**: Containa is 1.07-1.37x faster
 - **SIMD types (int8-64, float, double)**: Containa is 1.1-2.7x faster at find
 - **Struct types**: Containa is 1.2-1.3x faster at find (linear search beats binary)
-- **Iteration**: Containa is 2-4x faster (more compact traversal)
+- **Iteration**: Containa is 4-6x faster (more compact traversal)
 
 #### Design Differences
 
@@ -162,28 +225,28 @@ Why this is better:
   - Lower per-iteration overhead
 
 **Deletion:**
-- Abseil implements full B-tree rebalancing (merge/borrow from siblings)
-- Containa currently rebuilds the tree on delete (simpler, but O(n) for single delete)
-- For bulk operations, Containa's approach may be acceptable
+- Both Abseil and Containa implement full B-tree rebalancing (merge/borrow from siblings)
+- O(log n) deletion with proper node rebalancing
+- Iterator invalidation on delete (same as Abseil)
 
 **Memory Efficiency:**
 - Both target 256-byte nodes for optimal cache line utilization
-- Abseil has slightly more sophisticated memory allocation (custom allocator support)
-- Containa uses standard `new`/`delete`
+- Both support custom allocators via `std::allocator_traits`
+- Containa uses `[[no_unique_address]]` for zero-overhead stateless allocators
 
 #### When to Choose Each
 
 **Use Containa btree_map when:**
 - You need a simple, header-only solution with no dependencies
+- You want faster insert (1.4-4.2x faster for sorted, 1.07-1.37x for random)
 - You want faster find for any key type (1.1-2.7x faster)
-- You want faster iteration (2-4x faster)
-- Deletion is rare or batch-oriented
+- You want faster iteration (4-6x faster)
+- You need full C++20 API compatibility (heterogeneous lookup, node handles, etc.)
 
 **Use Abseil btree_map when:**
-- You need production-grade deletion performance with rebalancing
 - You're already using Abseil in your project
-- You need custom allocator support
 - You want thoroughly battle-tested code in production environments
+- You need specific Abseil extensions not in standard API
 
 ### String Key/Value Performance
 
@@ -236,5 +299,6 @@ Containa btree_map is **1.1-2.7x faster** than Abseil for find (depending on key
 | Iterate   | 87 us    | 23 us     | **3.78x** |
 
 ### Future Optimizations
-- Proper B-tree deletion with rebalancing (current implementation rebuilds)
 - B+ tree variant for even faster iteration
+- Bulk loading optimization for sorted input
+- Memory pool allocator for reduced allocation overhead
