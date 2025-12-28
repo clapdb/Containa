@@ -105,13 +105,38 @@ struct is_transparent_comparator<T, std::void_t<typename T::is_transparent>> : s
 template <typename T>
 inline constexpr bool is_transparent_comparator_v = is_transparent_comparator<T>::value;
 
+// Compressed pair that uses [[no_unique_address]] for empty types
+// This optimizes btree_set storage where Value is an empty type
+template <typename First, typename Second>
+struct compressed_pair
+{
+    First first;
+    [[no_unique_address]] Second second;
+
+    compressed_pair() = default;
+    compressed_pair(const compressed_pair&) = default;
+    compressed_pair(compressed_pair&&) noexcept = default;
+    compressed_pair& operator=(const compressed_pair&) = default;
+    compressed_pair& operator=(compressed_pair&&) noexcept = default;
+
+    template <typename F, typename S>
+    constexpr compressed_pair(F&& f, S&& s) : first(std::forward<F>(f)), second(std::forward<S>(s)) {}
+
+    constexpr compressed_pair(const First& f, const Second& s) : first(f), second(s) {}
+    constexpr compressed_pair(First&& f, Second&& s) : first(std::move(f)), second(std::move(s)) {}
+
+    // Conversion to std::pair for API compatibility
+    operator std::pair<const First, Second>() const { return {first, second}; }
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 template <typename Key, typename Value>
 constexpr std::size_t optimal_node_size() {
     constexpr std::size_t header_size = 24;  // parent + count + position + is_leaf + padding
     constexpr std::size_t target_slots = 15;
-    constexpr std::size_t pair_size = sizeof(std::pair<Key, Value>);
+    // Use compressed_pair size for accurate calculation
+    constexpr std::size_t pair_size = sizeof(compressed_pair<Key, Value>);
     constexpr std::size_t min_size = header_size + pair_size * target_slots;
     // Round up to power of 2 for cache alignment
     if (min_size <= 256) return 256;
@@ -202,7 +227,8 @@ class btree_map
 
    private:
     // Storage type without const (for internal manipulation)
-    using storage_type = std::pair<Key, Value>;
+    // Uses compressed_pair for [[no_unique_address]] optimization of empty value types
+    using storage_type = compressed_pair<Key, Value>;
 
     // Calculate optimal number of slots per node
     // Node layout: [header] + [slots (key-value pairs)] + [children for internal]

@@ -60,8 +60,8 @@ template <typename Key>
 constexpr std::size_t optimal_set_node_size() {
     constexpr std::size_t header_size = 24;
     constexpr std::size_t target_slots = 15;
-    // For set, we store pair<Key, empty> which should optimize to just Key
-    constexpr std::size_t slot_size = sizeof(std::pair<Key, btree_set_empty_value>);
+    // Use compressed_pair for accurate size (empty value gets [[no_unique_address]])
+    constexpr std::size_t slot_size = sizeof(compressed_pair<Key, btree_set_empty_value>);
     constexpr std::size_t min_size = header_size + slot_size * target_slots;
     if (min_size <= 256) return 256;
     if (min_size <= 512) return 512;
