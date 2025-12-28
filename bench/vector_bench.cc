@@ -18,9 +18,11 @@
 #define ANKERL_NANOBENCH_IMPLEMENT
 #include <deque>
 #include <iostream>
+#include <map>
 #include <vector>
 
 #include "../nanobench/src/include/nanobench.h"
+#include "container/btree_map.hpp"
 #include "container/devectra.hpp"
 #include "container/ring_buffer.hpp"
 #include "container/small_vectra.hpp"
@@ -753,6 +755,287 @@ int main() {
             sum += val;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    // === BTREE_MAP BENCHMARKS ===
+    std::cout << "\n=== btree_map vs std::map - Insert Performance ===\n";
+
+    constexpr size_t map_size = 10000;
+
+    bench.run("insert std::map<int64_t,int64_t> (10K)", []() {
+        std::map<int64_t, int64_t> m;
+        for (size_t i = 0; i < map_size; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i * 2);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+    bench.run("insert btree_map<int64_t,int64_t> (10K)", []() {
+        btree_map<int64_t, int64_t> m;
+        for (size_t i = 0; i < map_size; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i * 2);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    // Random insert order
+    bench.run("insert random std::map<int64_t,int64_t> (10K)", []() {
+        std::map<int64_t, int64_t> m;
+        // Simple pseudo-random: multiply by prime and mod
+        for (size_t i = 0; i < map_size; ++i) {
+            int64_t key = static_cast<int64_t>((i * 7919) % map_size);
+            m[key] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+    bench.run("insert random btree_map<int64_t,int64_t> (10K)", []() {
+        btree_map<int64_t, int64_t> m;
+        for (size_t i = 0; i < map_size; ++i) {
+            int64_t key = static_cast<int64_t>((i * 7919) % map_size);
+            m[key] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    std::cout << "\n=== btree_map vs std::map - Find Performance ===\n";
+
+    // Pre-populate maps for find benchmarks
+    std::map<int64_t, int64_t> std_map_find;
+    btree_map<int64_t, int64_t> btree_map_find;
+    for (size_t i = 0; i < map_size; ++i) {
+        std_map_find[static_cast<int64_t>(i)] = static_cast<int64_t>(i * 2);
+        btree_map_find[static_cast<int64_t>(i)] = static_cast<int64_t>(i * 2);
+    }
+
+    bench.run("find std::map<int64_t,int64_t> (10K lookups)", [&std_map_find]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < map_size; ++i) {
+            auto it = std_map_find.find(static_cast<int64_t>(i));
+            if (it != std_map_find.end()) {
+                sum += it->second;
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+    bench.run("find btree_map<int64_t,int64_t> (10K lookups)", [&btree_map_find]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < map_size; ++i) {
+            auto it = btree_map_find.find(static_cast<int64_t>(i));
+            if (it != btree_map_find.end()) {
+                sum += it->second;
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    // Random access pattern
+    bench.run("find random std::map<int64_t,int64_t> (10K)", [&std_map_find]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < map_size; ++i) {
+            int64_t key = static_cast<int64_t>((i * 7919) % map_size);
+            auto it = std_map_find.find(key);
+            if (it != std_map_find.end()) {
+                sum += it->second;
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+    bench.run("find random btree_map<int64_t,int64_t> (10K)", [&btree_map_find]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < map_size; ++i) {
+            int64_t key = static_cast<int64_t>((i * 7919) % map_size);
+            auto it = btree_map_find.find(key);
+            if (it != btree_map_find.end()) {
+                sum += it->second;
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    std::cout << "\n=== btree_map vs std::map - Iteration Performance ===\n";
+
+    bench.run("iterate std::map<int64_t,int64_t> (10K)", [&std_map_find]() {
+        int64_t sum = 0;
+        for (const auto& [key, value] : std_map_find) {
+            sum += key + value;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+    bench.run("iterate btree_map<int64_t,int64_t> (10K)", [&btree_map_find]() {
+        int64_t sum = 0;
+        for (const auto& [key, value] : btree_map_find) {
+            sum += key + value;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    std::cout << "\n=== btree_map vs std::map - Mixed Operations ===\n";
+
+    bench.run("mixed ops std::map<int64_t,int64_t>", []() {
+        std::map<int64_t, int64_t> m;
+        // Insert 5K
+        for (size_t i = 0; i < 5000; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        // Find 5K
+        int64_t sum = 0;
+        for (size_t i = 0; i < 5000; ++i) {
+            auto it = m.find(static_cast<int64_t>(i));
+            if (it != m.end()) sum += it->second;
+        }
+        // Erase 2.5K
+        for (size_t i = 0; i < 2500; ++i) {
+            m.erase(static_cast<int64_t>(i * 2));
+        }
+        // Insert another 2.5K
+        for (size_t i = 5000; i < 7500; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+    bench.run("mixed ops btree_map<int64_t,int64_t>", []() {
+        btree_map<int64_t, int64_t> m;
+        // Insert 5K
+        for (size_t i = 0; i < 5000; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        // Find 5K
+        int64_t sum = 0;
+        for (size_t i = 0; i < 5000; ++i) {
+            auto it = m.find(static_cast<int64_t>(i));
+            if (it != m.end()) sum += it->second;
+        }
+        // Erase 2.5K
+        for (size_t i = 0; i < 2500; ++i) {
+            m.erase(static_cast<int64_t>(i * 2));
+        }
+        // Insert another 2.5K
+        for (size_t i = 5000; i < 7500; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    std::cout << "\n=== btree_map vs std::map - Small Map Performance ===\n";
+
+    bench.run("small insert std::map (100 elements)", []() {
+        std::map<int64_t, int64_t> m;
+        for (size_t i = 0; i < 100; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+    bench.run("small insert btree_map (100 elements)", []() {
+        btree_map<int64_t, int64_t> m;
+        for (size_t i = 0; i < 100; ++i) {
+            m[static_cast<int64_t>(i)] = static_cast<int64_t>(i);
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    // ===== String Key/Value Benchmarks =====
+    std::cout << "\n=== btree_map vs std::map - String Performance ===\n";
+    constexpr size_t string_count = 10000;
+
+    // Pre-generate keys and values
+    std::vector<std::string> keys;
+    std::vector<std::string> values;
+    keys.reserve(string_count);
+    values.reserve(string_count);
+    for (size_t i = 0; i < string_count; ++i) {
+        keys.push_back("key_" + std::to_string(i));
+        values.push_back("value_" + std::to_string(i * 2));
+    }
+
+    bench.run("insert std::map<string,string> (10K)", [&keys, &values]() {
+        std::map<std::string, std::string> m;
+        for (size_t i = 0; i < string_count; ++i) {
+            m[keys[i]] = values[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    bench.run("insert btree_map<string,string> (10K)", [&keys, &values]() {
+        btree_map<std::string, std::string> m;
+        for (size_t i = 0; i < string_count; ++i) {
+            m[keys[i]] = values[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    // String find benchmarks
+    std::map<std::string, std::string> std_map_str;
+    btree_map<std::string, std::string> btree_map_str;
+    for (size_t i = 0; i < string_count; ++i) {
+        std_map_str[keys[i]] = values[i];
+        btree_map_str[keys[i]] = values[i];
+    }
+
+    bench.run("find std::map<string,string> (10K lookups)", [&std_map_str, &keys]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < string_count; ++i) {
+            auto it = std_map_str.find(keys[i]);
+            if (it != std_map_str.end()) {
+                sum += static_cast<int64_t>(it->second.size());
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    bench.run("find btree_map<string,string> (10K lookups)", [&btree_map_str, &keys]() {
+        int64_t sum = 0;
+        for (size_t i = 0; i < string_count; ++i) {
+            auto it = btree_map_str.find(keys[i]);
+            if (it != btree_map_str.end()) {
+                sum += static_cast<int64_t>(it->second.size());
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    // String iteration benchmark
+    bench.run("iterate std::map<string,string> (10K)", [&std_map_str]() {
+        int64_t sum = 0;
+        for (const auto& [key, value] : std_map_str) {
+            sum += static_cast<int64_t>(key.size() + value.size());
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    bench.run("iterate btree_map<string,string> (10K)", [&btree_map_str]() {
+        int64_t sum = 0;
+        for (const auto& [key, value] : btree_map_str) {
+            sum += static_cast<int64_t>(key.size() + value.size());
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    // Long string benchmark (to test memory handling)
+    std::cout << "\n=== btree_map vs std::map - Long String Performance ===\n";
+    std::vector<std::string> long_keys;
+    std::vector<std::string> long_values;
+    long_keys.reserve(1000);
+    long_values.reserve(1000);
+    for (size_t i = 0; i < 1000; ++i) {
+        long_keys.push_back(std::string(100, 'k') + std::to_string(i));
+        long_values.push_back(std::string(200, 'v') + std::to_string(i * 2));
+    }
+
+    bench.run("insert std::map<long_string> (1K)", [&long_keys, &long_values]() {
+        std::map<std::string, std::string> m;
+        for (size_t i = 0; i < 1000; ++i) {
+            m[long_keys[i]] = long_values[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    bench.run("insert btree_map<long_string> (1K)", [&long_keys, &long_values]() {
+        btree_map<std::string, std::string> m;
+        for (size_t i = 0; i < 1000; ++i) {
+            m[long_keys[i]] = long_values[i];
+        }
+        ankerl::nanobench::doNotOptimizeAway(m);
     });
 
     return 0;
