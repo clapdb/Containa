@@ -21,3 +21,8 @@ add_bench_target(btree_bench btree_bench.cc)
 # Skiplist benchmarks
 add_bench_target(skiplist_bench skiplist_bench.cc)
 
+# Concurrent benchmark (skiplist vs btree)
+add_executable(skiplist_concurrent_bench skiplist_concurrent_bench.cc)
+target_compile_definitions(skiplist_concurrent_bench PRIVATE NDEBUG)
+target_link_libraries(skiplist_concurrent_bench pthread)
+
