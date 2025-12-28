@@ -2747,7 +2747,7 @@ class btree_map
             bool is_leaf = node->is_leaf_node();
             size_type min_slots = is_leaf ? kMinLeafSlots : kMinInternalSlots;
 
-            if (node->count >= min_slots) {
+            if (node->count >= min_slots) [[likely]] {
                 return;  // No underflow
             }
 
@@ -2952,19 +2952,22 @@ class btree_map
                     return;  // More elements in current leaf
                 }
 
-                // Move to parent and find next
-                while (_node->parent != nullptr) {
-                    size_type parent_pos = _node->position;
-                    _node = _node->parent;
-                    if (parent_pos < _node->count) {
+                // Past end of this leaf, look for next in parents
+                node_base* current = leaf;
+                while (current->parent != nullptr) {
+                    size_type parent_pos = current->position;
+                    auto* parent = current->parent;
+                    if (parent_pos < parent->count) {
                         // Found next key in parent
+                        _node = parent;
                         _pos = parent_pos;
                         return;
                     }
+                    current = parent;
                 }
-                // End of tree
-                _node = nullptr;
-                _pos = 0;
+                // End of tree - stay at this leaf with pos = count (end representation)
+                // _node is still leaf, _pos is already count
+                return;
             } else {
                 // Internal node: go to next subtree's leftmost leaf
                 auto* internal = static_cast<internal_node*>(_node);
@@ -2992,14 +2995,8 @@ class btree_map
                     size_type child_pos = _node->position;
                     _node = _node->parent;
                     if (child_pos > 0) {
-                        // Go to the rightmost element of the left subtree
-                        auto* internal = static_cast<internal_node*>(_node);
+                        // Return to parent key at pos = child_pos - 1
                         _pos = child_pos - 1;
-                        // Check if parent key or need to descend
-                        node_base* child = internal->children[child_pos];
-                        // We came from child at child_pos, so previous is either parent[child_pos-1]
-                        // or the rightmost in children[child_pos-1] subtree
-                        // Actually, for a B-tree, we return to parent key at pos = child_pos - 1
                         return;
                     }
                 }
@@ -3089,16 +3086,20 @@ class btree_map
                     return;
                 }
 
-                while (_node->parent != nullptr) {
-                    size_type parent_pos = _node->position;
-                    _node = _node->parent;
-                    if (parent_pos < _node->count) {
+                // Past end of this leaf, look for next in parents
+                const node_base* current = leaf;
+                while (current->parent != nullptr) {
+                    size_type parent_pos = current->position;
+                    auto* parent = current->parent;
+                    if (parent_pos < parent->count) {
+                        _node = parent;
                         _pos = parent_pos;
                         return;
                     }
+                    current = parent;
                 }
-                _node = nullptr;
-                _pos = 0;
+                // End of tree - stay at this leaf with pos = count
+                return;
             } else {
                 auto* internal = static_cast<const internal_node*>(_node);
                 const node_base* child = internal->children[_pos + 1];
@@ -4323,9 +4324,17 @@ class btree_map
 
     [[nodiscard]] auto cbegin() const noexcept -> const_iterator { return begin(); }
 
-    [[nodiscard]] auto end() noexcept -> iterator { return iterator(nullptr, 0); }
+    [[nodiscard]] auto end() noexcept -> iterator {
+        auto* rm = const_cast<leaf_node*>(rightmost_leaf());
+        if (rm == nullptr) return iterator(nullptr, 0);
+        return iterator(static_cast<node_base*>(rm), rm->count);
+    }
 
-    [[nodiscard]] auto end() const noexcept -> const_iterator { return const_iterator(nullptr, 0); }
+    [[nodiscard]] auto end() const noexcept -> const_iterator {
+        auto* rm = rightmost_leaf();
+        if (rm == nullptr) return const_iterator(nullptr, 0);
+        return const_iterator(static_cast<const node_base*>(rm), rm->count);
+    }
 
     [[nodiscard]] auto cend() const noexcept -> const_iterator { return end(); }
 
@@ -4413,7 +4422,6 @@ class btree_map
 
         // Rebalance if needed
         if (will_underflow) {
-            // Track position through rebalancing
             node_base* res_node = leaf;
             size_type res_pos = erase_pos;
             bool was_last = (erase_pos >= leaf->count);
