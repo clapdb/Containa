@@ -28,6 +28,13 @@
 #include <type_traits>
 #include <utility>
 
+// SIMD headers
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
+
 #ifndef Assert
 #include <cassert>
 #define Assert(expr, msg) assert((expr) && (msg))
@@ -44,6 +51,599 @@
 #else
 #define VECTRA_ASSUME(expr) ((void)0)
 #endif
+
+// SIMD type traits for vectra operations
+namespace stdb::container::simd {
+
+// Check if type is SIMD-eligible for vector operations
+template <typename T>
+constexpr bool is_simd_comparable_v =
+  std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t> || std::is_same_v<T, int16_t> ||
+  std::is_same_v<T, uint16_t> || std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t> ||
+  std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t> || std::is_same_v<T, float> || std::is_same_v<T, double>;
+
+#if defined(__x86_64__) || defined(_M_X64)
+
+// SSE2: Compare 16 bytes at once for equality
+[[gnu::always_inline]] inline bool simd_equal_i8(const int8_t* a, const int8_t* b, std::size_t count) {
+    std::size_t i = 0;
+    // Process 16 elements at a time with SSE2
+    for (; i + 16 <= count; i += 16) {
+        __m128i va = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        __m128i vb = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
+        __m128i cmp = _mm_cmpeq_epi8(va, vb);
+        if (_mm_movemask_epi8(cmp) != 0xFFFF) return false;
+    }
+    // Scalar fallback for remainder
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE2: Compare 8 int16 at once
+[[gnu::always_inline]] inline bool simd_equal_i16(const int16_t* a, const int16_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        __m128i va = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        __m128i vb = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
+        __m128i cmp = _mm_cmpeq_epi16(va, vb);
+        if (_mm_movemask_epi8(cmp) != 0xFFFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE2: Compare 4 int32 at once
+[[gnu::always_inline]] inline bool simd_equal_i32(const int32_t* a, const int32_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128i va = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        __m128i vb = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
+        __m128i cmp = _mm_cmpeq_epi32(va, vb);
+        if (_mm_movemask_epi8(cmp) != 0xFFFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE2: Compare 2 int64 at once (SSE4.1 for _mm_cmpeq_epi64)
+[[gnu::always_inline]] inline bool simd_equal_i64(const int64_t* a, const int64_t* b, std::size_t count) {
+    std::size_t i = 0;
+#ifdef __SSE4_1__
+    for (; i + 2 <= count; i += 2) {
+        __m128i va = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        __m128i vb = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
+        __m128i cmp = _mm_cmpeq_epi64(va, vb);
+        if (_mm_movemask_epi8(cmp) != 0xFFFF) return false;
+    }
+#endif
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE: Compare 4 floats at once
+[[gnu::always_inline]] inline bool simd_equal_f32(const float* a, const float* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128 va = _mm_loadu_ps(a + i);
+        __m128 vb = _mm_loadu_ps(b + i);
+        __m128 cmp = _mm_cmpeq_ps(va, vb);
+        if (_mm_movemask_ps(cmp) != 0xF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE2: Compare 2 doubles at once
+[[gnu::always_inline]] inline bool simd_equal_f64(const double* a, const double* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 2 <= count; i += 2) {
+        __m128d va = _mm_loadu_pd(a + i);
+        __m128d vb = _mm_loadu_pd(b + i);
+        __m128d cmp = _mm_cmpeq_pd(va, vb);
+        if (_mm_movemask_pd(cmp) != 0x3) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// SSE2: Find int8 in array, returns index or count if not found
+[[gnu::always_inline]] inline std::size_t simd_find_i8(const int8_t* data, std::size_t count, int8_t value) {
+    std::size_t i = 0;
+    __m128i target = _mm_set1_epi8(value);
+    for (; i + 16 <= count; i += 16) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi8(chunk, target);
+        int mask = _mm_movemask_epi8(cmp);
+        if (mask != 0) {
+            return i + __builtin_ctz(mask);
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE2: Find int16 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i16(const int16_t* data, std::size_t count, int16_t value) {
+    std::size_t i = 0;
+    __m128i target = _mm_set1_epi16(value);
+    for (; i + 8 <= count; i += 8) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi16(chunk, target);
+        int mask = _mm_movemask_epi8(cmp);
+        if (mask != 0) {
+            // Each int16 match produces 2 consecutive bits
+            return i + (__builtin_ctz(mask) >> 1);
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE2: Find int32 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i32(const int32_t* data, std::size_t count, int32_t value) {
+    std::size_t i = 0;
+    __m128i target = _mm_set1_epi32(value);
+    for (; i + 4 <= count; i += 4) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi32(chunk, target);
+        int mask = _mm_movemask_epi8(cmp);
+        if (mask != 0) {
+            // Each int32 match produces 4 consecutive bits
+            return i + (__builtin_ctz(mask) >> 2);
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE4.1: Find int64 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i64(const int64_t* data, std::size_t count, int64_t value) {
+    std::size_t i = 0;
+#ifdef __SSE4_1__
+    __m128i target = _mm_set1_epi64x(value);
+    for (; i + 2 <= count; i += 2) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi64(chunk, target);
+        int mask = _mm_movemask_epi8(cmp);
+        if (mask != 0) {
+            return i + (__builtin_ctz(mask) >> 3);
+        }
+    }
+#endif
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE: Find float in array
+[[gnu::always_inline]] inline std::size_t simd_find_f32(const float* data, std::size_t count, float value) {
+    std::size_t i = 0;
+    __m128 target = _mm_set1_ps(value);
+    for (; i + 4 <= count; i += 4) {
+        __m128 chunk = _mm_loadu_ps(data + i);
+        __m128 cmp = _mm_cmpeq_ps(chunk, target);
+        int mask = _mm_movemask_ps(cmp);
+        if (mask != 0) {
+            return i + __builtin_ctz(mask);
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE2: Find double in array
+[[gnu::always_inline]] inline std::size_t simd_find_f64(const double* data, std::size_t count, double value) {
+    std::size_t i = 0;
+    __m128d target = _mm_set1_pd(value);
+    for (; i + 2 <= count; i += 2) {
+        __m128d chunk = _mm_loadu_pd(data + i);
+        __m128d cmp = _mm_cmpeq_pd(chunk, target);
+        int mask = _mm_movemask_pd(cmp);
+        if (mask != 0) {
+            return i + __builtin_ctz(mask);
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// SSE2: Count int8 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i8(const int8_t* data, std::size_t count, int8_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+    __m128i target = _mm_set1_epi8(value);
+    for (; i + 16 <= count; i += 16) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi8(chunk, target);
+        result += __builtin_popcount(_mm_movemask_epi8(cmp));
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+// SSE2: Count int32 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i32(const int32_t* data, std::size_t count, int32_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+    __m128i target = _mm_set1_epi32(value);
+    for (; i + 4 <= count; i += 4) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi32(chunk, target);
+        // Each match sets 4 bits, so popcount / 4
+        result += __builtin_popcount(_mm_movemask_epi8(cmp)) >> 2;
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+// SSE4.1: Count int64 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i64(const int64_t* data, std::size_t count, int64_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+#ifdef __SSE4_1__
+    __m128i target = _mm_set1_epi64x(value);
+    for (; i + 2 <= count; i += 2) {
+        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        __m128i cmp = _mm_cmpeq_epi64(chunk, target);
+        result += __builtin_popcount(_mm_movemask_epi8(cmp)) >> 3;
+    }
+#endif
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+#elif defined(__aarch64__) || defined(_M_ARM64)
+
+// NEON: Compare 16 bytes at once for equality
+[[gnu::always_inline]] inline bool simd_equal_i8(const int8_t* a, const int8_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 16 <= count; i += 16) {
+        int8x16_t va = vld1q_s8(a + i);
+        int8x16_t vb = vld1q_s8(b + i);
+        uint8x16_t cmp = vceqq_s8(va, vb);
+        if (vminvq_u8(cmp) != 0xFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Compare 8 int16 at once
+[[gnu::always_inline]] inline bool simd_equal_i16(const int16_t* a, const int16_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        int16x8_t va = vld1q_s16(a + i);
+        int16x8_t vb = vld1q_s16(b + i);
+        uint16x8_t cmp = vceqq_s16(va, vb);
+        if (vminvq_u16(cmp) != 0xFFFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Compare 4 int32 at once
+[[gnu::always_inline]] inline bool simd_equal_i32(const int32_t* a, const int32_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        int32x4_t va = vld1q_s32(a + i);
+        int32x4_t vb = vld1q_s32(b + i);
+        uint32x4_t cmp = vceqq_s32(va, vb);
+        if (vminvq_u32(cmp) != 0xFFFFFFFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Compare 2 int64 at once
+[[gnu::always_inline]] inline bool simd_equal_i64(const int64_t* a, const int64_t* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 2 <= count; i += 2) {
+        int64x2_t va = vld1q_s64(a + i);
+        int64x2_t vb = vld1q_s64(b + i);
+        uint64x2_t cmp = vceqq_s64(va, vb);
+        // Check both lanes
+        if (vgetq_lane_u64(cmp, 0) != ~0ULL || vgetq_lane_u64(cmp, 1) != ~0ULL) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Compare 4 floats at once
+[[gnu::always_inline]] inline bool simd_equal_f32(const float* a, const float* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        uint32x4_t cmp = vceqq_f32(va, vb);
+        if (vminvq_u32(cmp) != 0xFFFFFFFF) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Compare 2 doubles at once
+[[gnu::always_inline]] inline bool simd_equal_f64(const double* a, const double* b, std::size_t count) {
+    std::size_t i = 0;
+    for (; i + 2 <= count; i += 2) {
+        float64x2_t va = vld1q_f64(a + i);
+        float64x2_t vb = vld1q_f64(b + i);
+        uint64x2_t cmp = vceqq_f64(va, vb);
+        if (vgetq_lane_u64(cmp, 0) != ~0ULL || vgetq_lane_u64(cmp, 1) != ~0ULL) return false;
+    }
+    for (; i < count; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+// NEON: Find int8 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i8(const int8_t* data, std::size_t count, int8_t value) {
+    std::size_t i = 0;
+    int8x16_t target = vdupq_n_s8(value);
+    for (; i + 16 <= count; i += 16) {
+        int8x16_t chunk = vld1q_s8(data + i);
+        uint8x16_t cmp = vceqq_s8(chunk, target);
+        if (vmaxvq_u8(cmp) != 0) {
+            // Found a match, scan linearly
+            for (std::size_t j = 0; j < 16; ++j) {
+                if (data[i + j] == value) return i + j;
+            }
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Find int32 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i32(const int32_t* data, std::size_t count, int32_t value) {
+    std::size_t i = 0;
+    int32x4_t target = vdupq_n_s32(value);
+    for (; i + 4 <= count; i += 4) {
+        int32x4_t chunk = vld1q_s32(data + i);
+        uint32x4_t cmp = vceqq_s32(chunk, target);
+        if (vmaxvq_u32(cmp) != 0) {
+            for (std::size_t j = 0; j < 4; ++j) {
+                if (data[i + j] == value) return i + j;
+            }
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Find int64 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i64(const int64_t* data, std::size_t count, int64_t value) {
+    std::size_t i = 0;
+    int64x2_t target = vdupq_n_s64(value);
+    for (; i + 2 <= count; i += 2) {
+        int64x2_t chunk = vld1q_s64(data + i);
+        uint64x2_t cmp = vceqq_s64(chunk, target);
+        if (vgetq_lane_u64(cmp, 0) != 0) return i;
+        if (vgetq_lane_u64(cmp, 1) != 0) return i + 1;
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Find int16 in array
+[[gnu::always_inline]] inline std::size_t simd_find_i16(const int16_t* data, std::size_t count, int16_t value) {
+    std::size_t i = 0;
+    int16x8_t target = vdupq_n_s16(value);
+    for (; i + 8 <= count; i += 8) {
+        int16x8_t chunk = vld1q_s16(data + i);
+        uint16x8_t cmp = vceqq_s16(chunk, target);
+        if (vmaxvq_u16(cmp) != 0) {
+            for (std::size_t j = 0; j < 8; ++j) {
+                if (data[i + j] == value) return i + j;
+            }
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Find float in array
+[[gnu::always_inline]] inline std::size_t simd_find_f32(const float* data, std::size_t count, float value) {
+    std::size_t i = 0;
+    float32x4_t target = vdupq_n_f32(value);
+    for (; i + 4 <= count; i += 4) {
+        float32x4_t chunk = vld1q_f32(data + i);
+        uint32x4_t cmp = vceqq_f32(chunk, target);
+        if (vmaxvq_u32(cmp) != 0) {
+            for (std::size_t j = 0; j < 4; ++j) {
+                if (data[i + j] == value) return i + j;
+            }
+        }
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Find double in array
+[[gnu::always_inline]] inline std::size_t simd_find_f64(const double* data, std::size_t count, double value) {
+    std::size_t i = 0;
+    float64x2_t target = vdupq_n_f64(value);
+    for (; i + 2 <= count; i += 2) {
+        float64x2_t chunk = vld1q_f64(data + i);
+        uint64x2_t cmp = vceqq_f64(chunk, target);
+        if (vgetq_lane_u64(cmp, 0) != 0) return i;
+        if (vgetq_lane_u64(cmp, 1) != 0) return i + 1;
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) return i;
+    }
+    return count;
+}
+
+// NEON: Count int8 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i8(const int8_t* data, std::size_t count, int8_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+    int8x16_t target = vdupq_n_s8(value);
+    for (; i + 16 <= count; i += 16) {
+        int8x16_t chunk = vld1q_s8(data + i);
+        uint8x16_t cmp = vceqq_s8(chunk, target);
+        // Count set bytes (each match is 0xFF)
+        result += vaddvq_u8(vshrq_n_u8(cmp, 7));
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+// NEON: Count int32 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i32(const int32_t* data, std::size_t count, int32_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+    int32x4_t target = vdupq_n_s32(value);
+    for (; i + 4 <= count; i += 4) {
+        int32x4_t chunk = vld1q_s32(data + i);
+        uint32x4_t cmp = vceqq_s32(chunk, target);
+        result += vaddvq_u32(vshrq_n_u32(cmp, 31));
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+// NEON: Count int64 occurrences
+[[gnu::always_inline]] inline std::size_t simd_count_i64(const int64_t* data, std::size_t count, int64_t value) {
+    std::size_t result = 0;
+    std::size_t i = 0;
+    int64x2_t target = vdupq_n_s64(value);
+    for (; i + 2 <= count; i += 2) {
+        int64x2_t chunk = vld1q_s64(data + i);
+        uint64x2_t cmp = vceqq_s64(chunk, target);
+        result += (vgetq_lane_u64(cmp, 0) != 0) + (vgetq_lane_u64(cmp, 1) != 0);
+    }
+    for (; i < count; ++i) {
+        if (data[i] == value) ++result;
+    }
+    return result;
+}
+
+#else
+// Fallback: no SIMD available
+template <typename T>
+constexpr bool is_simd_comparable_v = false;
+#endif
+
+// Dispatcher functions that select appropriate SIMD implementation
+template <typename T>
+[[gnu::always_inline]] inline bool simd_equal(const T* a, const T* b, std::size_t count) {
+    if constexpr (std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+        return simd_equal_i8(reinterpret_cast<const int8_t*>(a), reinterpret_cast<const int8_t*>(b), count);
+    } else if constexpr (std::is_same_v<T, int16_t> || std::is_same_v<T, uint16_t>) {
+        return simd_equal_i16(reinterpret_cast<const int16_t*>(a), reinterpret_cast<const int16_t*>(b), count);
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+        return simd_equal_i32(reinterpret_cast<const int32_t*>(a), reinterpret_cast<const int32_t*>(b), count);
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+        return simd_equal_i64(reinterpret_cast<const int64_t*>(a), reinterpret_cast<const int64_t*>(b), count);
+    } else if constexpr (std::is_same_v<T, float>) {
+        return simd_equal_f32(a, b, count);
+    } else if constexpr (std::is_same_v<T, double>) {
+        return simd_equal_f64(a, b, count);
+    } else {
+        // Scalar fallback
+        for (std::size_t i = 0; i < count; ++i) {
+            if (a[i] != b[i]) return false;
+        }
+        return true;
+    }
+}
+
+template <typename T>
+[[gnu::always_inline]] inline std::size_t simd_find(const T* data, std::size_t count, const T& value) {
+    if constexpr (std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+        return simd_find_i8(reinterpret_cast<const int8_t*>(data), count, static_cast<int8_t>(value));
+    } else if constexpr (std::is_same_v<T, int16_t> || std::is_same_v<T, uint16_t>) {
+        return simd_find_i16(reinterpret_cast<const int16_t*>(data), count, static_cast<int16_t>(value));
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+        return simd_find_i32(reinterpret_cast<const int32_t*>(data), count, static_cast<int32_t>(value));
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+        return simd_find_i64(reinterpret_cast<const int64_t*>(data), count, static_cast<int64_t>(value));
+    } else if constexpr (std::is_same_v<T, float>) {
+        return simd_find_f32(data, count, value);
+    } else if constexpr (std::is_same_v<T, double>) {
+        return simd_find_f64(data, count, value);
+    } else {
+        // Scalar fallback
+        for (std::size_t i = 0; i < count; ++i) {
+            if (data[i] == value) return i;
+        }
+        return count;
+    }
+}
+
+template <typename T>
+[[gnu::always_inline]] inline std::size_t simd_count(const T* data, std::size_t count, const T& value) {
+    if constexpr (std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+        return simd_count_i8(reinterpret_cast<const int8_t*>(data), count, static_cast<int8_t>(value));
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+        return simd_count_i32(reinterpret_cast<const int32_t*>(data), count, static_cast<int32_t>(value));
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+        return simd_count_i64(reinterpret_cast<const int64_t*>(data), count, static_cast<int64_t>(value));
+    } else {
+        // Scalar fallback for other types
+        std::size_t result = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (data[i] == value) ++result;
+        }
+        return result;
+    }
+}
+
+}  // namespace stdb::container::simd
 
 namespace stdb {
 
@@ -927,6 +1527,57 @@ class vectra : public core<T>
         return std::make_reverse_iterator(cbegin());
     }
 
+    /*
+     * SIMD-accelerated search operations
+     */
+
+    // Find first occurrence of value, returns iterator to element or end()
+    [[nodiscard]] auto find(const_reference value) noexcept -> iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(this->_start, this->size(), value);
+            return iterator(this->_start + idx);
+        } else {
+            for (T* p = this->_start; p != this->_finish; ++p) {
+                if (*p == value) return iterator(p);
+            }
+            return end();
+        }
+    }
+
+    [[nodiscard]] auto find(const_reference value) const noexcept -> const_iterator {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            std::size_t idx = simd::simd_find(this->_start, this->size(), value);
+            return const_iterator(this->_start + idx);
+        } else {
+            for (const T* p = this->_start; p != this->_finish; ++p) {
+                if (*p == value) return const_iterator(p);
+            }
+            return cend();
+        }
+    }
+
+    // Check if value exists in vector
+    [[nodiscard]] auto contains(const_reference value) const noexcept -> bool {
+        if constexpr (simd::is_simd_comparable_v<T>) {
+            return simd::simd_find(this->_start, this->size(), value) < this->size();
+        } else {
+            for (const T* p = this->_start; p != this->_finish; ++p) {
+                if (*p == value) return true;
+            }
+            return false;
+        }
+    }
+
+    // Count occurrences of value
+    // Note: scalar loop is often as fast as SIMD due to compiler auto-vectorization
+    [[nodiscard]] auto count(const_reference value) const noexcept -> size_type {
+        size_type result = 0;
+        for (const T* p = this->_start; p != this->_finish; ++p) {
+            if (*p == value) ++result;
+        }
+        return result;
+    }
+
     template <Safety safety = Safety::Safe>
     void fill(size_type (*filler)(T*)) {
         if constexpr (safety == Safety::Safe) {
@@ -1457,12 +2108,20 @@ auto operator==(const vectra<T>& lhs, const vectra<T>& rhs) -> bool {
     if (lhs.size() != rhs.size()) {
         return false;
     }
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[i]) {
-            return false;
-        }
+    if (lhs.size() == 0) {
+        return true;
     }
-    return true;
+    // Use memcmp for trivially copyable types (fastest path - compiler-optimized)
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
+    } else {
+        for (std::size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i] != rhs[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 template <typename T>
