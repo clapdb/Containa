@@ -35,6 +35,10 @@
 namespace stdb::container {
 
 // Trait to detect transparent comparators (have is_transparent type member)
+// Guard to avoid redefinition when included with btree_map.hpp
+#ifndef STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
+#define STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
+
 template <typename, typename = void>
 struct is_transparent_comparator : std::false_type {};
 
@@ -43,6 +47,8 @@ struct is_transparent_comparator<T, std::void_t<typename T::is_transparent>> : s
 
 template <typename T>
 inline constexpr bool is_transparent_comparator_v = is_transparent_comparator<T>::value;
+
+#endif  // STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
 
 /*
  * skiplist_map is a skip list based ordered map container.
