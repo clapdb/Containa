@@ -2512,8 +2512,15 @@ class btree_map
 
     // Remove slot at position from leaf node (shifts remaining elements)
     void remove_slot_from_leaf(leaf_node* leaf, size_type pos) {
-        for (size_type i = pos; i < leaf->count - 1; ++i) {
-            leaf->slots[i] = std::move(leaf->slots[i + 1]);
+        size_type remaining = leaf->count - 1 - pos;
+        if (remaining > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&leaf->slots[pos], &leaf->slots[pos + 1], remaining * sizeof(storage_type));
+            } else {
+                for (size_type i = pos; i < leaf->count - 1; ++i) {
+                    leaf->slots[i] = std::move(leaf->slots[i + 1]);
+                }
+            }
         }
         --leaf->count;
     }
@@ -2563,8 +2570,14 @@ class btree_map
     // In B-tree: parent separator moves down to leaf, left sibling's last key moves up to parent
     void borrow_from_left_leaf(leaf_node* leaf, leaf_node* left_sibling, internal_node* parent, size_type parent_pos) {
         // Shift leaf elements right to make room at position 0
-        for (size_type i = leaf->count; i > 0; --i) {
-            leaf->slots[i] = std::move(leaf->slots[i - 1]);
+        if (leaf->count > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&leaf->slots[1], &leaf->slots[0], leaf->count * sizeof(storage_type));
+            } else {
+                for (size_type i = leaf->count; i > 0; --i) {
+                    leaf->slots[i] = std::move(leaf->slots[i - 1]);
+                }
+            }
         }
         ++leaf->count;
 
@@ -2587,8 +2600,15 @@ class btree_map
         parent->slots[parent_pos] = std::move(right_sibling->slots[0]);
 
         // Shift right sibling elements left
-        for (size_type i = 0; i < right_sibling->count - 1; ++i) {
-            right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+        size_type remaining = right_sibling->count - 1;
+        if (remaining > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memmove(&right_sibling->slots[0], &right_sibling->slots[1], remaining * sizeof(storage_type));
+            } else {
+                for (size_type i = 0; i < remaining; ++i) {
+                    right_sibling->slots[i] = std::move(right_sibling->slots[i + 1]);
+                }
+            }
         }
         --right_sibling->count;
     }
@@ -2601,8 +2621,14 @@ class btree_map
         ++left->count;
 
         // Move all elements from right to left
-        for (size_type i = 0; i < right->count; ++i) {
-            left->slots[left->count + i] = std::move(right->slots[i]);
+        if (right->count > 0) {
+            if constexpr (std::is_trivially_copyable_v<storage_type>) {
+                std::memcpy(&left->slots[left->count], &right->slots[0], right->count * sizeof(storage_type));
+            } else {
+                for (size_type i = 0; i < right->count; ++i) {
+                    left->slots[left->count + i] = std::move(right->slots[i]);
+                }
+            }
         }
         left->count += right->count;
 
@@ -4371,6 +4397,9 @@ class btree_map
         auto* leaf = static_cast<leaf_node*>(pos._node);
         size_type erase_pos = pos._pos;
 
+        // Check if rebalancing will be needed BEFORE removing element
+        bool will_underflow = (leaf != _root && leaf->count <= kMinLeafSlots);
+
         // Remove the element
         remove_slot_from_leaf(leaf, erase_pos);
         --_size;
@@ -4382,34 +4411,41 @@ class btree_map
             return end();
         }
 
-        // Track result position through potential rebalancing
-        node_base* res_node = leaf;
-        size_type res_pos = erase_pos;
-        bool was_last = (erase_pos >= leaf->count);
-
-        // Rebalance if needed (function returns early if no underflow)
-        if (leaf != _root) {
+        // Rebalance if needed
+        if (will_underflow) {
+            // Track position through rebalancing
+            node_base* res_node = leaf;
+            size_type res_pos = erase_pos;
+            bool was_last = (erase_pos >= leaf->count);
             rebalance_after_erase_with_iterator(leaf, res_node, res_pos);
+
+            if (_root == nullptr) {
+                return end();
+            }
+
+            auto* res_leaf = static_cast<leaf_node*>(res_node);
+            if (was_last || res_pos >= res_leaf->count) {
+                if (res_leaf->count > 0) {
+                    iterator it(res_leaf, res_leaf->count - 1);
+                    ++it;
+                    return it;
+                }
+                return end();
+            }
+            return iterator(res_node, res_pos);
         }
 
-        // Handle tree becoming empty during rebalance
-        if (_root == nullptr) {
-            return end();
-        }
-
-        // Build result iterator
-        auto* res_leaf = static_cast<leaf_node*>(res_node);
-        if (was_last || res_pos >= res_leaf->count) {
-            // Erased last element in node - advance to next
-            if (res_leaf->count > 0) {
-                iterator it(res_leaf, res_leaf->count - 1);
+        // No rebalancing needed - element at erase_pos is now the next element
+        if (erase_pos >= leaf->count) {
+            // Erased last element - advance to next node
+            if (leaf->count > 0) {
+                iterator it(leaf, leaf->count - 1);
                 ++it;
                 return it;
             }
             return end();
         }
-
-        return iterator(res_node, res_pos);
+        return iterator(leaf, erase_pos);
     }
 
     auto erase(const_iterator pos) -> iterator { return erase(iterator(const_cast<node_base*>(pos._node), pos._pos)); }
