@@ -16,6 +16,7 @@
  */
 
 #define ANKERL_NANOBENCH_IMPLEMENT
+#include <algorithm>
 #include <deque>
 #include <iostream>
 #include <map>
@@ -1036,6 +1037,159 @@ int main() {
             m[long_keys[i]] = long_values[i];
         }
         ankerl::nanobench::doNotOptimizeAway(m);
+    });
+
+    // === SIMD VECTOR OPERATIONS ===
+    std::cout << "\n=== vectra SIMD Operations - operator== ===\n";
+
+    // Prepare vectors for comparison
+    std::vector<int32_t> std_vec1(times), std_vec2(times);
+    vectra<int32_t> vectra1, vectra2;
+    vectra1.reserve(times);
+    vectra2.reserve(times);
+    for (size_t i = 0; i < times; ++i) {
+        std_vec1[i] = static_cast<int32_t>(i);
+        std_vec2[i] = static_cast<int32_t>(i);
+        vectra1.push_back(static_cast<int32_t>(i));
+        vectra2.push_back(static_cast<int32_t>(i));
+    }
+
+    bench.run("operator== std::vector<int32_t> (64K)", [&std_vec1, &std_vec2]() {
+        bool eq = (std_vec1 == std_vec2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+    bench.run("operator== vectra<int32_t> SIMD (64K)", [&vectra1, &vectra2]() {
+        bool eq = (vectra1 == vectra2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+
+    // int64_t comparison
+    std::vector<int64_t> std_vec64_1(times), std_vec64_2(times);
+    vectra<int64_t> vectra64_1, vectra64_2;
+    vectra64_1.reserve(times);
+    vectra64_2.reserve(times);
+    for (size_t i = 0; i < times; ++i) {
+        std_vec64_1[i] = static_cast<int64_t>(i);
+        std_vec64_2[i] = static_cast<int64_t>(i);
+        vectra64_1.push_back(static_cast<int64_t>(i));
+        vectra64_2.push_back(static_cast<int64_t>(i));
+    }
+
+    bench.run("operator== std::vector<int64_t> (64K)", [&std_vec64_1, &std_vec64_2]() {
+        bool eq = (std_vec64_1 == std_vec64_2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+    bench.run("operator== vectra<int64_t> SIMD (64K)", [&vectra64_1, &vectra64_2]() {
+        bool eq = (vectra64_1 == vectra64_2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+
+    // int8_t comparison (best case for SIMD - 16 elements per iteration)
+    std::vector<int8_t> std_vec8_1(times), std_vec8_2(times);
+    vectra<int8_t> vectra8_1, vectra8_2;
+    vectra8_1.reserve(times);
+    vectra8_2.reserve(times);
+    for (size_t i = 0; i < times; ++i) {
+        std_vec8_1[i] = static_cast<int8_t>(i & 0x7F);
+        std_vec8_2[i] = static_cast<int8_t>(i & 0x7F);
+        vectra8_1.push_back(static_cast<int8_t>(i & 0x7F));
+        vectra8_2.push_back(static_cast<int8_t>(i & 0x7F));
+    }
+
+    bench.run("operator== std::vector<int8_t> (64K)", [&std_vec8_1, &std_vec8_2]() {
+        bool eq = (std_vec8_1 == std_vec8_2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+    bench.run("operator== vectra<int8_t> SIMD (64K)", [&vectra8_1, &vectra8_2]() {
+        bool eq = (vectra8_1 == vectra8_2);
+        ankerl::nanobench::doNotOptimizeAway(eq);
+    });
+
+    std::cout << "\n=== vectra SIMD Operations - find() ===\n";
+
+    // Find benchmark - search for element in middle
+    int32_t target32 = static_cast<int32_t>(times / 2);
+    int64_t target64 = static_cast<int64_t>(times / 2);
+    int8_t target8 = static_cast<int8_t>((times / 2) & 0x7F);
+
+    bench.run("std::find std::vector<int32_t> (64K)", [&std_vec1, target32]() {
+        auto it = std::find(std_vec1.begin(), std_vec1.end(), target32);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+    bench.run("vectra.find<int32_t> SIMD (64K)", [&vectra1, target32]() {
+        auto it = vectra1.find(target32);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+
+    bench.run("std::find std::vector<int64_t> (64K)", [&std_vec64_1, target64]() {
+        auto it = std::find(std_vec64_1.begin(), std_vec64_1.end(), target64);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+    bench.run("vectra.find<int64_t> SIMD (64K)", [&vectra64_1, target64]() {
+        auto it = vectra64_1.find(target64);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+
+    bench.run("std::find std::vector<int8_t> (64K)", [&std_vec8_1, target8]() {
+        auto it = std::find(std_vec8_1.begin(), std_vec8_1.end(), target8);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+    bench.run("vectra.find<int8_t> SIMD (64K)", [&vectra8_1, target8]() {
+        auto it = vectra8_1.find(target8);
+        ankerl::nanobench::doNotOptimizeAway(it);
+    });
+
+    std::cout << "\n=== vectra SIMD Operations - count() ===\n";
+
+    // Create vectors with repeated values for count benchmark
+    vectra<int32_t> vectra_count32;
+    std::vector<int32_t> std_count32;
+    vectra_count32.reserve(times);
+    std_count32.reserve(times);
+    for (size_t i = 0; i < times; ++i) {
+        int32_t val = static_cast<int32_t>(i % 100);  // Values 0-99 repeated
+        vectra_count32.push_back(val);
+        std_count32.push_back(val);
+    }
+
+    bench.run("std::count std::vector<int32_t> (64K)", [&std_count32]() {
+        auto cnt = std::count(std_count32.begin(), std_count32.end(), 50);
+        ankerl::nanobench::doNotOptimizeAway(cnt);
+    });
+    bench.run("vectra.count<int32_t> SIMD (64K)", [&vectra_count32]() {
+        auto cnt = vectra_count32.count(50);
+        ankerl::nanobench::doNotOptimizeAway(cnt);
+    });
+
+    // int8_t count (best case)
+    vectra<int8_t> vectra_count8;
+    std::vector<int8_t> std_count8;
+    vectra_count8.reserve(times);
+    std_count8.reserve(times);
+    for (size_t i = 0; i < times; ++i) {
+        int8_t val = static_cast<int8_t>(i % 50);
+        vectra_count8.push_back(val);
+        std_count8.push_back(val);
+    }
+
+    bench.run("std::count std::vector<int8_t> (64K)", [&std_count8]() {
+        auto cnt = std::count(std_count8.begin(), std_count8.end(), static_cast<int8_t>(25));
+        ankerl::nanobench::doNotOptimizeAway(cnt);
+    });
+    bench.run("vectra.count<int8_t> SIMD (64K)", [&vectra_count8]() {
+        auto cnt = vectra_count8.count(static_cast<int8_t>(25));
+        ankerl::nanobench::doNotOptimizeAway(cnt);
+    });
+
+    std::cout << "\n=== vectra SIMD Operations - contains() ===\n";
+
+    bench.run("std::find != end std::vector<int32_t>", [&std_vec1, target32]() {
+        bool found = std::find(std_vec1.begin(), std_vec1.end(), target32) != std_vec1.end();
+        ankerl::nanobench::doNotOptimizeAway(found);
+    });
+    bench.run("vectra.contains<int32_t> SIMD", [&vectra1, target32]() {
+        bool found = vectra1.contains(target32);
+        ankerl::nanobench::doNotOptimizeAway(found);
     });
 
     return 0;
