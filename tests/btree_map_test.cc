@@ -19,6 +19,7 @@
 #include <atomic>
 #include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1626,6 +1627,356 @@ TEST_CASE("btree_map::erase_if") {
         auto erased = erase_if(map, [](const auto&) { return true; });
         CHECK_EQ(erased, 100);
         CHECK(map.empty());
+    }
+}
+
+// ============================================================================
+// Fuzz Tests - Random operations with verification
+// ============================================================================
+
+TEST_CASE("btree_map::fuzz_random_operations") {
+    std::mt19937 rng(12345);
+
+    SUBCASE("random int operations - small") {
+        btree_map<int, int> map;
+        std::map<int, int> reference;
+
+        for (int iter = 0; iter < 10000; ++iter) {
+            int op = rng() % 10;
+            int key = rng() % 100;
+            int value = rng() % 1000;
+
+            switch (op) {
+                case 0:
+                case 1:
+                case 2:
+                case 3:  // Insert (40%)
+                    map[key] = value;
+                    reference[key] = value;
+                    break;
+                case 4:
+                case 5:  // Erase (20%)
+                    map.erase(key);
+                    reference.erase(key);
+                    break;
+                case 6:
+                case 7: {  // Find (20%)
+                    auto it1 = map.find(key);
+                    auto it2 = reference.find(key);
+                    CHECK_EQ((it1 != map.end()), (it2 != reference.end()));
+                    if (it1 != map.end()) {
+                        CHECK_EQ(it1->second, it2->second);
+                    }
+                    break;
+                }
+                case 8: {  // Lower bound (10%)
+                    auto it1 = map.lower_bound(key);
+                    auto it2 = reference.lower_bound(key);
+                    CHECK_EQ((it1 != map.end()), (it2 != reference.end()));
+                    if (it1 != map.end()) {
+                        CHECK_EQ(it1->first, it2->first);
+                    }
+                    break;
+                }
+                case 9: {  // Upper bound (10%)
+                    auto it1 = map.upper_bound(key);
+                    auto it2 = reference.upper_bound(key);
+                    CHECK_EQ((it1 != map.end()), (it2 != reference.end()));
+                    if (it1 != map.end()) {
+                        CHECK_EQ(it1->first, it2->first);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Verify final state
+        CHECK_EQ(map.size(), reference.size());
+        auto it1 = map.begin();
+        auto it2 = reference.begin();
+        while (it1 != map.end()) {
+            CHECK_EQ(it1->first, it2->first);
+            CHECK_EQ(it1->second, it2->second);
+            ++it1;
+            ++it2;
+        }
+    }
+
+    SUBCASE("random int operations - large keys") {
+        btree_map<int, int> map;
+        std::map<int, int> reference;
+
+        for (int iter = 0; iter < 50000; ++iter) {
+            int op = rng() % 10;
+            int key = rng() % 100000;
+            int value = rng() % 1000000;
+
+            switch (op) {
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+                    map[key] = value;
+                    reference[key] = value;
+                    break;
+                case 4:
+                case 5:
+                    map.erase(key);
+                    reference.erase(key);
+                    break;
+                case 6:
+                case 7: {
+                    auto it1 = map.find(key);
+                    auto it2 = reference.find(key);
+                    CHECK_EQ((it1 != map.end()), (it2 != reference.end()));
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        CHECK_EQ(map.size(), reference.size());
+    }
+
+    SUBCASE("random string operations") {
+        btree_map<std::string, int> map;
+        std::map<std::string, int> reference;
+
+        for (int iter = 0; iter < 10000; ++iter) {
+            int op = rng() % 10;
+            std::string key = "key_" + std::to_string(rng() % 500);
+            int value = rng() % 1000;
+
+            switch (op) {
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+                    map[key] = value;
+                    reference[key] = value;
+                    break;
+                case 4:
+                case 5:
+                    map.erase(key);
+                    reference.erase(key);
+                    break;
+                case 6:
+                case 7: {
+                    auto it1 = map.find(key);
+                    auto it2 = reference.find(key);
+                    CHECK_EQ((it1 != map.end()), (it2 != reference.end()));
+                    if (it1 != map.end()) {
+                        CHECK_EQ(it1->second, it2->second);
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        CHECK_EQ(map.size(), reference.size());
+        auto it1 = map.begin();
+        auto it2 = reference.begin();
+        while (it1 != map.end()) {
+            CHECK_EQ(it1->first, it2->first);
+            CHECK_EQ(it1->second, it2->second);
+            ++it1;
+            ++it2;
+        }
+    }
+}
+
+TEST_CASE("btree_map::fuzz_iterator_stability") {
+    std::mt19937 rng(54321);
+
+    SUBCASE("iteration during modification") {
+        btree_map<int, int> map;
+        for (int i = 0; i < 1000; ++i) {
+            map[i] = i;
+        }
+
+        // Iterate and collect keys to erase
+        std::vector<int> to_erase;
+        for (auto& [k, v] : map) {
+            if (k % 3 == 0) to_erase.push_back(k);
+        }
+
+        // Erase collected keys
+        for (int k : to_erase) {
+            map.erase(k);
+        }
+
+        // Verify remaining
+        for (auto& [k, v] : map) {
+            CHECK(k % 3 != 0);
+            CHECK_EQ(k, v);
+        }
+    }
+
+    SUBCASE("erase via iterator") {
+        btree_map<int, int> map;
+        for (int i = 0; i < 500; ++i) {
+            map[i] = i;
+        }
+
+        // Erase every other element using iterator
+        for (auto it = map.begin(); it != map.end();) {
+            if (it->first % 2 == 0) {
+                it = map.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        CHECK_EQ(map.size(), 250);
+        for (auto& [k, v] : map) {
+            CHECK(k % 2 == 1);
+        }
+    }
+}
+
+TEST_CASE("btree_map::fuzz_edge_cases") {
+    std::mt19937 rng(99999);
+
+    SUBCASE("insert and erase same key repeatedly") {
+        btree_map<int, int> map;
+        for (int iter = 0; iter < 10000; ++iter) {
+            int key = rng() % 10;  // Very small key range
+            int value = rng();
+            if (rng() % 2) {
+                map[key] = value;
+            } else {
+                map.erase(key);
+            }
+        }
+        // Just verify no crash and valid state
+        size_t count = 0;
+        int prev = -1;
+        for (auto& [k, v] : map) {
+            CHECK(k > prev);
+            prev = k;
+            ++count;
+        }
+        CHECK_EQ(count, map.size());
+    }
+
+    SUBCASE("sequential insert then random erase") {
+        btree_map<int, int> map;
+        std::set<int> remaining;
+
+        // Sequential insert
+        for (int i = 0; i < 10000; ++i) {
+            map[i] = i;
+            remaining.insert(i);
+        }
+
+        // Random erase
+        std::vector<int> keys(remaining.begin(), remaining.end());
+        std::shuffle(keys.begin(), keys.end(), rng);
+
+        for (int i = 0; i < 5000; ++i) {
+            map.erase(keys[i]);
+            remaining.erase(keys[i]);
+        }
+
+        // Verify
+        CHECK_EQ(map.size(), remaining.size());
+        for (int k : remaining) {
+            CHECK(map.contains(k));
+            CHECK_EQ(map[k], k);
+        }
+    }
+
+    SUBCASE("alternating insert/erase pattern") {
+        btree_map<int, int> map;
+        std::map<int, int> reference;
+
+        for (int round = 0; round < 100; ++round) {
+            // Insert phase
+            for (int i = 0; i < 100; ++i) {
+                int key = rng() % 1000;
+                int value = rng();
+                map[key] = value;
+                reference[key] = value;
+            }
+
+            // Erase phase
+            for (int i = 0; i < 50; ++i) {
+                int key = rng() % 1000;
+                map.erase(key);
+                reference.erase(key);
+            }
+        }
+
+        CHECK_EQ(map.size(), reference.size());
+    }
+
+    SUBCASE("clear and refill") {
+        btree_map<int, int> map;
+
+        for (int round = 0; round < 100; ++round) {
+            // Fill
+            for (int i = 0; i < 100; ++i) {
+                map[rng() % 500] = rng();
+            }
+
+            // Clear
+            map.clear();
+            CHECK(map.empty());
+            CHECK_EQ(map.size(), 0);
+            CHECK(map.begin() == map.end());
+        }
+    }
+}
+
+TEST_CASE("btree_map::fuzz_merge_and_swap") {
+    std::mt19937 rng(11111);
+
+    SUBCASE("random merge operations") {
+        for (int trial = 0; trial < 10; ++trial) {
+            btree_map<int, int> map1, map2;
+            std::map<int, int> ref1, ref2;
+
+            // Fill both maps with distinct ranges to simplify verification
+            for (int i = 0; i < 200; ++i) {
+                int k1 = rng() % 500;        // Keys 0-499
+                int k2 = 500 + rng() % 500;  // Keys 500-999 (no overlap)
+                map1[k1] = k1;
+                map2[k2] = k2;
+                ref1[k1] = k1;
+                ref2[k2] = k2;
+            }
+
+            size_t expected_size = ref1.size() + ref2.size();
+
+            map1.merge(map2);
+
+            // With no overlap, map1 should have all elements and map2 should be empty
+            CHECK_EQ(map1.size(), expected_size);
+            CHECK(map2.empty());
+        }
+    }
+
+    SUBCASE("swap preserves data") {
+        btree_map<int, int> map1, map2;
+
+        for (int i = 0; i < 100; ++i) map1[i] = i;
+        for (int i = 100; i < 200; ++i) map2[i] = i;
+
+        size_t size1 = map1.size();
+        size_t size2 = map2.size();
+
+        map1.swap(map2);
+
+        CHECK_EQ(map1.size(), size2);
+        CHECK_EQ(map2.size(), size1);
+
+        // Verify contents swapped
+        CHECK(map1.contains(150));
+        CHECK(!map1.contains(50));
+        CHECK(map2.contains(50));
+        CHECK(!map2.contains(150));
     }
 }
 
