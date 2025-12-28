@@ -16,12 +16,41 @@
 
 #include "container/btree_map.hpp"
 
+#include <atomic>
 #include <map>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "doctest/doctest/doctest.h"
+
+// Counting allocator for testing allocator support
+namespace test_alloc {
+inline std::atomic<int> alloc_count{0};
+inline std::atomic<int> dealloc_count{0};
+
+template <typename T>
+struct CountingAllocator {
+    using value_type = T;
+
+    CountingAllocator() = default;
+    template <typename U>
+    CountingAllocator(const CountingAllocator<U>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        ++alloc_count;
+        return static_cast<T*>(::operator new(n * sizeof(T)));
+    }
+
+    void deallocate(T* p, std::size_t) noexcept {
+        ++dealloc_count;
+        ::operator delete(p);
+    }
+
+    template <typename U>
+    bool operator==(const CountingAllocator<U>&) const noexcept { return true; }
+};
+}  // namespace test_alloc
 
 namespace stdb::container {
 
@@ -845,6 +874,38 @@ TEST_CASE("btree_map::allocator") {
         btree_map<int, std::string> map(vec.begin(), vec.end(), alloc);
         CHECK_EQ(map.size(), 2);
         CHECK_EQ(map.at(1), "one");
+    }
+
+    SUBCASE("custom allocator is actually used") {
+        // Reset counters
+        test_alloc::alloc_count = 0;
+        test_alloc::dealloc_count = 0;
+
+        using Alloc = test_alloc::CountingAllocator<std::pair<const int, int>>;
+        {
+            btree_map<int, int, std::less<int>, Alloc> map;
+
+            // Insert enough elements to trigger multiple node allocations/splits
+            for (int i = 0; i < 500; ++i) {
+                map[i] = i;
+            }
+            CHECK(test_alloc::alloc_count > 0);
+            CHECK_EQ(map.size(), 500);
+
+            // Erase elements to trigger node merging/rebalancing and deallocations
+            for (int i = 0; i < 250; ++i) {
+                map.erase(i);
+            }
+            CHECK(test_alloc::dealloc_count > 0);
+            CHECK_EQ(map.size(), 250);
+
+            // Clear should deallocate remaining nodes
+            map.clear();
+            CHECK(map.empty());
+        }
+
+        // After destructor, all allocations should be matched by deallocations
+        CHECK_EQ(test_alloc::alloc_count.load(), test_alloc::dealloc_count.load());
     }
 }
 
