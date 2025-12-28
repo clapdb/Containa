@@ -17,6 +17,10 @@
 #pragma once
 #include "btree_map.hpp"
 
+#if __cplusplus >= 202302L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202302L)
+#include <ranges>
+#endif
+
 namespace stdb::container {
 
 /*
@@ -446,6 +450,17 @@ class btree_set
         }
     }
 
+#if __cplusplus >= 202302L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202302L)
+    // Insert range (C++23)
+    template <std::ranges::input_range R>
+    requires std::convertible_to<std::ranges::range_reference_t<R>, Key>
+    void insert_range(R&& range) {
+        for (auto&& elem : range) {
+            insert(std::forward<decltype(elem)>(elem));
+        }
+    }
+#endif
+
     // Emplace
     template <typename... Args>
     auto emplace(Args&&... args) -> std::pair<iterator, bool> {
@@ -468,6 +483,14 @@ class btree_set
 
     auto erase(const Key& key) -> size_type { return _map.erase(key); }
 
+    // Heterogeneous erase (C++23)
+    template <typename K>
+    requires is_transparent_comparator_v<Compare> && (!std::is_same_v<std::remove_cvref_t<K>, iterator>) &&
+             (!std::is_same_v<std::remove_cvref_t<K>, const_iterator>)
+    auto erase(const K& key) -> size_type {
+        return _map.erase(key);
+    }
+
     // Swap
     void swap(btree_set& other) noexcept { _map.swap(other._map); }
 
@@ -483,6 +506,24 @@ class btree_set
         auto it = find(key);
         if (it == end()) return node_type();
         return extract(it);
+    }
+
+    // Heterogeneous extract (C++23)
+    template <typename K>
+    requires is_transparent_comparator_v<Compare> && (!std::is_same_v<std::remove_cvref_t<K>, iterator>) &&
+             (!std::is_same_v<std::remove_cvref_t<K>, const_iterator>)
+    auto extract(const K& key) -> node_type {
+        auto it = find(key);
+        if (it == end()) return node_type();
+        return extract(it);
+    }
+
+    // Extract and get next iterator (absl extension)
+    auto extract_and_get_next(const_iterator pos) -> std::pair<node_type, iterator> {
+        if (pos == end()) return {node_type(), end()};
+        Key key = *pos;
+        auto next = erase(pos);
+        return {node_type(std::move(key)), next};
     }
 
     // Insert node_type (C++17)
