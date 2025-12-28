@@ -232,7 +232,8 @@ class btree_map
 
     // Calculate optimal number of slots per node
     // Node layout: [header] + [slots (key-value pairs)] + [children for internal]
-    static constexpr size_type kNodeHeaderSize = sizeof(void*) * 2 + 8;  // parent + padding
+    // node_base is: parent(8) + count(2) + position(2) + is_leaf(1) + padding(3) = 16 bytes
+    static constexpr size_type kNodeHeaderSize = 16;
     static constexpr size_type kMinSlots = 4;
 
     // Calculate slots for leaf node (no child pointers)
