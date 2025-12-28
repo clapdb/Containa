@@ -298,7 +298,54 @@ Containa btree_map is **1.1-2.7x faster** than Abseil for find (depending on key
 | Find      | 1230 us  | 890 us    | **1.38x** |
 | Iterate   | 87 us    | 23 us     | **3.78x** |
 
+### Arena Allocator Support
+
+btree_map supports custom allocators via `std::allocator_traits`, including arena allocators for fast bulk allocation/deallocation.
+
+**Recommended: Use [ClapDB Arena](https://github.com/clapdb/Arena)** - a high-performance arena allocator with `std::pmr::memory_resource` support.
+
+**Usage Example with ClapDB Arena:**
+
+```cpp
+#include <arena/arena.hpp>
+#include "container/btree_map.hpp"
+
+using namespace stdb::container;
+
+// Create Arena with default options
+arena::Arena ar(arena::Arena::Options::GetDefaultOptions());
+
+// Use Arena's pmr memory_resource with btree_map
+using Alloc = std::pmr::polymorphic_allocator<std::pair<const int, int>>;
+btree_map<int, int, std::less<int>, Alloc> map(Alloc(ar.get_memory_resource()));
+
+for (int i = 0; i < 100000; ++i) {
+    map[i] = i;
+}
+
+// Erase is fast (deallocate is no-op in arena)
+for (int i = 0; i < 50000; ++i) {
+    map.erase(i);
+}
+
+// All memory freed when arena is destroyed
+// Or call ar.Reset() to reuse arena
+```
+
+**When to Use Arena Allocator:**
+
+- Temporary containers that are discarded together
+- Batch processing where all data is freed at once
+- Performance-critical code where allocation overhead matters
+- Multiple containers sharing memory pool
+
+**Benefits:**
+
+- Zero-cost destruction (arena reset frees all memory instantly)
+- Better memory locality (all allocations from contiguous blocks)
+- Reduced fragmentation
+- `std::pmr` compatible (works with any pmr-aware container)
+
 ### Future Optimizations
 - B+ tree variant for even faster iteration
 - Bulk loading optimization for sorted input
-- Memory pool allocator for reduced allocation overhead
