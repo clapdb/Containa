@@ -388,14 +388,15 @@ class concurrent_skiplist {
                 continue;  // Someone else unmarked? Retry
             }
 
-            // Physically unlink (best effort, will be done by future traversals too)
-            for (int i = victim->height; i >= 0; --i) {
+            // Physically unlink at levels > 0 only (level 0 preserved for destructor)
+            for (int i = victim->height; i > 0; --i) {
                 std::atomic<MarkedPtr<Node>>* pred_next = preds[i] ? &preds[i]->next[i] : &_head[i];
                 MarkedPtr<Node> expected(victim);
                 MarkedPtr<Node> succ = victim->next[i].load(std::memory_order_relaxed);
                 pred_next->compare_exchange_strong(expected, MarkedPtr<Node>(succ.ptr()),
                                                     std::memory_order_relaxed);
             }
+            // Note: Level 0 stays linked so destructor can traverse and free all nodes
 
             _size.fetch_sub(1, std::memory_order_relaxed);
             // Node stays in list (marked), will be cleaned up by destructor
@@ -439,20 +440,27 @@ class concurrent_skiplist {
                 // acquire: need to see succ node's data and mark
                 MarkedPtr<Node> succ = curr.ptr()->next[i].load(std::memory_order_acquire);
 
-                // Help remove marked nodes
+                // Help remove marked nodes (only above level 0 to preserve destructor chain)
                 if (succ.marked() || curr.marked()) {
-                    MarkedPtr<Node> next_unmarked = succ;
-                    while (next_unmarked.ptr() && next_unmarked.marked()) {
-                        next_unmarked = next_unmarked.ptr()->next[i].load(std::memory_order_acquire);
+                    if (i > 0) {
+                        // At higher levels, try to physically unlink
+                        MarkedPtr<Node> next_unmarked = succ;
+                        while (next_unmarked.ptr() && next_unmarked.marked()) {
+                            next_unmarked = next_unmarked.ptr()->next[i].load(std::memory_order_acquire);
+                        }
+                        if (!pred_next->compare_exchange_strong(curr, MarkedPtr<Node>(next_unmarked.ptr()),
+                                                                 std::memory_order_release,
+                                                                 std::memory_order_relaxed)) {
+                            // CAS failed, restart from top
+                            pred = nullptr;
+                            goto retry;
+                        }
+                        curr = MarkedPtr<Node>(next_unmarked.ptr());
+                    } else {
+                        // At level 0, just skip over marked nodes without unlinking
+                        // This preserves the chain for destructor cleanup
+                        curr = succ;
                     }
-                    if (!pred_next->compare_exchange_strong(curr, MarkedPtr<Node>(next_unmarked.ptr()),
-                                                             std::memory_order_release,
-                                                             std::memory_order_relaxed)) {
-                        // CAS failed, restart from top
-                        pred = nullptr;
-                        goto retry;
-                    }
-                    curr = MarkedPtr<Node>(next_unmarked.ptr());
                     continue;
                 }
 

@@ -273,7 +273,7 @@ TEST_CASE("skiplist_map::insert") {
     SUBCASE("insert with hint (hint ignored)") {
         skiplist_map<int, int> map{{1, 10}, {3, 30}};
         auto hint = map.find(1);
-        auto it = map.insert(hint, {2, 20});
+        auto it = map.insert(hint, std::pair<const int, int>{2, 20});
         CHECK_EQ(it->first, 2);
         CHECK_EQ(it->second, 20);
         CHECK_EQ(map.size(), 3);
