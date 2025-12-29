@@ -96,6 +96,10 @@ concept string_like = requires(const T& a) {
 };
 
 // Trait to detect transparent comparators (have is_transparent type member)
+// Guard to avoid redefinition when included with skiplist_map.hpp
+#ifndef STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
+#define STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
+
 template <typename, typename = void>
 struct is_transparent_comparator : std::false_type {};
 
@@ -128,6 +132,8 @@ struct compressed_pair
     // Conversion to std::pair for API compatibility
     operator std::pair<const First, Second>() const { return {first, second}; }
 };
+
+#endif  // STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
 
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
