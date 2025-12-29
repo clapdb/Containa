@@ -23,3 +23,24 @@ add_executable(skiplist_concurrent_bench skiplist_concurrent_bench.cc)
 target_compile_definitions(skiplist_concurrent_bench PRIVATE NDEBUG)
 target_link_libraries(skiplist_concurrent_bench pthread)
 
+# B-tree benchmark (with optional Abseil comparison)
+add_executable(btree_bench btree_bench.cc)
+target_compile_definitions(btree_bench PRIVATE NDEBUG)
+target_link_libraries(btree_bench nanobench)
+
+if(ENABLE_ABSL_BENCH)
+    # Add Abseil support to btree_bench
+    target_compile_definitions(btree_bench PRIVATE ENABLE_ABSL)
+    target_link_libraries(btree_bench absl::btree)
+
+    # Also build the comprehensive absl comparison benchmark
+    add_executable(absl_btree_bench absl_btree_bench.cc)
+    target_compile_definitions(absl_btree_bench PRIVATE NDEBUG)
+    target_link_libraries(absl_btree_bench
+        nanobench
+        absl::btree
+        absl::flat_hash_map
+        absl::hash
+    )
+    message(STATUS "Building Abseil btree comparison benchmarks")
+endif()
