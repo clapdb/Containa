@@ -193,12 +193,19 @@ class skiplist_map
         [[nodiscard]] auto& value() noexcept { return data.second; }
         [[nodiscard]] const auto& value() const noexcept { return data.second; }
 
-        // Get forward pointer array (located after data member)
+        // Get offset to forward pointer array (must be pointer-aligned)
+        static constexpr size_type forward_offset() noexcept {
+            constexpr size_type base_size = sizeof(node);
+            constexpr size_type ptr_align = alignof(node*);
+            return (base_size + ptr_align - 1) & ~(ptr_align - 1);
+        }
+
+        // Get forward pointer array (located after data member, properly aligned)
         [[nodiscard]] node** get_forward() noexcept {
-            return reinterpret_cast<node**>(reinterpret_cast<char*>(this) + sizeof(node));
+            return reinterpret_cast<node**>(reinterpret_cast<char*>(this) + forward_offset());
         }
         [[nodiscard]] node* const* get_forward() const noexcept {
-            return reinterpret_cast<node* const*>(reinterpret_cast<const char*>(this) + sizeof(node));
+            return reinterpret_cast<node* const*>(reinterpret_cast<const char*>(this) + forward_offset());
         }
 
         // Get forward pointer at level i
@@ -208,7 +215,7 @@ class skiplist_map
 
     // Calculate node allocation size for a given level
     static constexpr size_type node_size(uint8_t level) noexcept {
-        return sizeof(node) + (static_cast<size_type>(level) + 1) * sizeof(node*);
+        return node::forward_offset() + (static_cast<size_type>(level) + 1) * sizeof(node*);
     }
 
     // Head node (sentinel, no data, only forward pointers)
@@ -559,7 +566,10 @@ class skiplist_map
     [[nodiscard]] const_iterator cend() const noexcept { return const_iterator(nullptr); }
 
     // Insert
-    template <typename K, typename V>
+    // Constraint: K must not be an iterator type (to avoid ambiguity with hint-based insert)
+    template <typename K, typename V, typename = std::enable_if_t<
+        !std::is_same_v<std::decay_t<K>, iterator> &&
+        !std::is_same_v<std::decay_t<K>, const_iterator>>>
     auto insert(K&& key, V&& value) -> std::pair<iterator, bool> {
         node* update[MaxLevel + 1];
         node* candidate = find_node(key, update);
@@ -615,7 +625,7 @@ class skiplist_map
     }
 
     // Range insert
-    template <typename InputIt>
+    template <typename InputIt, typename = std::void_t<decltype(*std::declval<InputIt&>())>>
     void insert(InputIt first, InputIt last) {
         for (; first != last; ++first) {
             insert(*first);

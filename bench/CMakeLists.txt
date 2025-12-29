@@ -15,9 +15,6 @@ endfunction()
 # Vector benchmarks
 add_bench_target(vb vector_bench.cc)
 
-# B-tree benchmarks
-add_bench_target(btree_bench btree_bench.cc)
-
 # Skiplist benchmarks
 add_bench_target(skiplist_bench skiplist_bench.cc)
 
