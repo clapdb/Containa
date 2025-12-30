@@ -26,7 +26,10 @@
 #include <vector>
 
 #include "container/btree_map.hpp"
+
+#ifdef ENABLE_ARENA_BENCH
 #include "arena/arena.hpp"
+#endif
 
 using namespace stdb::container;
 
@@ -71,6 +74,7 @@ void run_btree_map_insert_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 
+#ifdef ENABLE_ARENA_BENCH
     // 4. ClapDB Arena
     bench.run("arena::Arena", [&] {
         auto opts = arena::Arena::Options::GetDefaultOptions();
@@ -80,6 +84,7 @@ void run_btree_map_insert_benchmark() {
         for (int k : random_keys) map[k] = k;
         ankerl::nanobench::doNotOptimizeAway(map);
     });
+#endif
 }
 
 template <size_t N>
@@ -107,11 +112,13 @@ void run_btree_map_find_benchmark() {
     stdb::pmr::btree_map<int, int> unsync_map{&unsync_pool};
     for (int k : random_keys) unsync_map[k] = k;
 
+#ifdef ENABLE_ARENA_BENCH
     auto opts = arena::Arena::Options::GetDefaultOptions();
     opts.suggested_init_block_size = N * 64;
     arena::Arena arena{opts};
     stdb::pmr::btree_map<int, int> arena_map{arena.get_memory_resource()};
     for (int k : random_keys) arena_map[k] = k;
+#endif
 
     // Find benchmarks (allocation strategy shouldn't affect find performance much)
     bench.run("std::allocator", [&] {
@@ -141,6 +148,7 @@ void run_btree_map_find_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
+#ifdef ENABLE_ARENA_BENCH
     bench.run("arena::Arena", [&] {
         int sum = 0;
         for (int k : random_keys) {
@@ -149,6 +157,7 @@ void run_btree_map_find_benchmark() {
         }
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
+#endif
 }
 
 template <size_t N>
@@ -206,6 +215,7 @@ void run_btree_map_mixed_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 
+#ifdef ENABLE_ARENA_BENCH
     bench.run("arena::Arena", [&] {
         auto opts = arena::Arena::Options::GetDefaultOptions();
         opts.suggested_init_block_size = N * 128;
@@ -221,6 +231,7 @@ void run_btree_map_mixed_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(sum);
         ankerl::nanobench::doNotOptimizeAway(map);
     });
+#endif
 }
 
 // =============================================================================
@@ -260,6 +271,7 @@ void run_btree_set_insert_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(set);
     });
 
+#ifdef ENABLE_ARENA_BENCH
     bench.run("arena::Arena", [&] {
         auto opts = arena::Arena::Options::GetDefaultOptions();
         opts.suggested_init_block_size = N * 32;
@@ -268,6 +280,7 @@ void run_btree_set_insert_benchmark() {
         for (int k : random_keys) set.insert(k);
         ankerl::nanobench::doNotOptimizeAway(set);
     });
+#endif
 }
 
 // =============================================================================
@@ -312,6 +325,7 @@ void run_btree_map_string_benchmark() {
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 
+#ifdef ENABLE_ARENA_BENCH
     bench.run("arena::Arena", [&] {
         auto opts = arena::Arena::Options::GetDefaultOptions();
         opts.suggested_init_block_size = N * 128;
@@ -321,6 +335,7 @@ void run_btree_map_string_benchmark() {
         for (const auto& k : keys) map[k] = i++;
         ankerl::nanobench::doNotOptimizeAway(map);
     });
+#endif
 }
 
 // =============================================================================
@@ -369,6 +384,7 @@ void run_lifecycle_benchmark() {
         }
     });
 
+#ifdef ENABLE_ARENA_BENCH
     bench.run("arena::Arena (reset)", [&] {
         auto opts = arena::Arena::Options::GetDefaultOptions();
         opts.suggested_init_block_size = N * 64;
@@ -380,19 +396,22 @@ void run_lifecycle_benchmark() {
             arena.Reset();  // Fast reset without deallocation
         }
     });
+#endif
 }
 
 int main(int argc, char** argv) {
     bool run_large = (argc > 1 && std::string(argv[1]) == "--large");
 
     std::cout << "============================================================\n";
-    std::cout << "PMR + Arena Allocator Benchmark for btree_map/btree_set\n";
+    std::cout << "PMR Allocator Benchmark for btree_map/btree_set\n";
     std::cout << "============================================================\n";
     std::cout << "Allocators tested:\n";
     std::cout << "  - std::allocator (baseline)\n";
     std::cout << "  - std::pmr::monotonic_buffer_resource\n";
     std::cout << "  - std::pmr::unsynchronized_pool_resource\n";
+#ifdef ENABLE_ARENA_BENCH
     std::cout << "  - arena::Arena (ClapDB Arena)\n";
+#endif
     std::cout << "============================================================\n";
 
     // btree_map insert benchmarks
