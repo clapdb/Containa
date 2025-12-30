@@ -4,6 +4,3 @@
 [submodule "nanobench"]
 	path = nanobench
 	url = https://github.com/martinus/nanobench.git
-[submodule "arena"]
-	path = arena
-	url = git@github.com:clapdb/Arena.git
