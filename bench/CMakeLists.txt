@@ -44,3 +44,36 @@ if(ENABLE_ABSL_BENCH)
     )
     message(STATUS "Building Abseil btree comparison benchmarks")
 endif()
+
+# PMR + Arena allocator benchmark
+option(ENABLE_PMR_BENCH "Enable PMR/Arena allocator benchmark" ON)
+if(ENABLE_PMR_BENCH)
+    # Fetch fmt for arena dependency
+    include(FetchContent)
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG 11.1.4
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(fmt)
+
+    # Build arena library
+    set(ARENA_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../arena/src)
+    add_library(arena_lib STATIC ${ARENA_SRC_DIR}/arena.cc)
+    target_include_directories(arena_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../arena/include)
+    target_compile_options(arena_lib PRIVATE -frtti)
+    target_link_libraries(arena_lib fmt::fmt)
+
+    add_executable(pmr_bench pmr_bench.cc)
+    target_compile_definitions(pmr_bench PRIVATE NDEBUG)
+    target_include_directories(pmr_bench PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../arena/include
+    )
+    target_link_libraries(pmr_bench nanobench arena_lib fmt::fmt)
+    if(ENABLE_ASAN OR ENABLE_UBSAN)
+        target_compile_options(pmr_bench PRIVATE ${SANITIZER_FLAGS})
+        target_link_options(pmr_bench PRIVATE ${SANITIZER_LINK_FLAGS})
+    endif()
+    message(STATUS "Building PMR/Arena allocator benchmark")
+endif()

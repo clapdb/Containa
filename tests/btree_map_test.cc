@@ -1980,4 +1980,160 @@ TEST_CASE("btree_map::fuzz_merge_and_swap") {
     }
 }
 
+// =============================================================================
+// PMR (Polymorphic Memory Resource) Tests
+// =============================================================================
+#ifdef BTREE_HAS_PMR
+
+TEST_CASE("btree_map::pmr") {
+    SUBCASE("basic operations with monotonic_buffer_resource") {
+        std::array<std::byte, 4096> buffer;
+        std::pmr::monotonic_buffer_resource pool{buffer.data(), buffer.size()};
+
+        stdb::pmr::btree_map<int, int> map{&pool};
+
+        // Insert
+        map[1] = 10;
+        map[2] = 20;
+        map[3] = 30;
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(1), 10);
+        CHECK_EQ(map.at(2), 20);
+        CHECK_EQ(map.at(3), 30);
+
+        // Find
+        auto it = map.find(2);
+        CHECK(it != map.end());
+        CHECK_EQ(it->second, 20);
+
+        // Erase
+        map.erase(2);
+        CHECK_EQ(map.size(), 2);
+        CHECK(!map.contains(2));
+    }
+
+    SUBCASE("with unsynchronized_pool_resource") {
+        std::pmr::unsynchronized_pool_resource pool;
+
+        stdb::pmr::btree_map<int, std::pmr::string> map{&pool};
+
+        map[1] = "one";
+        map[2] = "two";
+        map[3] = "three";
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(1), "one");
+        CHECK_EQ(map.at(2), "two");
+        CHECK_EQ(map.at(3), "three");
+    }
+
+    SUBCASE("copy and move with pmr") {
+        std::pmr::unsynchronized_pool_resource pool1;
+        std::pmr::unsynchronized_pool_resource pool2;
+
+        stdb::pmr::btree_map<int, int> map1{&pool1};
+        for (int i = 0; i < 100; ++i) {
+            map1[i] = i * 10;
+        }
+
+        // Copy (uses same allocator)
+        stdb::pmr::btree_map<int, int> map2{map1};
+        CHECK_EQ(map2.size(), 100);
+        CHECK_EQ(map2.at(50), 500);
+
+        // Move
+        stdb::pmr::btree_map<int, int> map3{std::move(map1)};
+        CHECK_EQ(map3.size(), 100);
+        CHECK_EQ(map3.at(50), 500);
+    }
+
+    SUBCASE("initializer list with pmr") {
+        std::pmr::unsynchronized_pool_resource pool;
+
+        stdb::pmr::btree_map<int, int> map{{1, 10}, {2, 20}, {3, 30}};
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map.at(1), 10);
+    }
+
+    SUBCASE("pmr btree_map_compact") {
+        std::array<std::byte, 8192> buffer;
+        std::pmr::monotonic_buffer_resource pool{buffer.data(), buffer.size()};
+
+        stdb::pmr::btree_map_compact<int, int> map{&pool};
+
+        for (int i = 0; i < 50; ++i) {
+            map[i] = i;
+        }
+
+        CHECK_EQ(map.size(), 50);
+        for (int i = 0; i < 50; ++i) {
+            CHECK_EQ(map.at(i), i);
+        }
+    }
+}
+
+TEST_CASE("btree_set::pmr") {
+    SUBCASE("basic operations with monotonic_buffer_resource") {
+        std::array<std::byte, 4096> buffer;
+        std::pmr::monotonic_buffer_resource pool{buffer.data(), buffer.size()};
+
+        stdb::pmr::btree_set<int> set{&pool};
+
+        // Insert
+        set.insert(1);
+        set.insert(2);
+        set.insert(3);
+
+        CHECK_EQ(set.size(), 3);
+        CHECK(set.contains(1));
+        CHECK(set.contains(2));
+        CHECK(set.contains(3));
+
+        // Find
+        auto it = set.find(2);
+        CHECK(it != set.end());
+        CHECK_EQ(*it, 2);
+
+        // Erase
+        set.erase(2);
+        CHECK_EQ(set.size(), 2);
+        CHECK(!set.contains(2));
+    }
+
+    SUBCASE("with unsynchronized_pool_resource") {
+        std::pmr::unsynchronized_pool_resource pool;
+
+        stdb::pmr::btree_set<std::pmr::string> set{&pool};
+
+        set.insert("one");
+        set.insert("two");
+        set.insert("three");
+
+        CHECK_EQ(set.size(), 3);
+        CHECK(set.contains("one"));
+        CHECK(set.contains("two"));
+        CHECK(set.contains("three"));
+    }
+
+    SUBCASE("pmr btree_set_compact") {
+        std::array<std::byte, 8192> buffer;
+        std::pmr::monotonic_buffer_resource pool{buffer.data(), buffer.size()};
+
+        stdb::pmr::btree_set_compact<int> set{&pool};
+
+        for (int i = 0; i < 50; ++i) {
+            set.insert(i);
+        }
+
+        CHECK_EQ(set.size(), 50);
+        for (int i = 0; i < 50; ++i) {
+            CHECK(set.contains(i));
+        }
+    }
+}
+
+#endif  // BTREE_HAS_PMR
+
 }  // namespace stdb::container
