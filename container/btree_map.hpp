@@ -135,8 +135,20 @@ struct compressed_pair
 
 #endif  // STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
 
+// Empty value type for set implementation
+// When used as Value type, btree_map operates in "set mode"
+struct btree_set_empty_value
+{
+    constexpr bool operator==(const btree_set_empty_value&) const noexcept { return true; }
+    constexpr bool operator!=(const btree_set_empty_value&) const noexcept { return false; }
+    constexpr auto operator<=>(const btree_set_empty_value&) const noexcept { return std::strong_ordering::equal; }
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
+// Note: For btree_set (Value = btree_set_empty_value), compressed_pair's
+// [[no_unique_address]] already optimizes the empty value to zero size,
+// so no specialization is needed.
 template <typename Key, typename Value>
 constexpr std::size_t optimal_node_size() {
     constexpr std::size_t header_size = 24;  // parent + count + position + is_leaf + padding
@@ -158,19 +170,24 @@ template <typename Key, typename Value, typename Compare = std::less<Key>,
 class btree_map
 {
    public:
+    // Set mode detection: when Value is btree_set_empty_value, we operate as a set
+    static constexpr bool is_set_mode = std::is_same_v<Value, btree_set_empty_value>;
+
     using key_type = Key;
     using mapped_type = Value;
-    using value_type = std::pair<const Key, Value>;
+    // In set mode, value_type is just Key; in map mode, it's pair<const Key, Value>
+    using value_type = std::conditional_t<is_set_mode, Key, std::pair<const Key, Value>>;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
     using key_compare = Compare;
     using allocator_type = Allocator;
-    using reference = value_type&;
-    using const_reference = const value_type&;
-    using pointer = value_type*;
-    using const_pointer = const value_type*;
+    // In set mode, references are const Key&; in map mode, value_type&
+    using reference = std::conditional_t<is_set_mode, const Key&, value_type&>;
+    using const_reference = std::conditional_t<is_set_mode, const Key&, const value_type&>;
+    using pointer = std::conditional_t<is_set_mode, const Key*, value_type*>;
+    using const_pointer = std::conditional_t<is_set_mode, const Key*, const value_type*>;
 
-    // value_compare - compares value_type by key (std::map compatible)
+    // value_compare - compares value_type by key (std::map/std::set compatible)
     class value_compare
     {
         friend class btree_map;
@@ -184,10 +201,17 @@ class btree_map
         using first_argument_type [[deprecated]] = value_type;
         using second_argument_type [[deprecated]] = value_type;
 
-        bool operator()(const value_type& lhs, const value_type& rhs) const { return comp(lhs.first, rhs.first); }
+        bool operator()(const value_type& lhs, const value_type& rhs) const {
+            if constexpr (is_set_mode) {
+                return comp(lhs, rhs);
+            } else {
+                return comp(lhs.first, rhs.first);
+            }
+        }
     };
 
     // Node handle for extract/insert operations (C++17)
+    // In set mode, stores just Key; in map mode, stores pair<Key, Value>
     class node_type
     {
         friend class btree_map;
@@ -215,8 +239,12 @@ class btree_map
         [[nodiscard]] bool empty() const noexcept { return !_valid; }
         explicit operator bool() const noexcept { return _valid; }
 
-        [[nodiscard]] key_type& key() { return _storage.first; }
-        [[nodiscard]] mapped_type& mapped() { return _storage.second; }
+        // Map mode accessors
+        [[nodiscard]] key_type& key() requires(!is_set_mode) { return _storage.first; }
+        [[nodiscard]] mapped_type& mapped() requires(!is_set_mode) { return _storage.second; }
+
+        // Set mode accessor - returns the value (which is just the key)
+        [[nodiscard]] key_type& value() requires(is_set_mode) { return _storage; }
 
         void swap(node_type& other) noexcept {
             std::swap(_storage, other._storage);
@@ -224,10 +252,19 @@ class btree_map
         }
 
        private:
-        explicit node_type(Key&& k, Value&& v) : _storage(std::move(k), std::move(v)), _valid(true) {}
-        explicit node_type(const Key& k, Value&& v) : _storage(k, std::move(v)), _valid(true) {}
+        // Map mode constructors
+        explicit node_type(Key&& k, Value&& v) requires(!is_set_mode)
+            : _storage(std::move(k), std::move(v)), _valid(true) {}
+        explicit node_type(const Key& k, Value&& v) requires(!is_set_mode)
+            : _storage(k, std::move(v)), _valid(true) {}
 
-        std::pair<Key, Value> _storage;
+        // Set mode constructors
+        explicit node_type(Key&& k) requires(is_set_mode) : _storage(std::move(k)), _valid(true) {}
+        explicit node_type(const Key& k) requires(is_set_mode) : _storage(k), _valid(true) {}
+
+        // Storage type: pair for map mode, Key for set mode
+        using storage_t = std::conditional_t<is_set_mode, Key, std::pair<Key, Value>>;
+        storage_t _storage;
         bool _valid = false;
     };
 
@@ -3035,15 +3072,16 @@ class btree_map
     }
 
    public:
-    // Iterator class
+    // Iterator class - supports both map mode (returns pair) and set mode (returns key)
     class iterator
     {
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
-        using value_type = std::pair<const Key, Value>;
-        using pointer = value_type*;
-        using reference = value_type&;
+        // In set mode, value_type is const Key; in map mode, it's pair<const Key, Value>
+        using value_type = std::conditional_t<is_set_mode, const Key, std::pair<const Key, Value>>;
+        using pointer = std::conditional_t<is_set_mode, const Key*, value_type*>;
+        using reference = std::conditional_t<is_set_mode, const Key&, value_type&>;
 
        private:
         node_base* _node = nullptr;
@@ -3132,15 +3170,33 @@ class btree_map
         iterator() = default;
 
         [[nodiscard]] auto operator*() const -> reference {
-            if (_node->is_leaf_node()) {
-                auto* leaf = static_cast<leaf_node*>(_node);
-                return reinterpret_cast<reference>(leaf->slots[_pos]);
+            if constexpr (is_set_mode) {
+                // Set mode: return just the key
+                if (_node->is_leaf_node()) {
+                    return static_cast<leaf_node*>(_node)->slots[_pos].first;
+                }
+                return static_cast<internal_node*>(_node)->slots[_pos].first;
+            } else {
+                // Map mode: return the pair
+                if (_node->is_leaf_node()) {
+                    auto* leaf = static_cast<leaf_node*>(_node);
+                    return reinterpret_cast<reference>(leaf->slots[_pos]);
+                }
+                auto* internal = static_cast<internal_node*>(_node);
+                return reinterpret_cast<reference>(internal->slots[_pos]);
             }
-            auto* internal = static_cast<internal_node*>(_node);
-            return reinterpret_cast<reference>(internal->slots[_pos]);
         }
 
-        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+        [[nodiscard]] auto operator->() const -> pointer {
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return &static_cast<leaf_node*>(_node)->slots[_pos].first;
+                }
+                return &static_cast<internal_node*>(_node)->slots[_pos].first;
+            } else {
+                return &**this;
+            }
+        }
 
         auto operator++() -> iterator& {
             increment();
@@ -3176,9 +3232,10 @@ class btree_map
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
-        using value_type = const std::pair<const Key, Value>;
-        using pointer = const value_type*;
-        using reference = const value_type&;
+        // In set mode, value_type is const Key; in map mode, it's const pair<const Key, Value>
+        using value_type = std::conditional_t<is_set_mode, const Key, const std::pair<const Key, Value>>;
+        using pointer = std::conditional_t<is_set_mode, const Key*, const value_type*>;
+        using reference = std::conditional_t<is_set_mode, const Key&, const value_type&>;
 
        private:
         const node_base* _node = nullptr;
@@ -3259,15 +3316,33 @@ class btree_map
         const_iterator(const iterator& it) : _node(it._node), _pos(it._pos) {}
 
         [[nodiscard]] auto operator*() const -> reference {
-            if (_node->is_leaf_node()) {
-                auto* leaf = static_cast<const leaf_node*>(_node);
-                return reinterpret_cast<reference>(leaf->slots[_pos]);
+            if constexpr (is_set_mode) {
+                // Set mode: return just the key
+                if (_node->is_leaf_node()) {
+                    return static_cast<const leaf_node*>(_node)->slots[_pos].first;
+                }
+                return static_cast<const internal_node*>(_node)->slots[_pos].first;
+            } else {
+                // Map mode: return the pair
+                if (_node->is_leaf_node()) {
+                    auto* leaf = static_cast<const leaf_node*>(_node);
+                    return reinterpret_cast<reference>(leaf->slots[_pos]);
+                }
+                auto* internal = static_cast<const internal_node*>(_node);
+                return reinterpret_cast<reference>(internal->slots[_pos]);
             }
-            auto* internal = static_cast<const internal_node*>(_node);
-            return reinterpret_cast<reference>(internal->slots[_pos]);
         }
 
-        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+        [[nodiscard]] auto operator->() const -> pointer {
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return &static_cast<const leaf_node*>(_node)->slots[_pos].first;
+                }
+                return &static_cast<const internal_node*>(_node)->slots[_pos].first;
+            } else {
+                return &**this;
+            }
+        }
 
         auto operator++() -> const_iterator& {
             increment();
@@ -3304,9 +3379,10 @@ class btree_map
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
-        using value_type = std::pair<const Key, Value>;
-        using pointer = value_type*;
-        using reference = value_type&;
+        // In set mode, value_type is const Key; in map mode, it's pair<const Key, Value>
+        using value_type = std::conditional_t<is_set_mode, const Key, std::pair<const Key, Value>>;
+        using pointer = std::conditional_t<is_set_mode, const Key*, value_type*>;
+        using reference = std::conditional_t<is_set_mode, const Key&, value_type&>;
 
        private:
         node_base* _node = nullptr;
@@ -3322,13 +3398,29 @@ class btree_map
         reverse_iterator() = default;
 
         [[nodiscard]] auto operator*() const -> reference {
-            if (_node->is_leaf_node()) {
-                return reinterpret_cast<reference>(static_cast<leaf_node*>(_node)->slots[_pos]);
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return static_cast<leaf_node*>(_node)->slots[_pos].first;
+                }
+                return static_cast<internal_node*>(_node)->slots[_pos].first;
+            } else {
+                if (_node->is_leaf_node()) {
+                    return reinterpret_cast<reference>(static_cast<leaf_node*>(_node)->slots[_pos]);
+                }
+                return reinterpret_cast<reference>(static_cast<internal_node*>(_node)->slots[_pos]);
             }
-            return reinterpret_cast<reference>(static_cast<internal_node*>(_node)->slots[_pos]);
         }
 
-        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+        [[nodiscard]] auto operator->() const -> pointer {
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return &static_cast<leaf_node*>(_node)->slots[_pos].first;
+                }
+                return &static_cast<internal_node*>(_node)->slots[_pos].first;
+            } else {
+                return &**this;
+            }
+        }
 
         auto operator++() -> reverse_iterator& {
             // Increment in reverse = decrement in forward
@@ -3429,9 +3521,10 @@ class btree_map
        public:
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
-        using value_type = const std::pair<const Key, Value>;
-        using pointer = const value_type*;
-        using reference = const value_type&;
+        // In set mode, value_type is const Key; in map mode, it's const pair<const Key, Value>
+        using value_type = std::conditional_t<is_set_mode, const Key, const std::pair<const Key, Value>>;
+        using pointer = std::conditional_t<is_set_mode, const Key*, const value_type*>;
+        using reference = std::conditional_t<is_set_mode, const Key&, const value_type&>;
 
        private:
         const node_base* _node = nullptr;
@@ -3448,13 +3541,29 @@ class btree_map
         const_reverse_iterator(const reverse_iterator& it) : _node(it._node), _pos(it._pos), _is_end(it._is_end) {}
 
         [[nodiscard]] auto operator*() const -> reference {
-            if (_node->is_leaf_node()) {
-                return reinterpret_cast<reference>(static_cast<const leaf_node*>(_node)->slots[_pos]);
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return static_cast<const leaf_node*>(_node)->slots[_pos].first;
+                }
+                return static_cast<const internal_node*>(_node)->slots[_pos].first;
+            } else {
+                if (_node->is_leaf_node()) {
+                    return reinterpret_cast<reference>(static_cast<const leaf_node*>(_node)->slots[_pos]);
+                }
+                return reinterpret_cast<reference>(static_cast<const internal_node*>(_node)->slots[_pos]);
             }
-            return reinterpret_cast<reference>(static_cast<const internal_node*>(_node)->slots[_pos]);
         }
 
-        [[nodiscard]] auto operator->() const -> pointer { return &**this; }
+        [[nodiscard]] auto operator->() const -> pointer {
+            if constexpr (is_set_mode) {
+                if (_node->is_leaf_node()) {
+                    return &static_cast<const leaf_node*>(_node)->slots[_pos].first;
+                }
+                return &static_cast<const internal_node*>(_node)->slots[_pos].first;
+            } else {
+                return &**this;
+            }
+        }
 
         auto operator++() -> const_reverse_iterator& {
             if (_node == nullptr) return *this;
@@ -3569,15 +3678,27 @@ class btree_map
     btree_map(std::initializer_list<value_type> init, const Compare& comp = Compare(),
               const Allocator& alloc = Allocator())
         : _comp(comp), _leaf_alloc(alloc), _internal_alloc(alloc) {
-        for (const auto& [k, v] : init) {
-            insert(k, v);
+        if constexpr (is_set_mode) {
+            for (const auto& key : init) {
+                insert(key);
+            }
+        } else {
+            for (const auto& [k, v] : init) {
+                insert(k, v);
+            }
         }
     }
 
     btree_map(std::initializer_list<value_type> init, const Allocator& alloc)
         : _leaf_alloc(alloc), _internal_alloc(alloc) {
-        for (const auto& [k, v] : init) {
-            insert(k, v);
+        if constexpr (is_set_mode) {
+            for (const auto& key : init) {
+                insert(key);
+            }
+        } else {
+            for (const auto& [k, v] : init) {
+                insert(k, v);
+            }
         }
     }
 
@@ -3701,86 +3822,147 @@ class btree_map
         _size = 0;
     }
 
-    // Insert a key-value pair with perfect forwarding
+    // Insert a key-value pair with perfect forwarding (map mode)
     template <typename K, typename V>
-        requires std::is_convertible_v<K&&, Key> && std::is_convertible_v<V&&, Value>
+        requires(!is_set_mode) && std::is_convertible_v<K&&, Key> && std::is_convertible_v<V&&, Value>
     auto insert(K&& key, V&& value) -> std::pair<iterator, bool> {
         return insert_impl(std::forward<K>(key), std::forward<V>(value));
     }
 
-    // Insert with value_type
-    auto insert(const value_type& kv) -> std::pair<iterator, bool> { return insert(kv.first, kv.second); }
+    // Insert with value_type (map mode)
+    auto insert(const value_type& kv) -> std::pair<iterator, bool>
+        requires(!is_set_mode)
+    {
+        return insert(kv.first, kv.second);
+    }
 
-    auto insert(value_type&& kv) -> std::pair<iterator, bool> {
+    auto insert(value_type&& kv) -> std::pair<iterator, bool>
+        requires(!is_set_mode)
+    {
         return insert_impl(std::move(kv.first), std::move(kv.second));
     }
 
-    // Insert with hint - uses hint for O(1) amortized insertion for sequential patterns
-    // Hint is used for optimization; correctness is guaranteed even if hint is wrong
-    auto insert(const_iterator hint, const value_type& kv) -> iterator {
+    // Insert key only (set mode)
+    auto insert(const Key& key) -> std::pair<iterator, bool>
+        requires(is_set_mode)
+    {
+        return insert_impl(key, btree_set_empty_value{});
+    }
+
+    auto insert(Key&& key) -> std::pair<iterator, bool>
+        requires(is_set_mode)
+    {
+        return insert_impl(std::move(key), btree_set_empty_value{});
+    }
+
+    // Insert with hint (map mode)
+    auto insert(const_iterator hint, const value_type& kv) -> iterator
+        requires(!is_set_mode)
+    {
         return insert_with_hint_impl(hint, kv.first, kv.second);
     }
 
-    auto insert(const_iterator hint, value_type&& kv) -> iterator {
+    auto insert(const_iterator hint, value_type&& kv) -> iterator
+        requires(!is_set_mode)
+    {
         return insert_with_hint_impl(hint, std::move(kv.first), std::move(kv.second));
     }
 
-    // Emplace - construct in place
+    // Insert with hint (set mode)
+    auto insert(const_iterator hint, const Key& key) -> iterator
+        requires(is_set_mode)
+    {
+        return insert_with_hint_impl(hint, key, btree_set_empty_value{});
+    }
+
+    auto insert(const_iterator hint, Key&& key) -> iterator
+        requires(is_set_mode)
+    {
+        return insert_with_hint_impl(hint, std::move(key), btree_set_empty_value{});
+    }
+
+    // Emplace - construct in place (map mode)
     template <typename... Args>
+        requires(!is_set_mode)
     auto emplace(Args&&... args) -> std::pair<iterator, bool> {
-        value_type val(std::forward<Args>(args)...);
-        return insert_impl(std::move(val.first), std::move(val.second));
+        std::pair<const Key, Value> val(std::forward<Args>(args)...);
+        return insert_impl(std::move(const_cast<Key&>(val.first)), std::move(val.second));
     }
 
-    // emplace_hint - uses hint for O(1) amortized insertion for sequential patterns (C++11)
+    // Emplace - construct in place (set mode)
     template <typename... Args>
-    auto emplace_hint(const_iterator hint, Args&&... args) -> iterator {
-        value_type val(std::forward<Args>(args)...);
-        return insert_with_hint_impl(hint, std::move(val.first), std::move(val.second));
+        requires(is_set_mode)
+    auto emplace(Args&&... args) -> std::pair<iterator, bool> {
+        Key key(std::forward<Args>(args)...);
+        return insert_impl(std::move(key), btree_set_empty_value{});
     }
 
-    // insert_or_assign - inserts or updates value (C++17)
+    // emplace_hint - uses hint for O(1) amortized insertion for sequential patterns (C++11) (map mode)
+    template <typename... Args>
+        requires(!is_set_mode)
+    auto emplace_hint(const_iterator hint, Args&&... args) -> iterator {
+        std::pair<const Key, Value> val(std::forward<Args>(args)...);
+        return insert_with_hint_impl(hint, std::move(const_cast<Key&>(val.first)), std::move(val.second));
+    }
+
+    // emplace_hint (set mode)
+    template <typename... Args>
+        requires(is_set_mode)
+    auto emplace_hint(const_iterator hint, Args&&... args) -> iterator {
+        Key key(std::forward<Args>(args)...);
+        return insert_with_hint_impl(hint, std::move(key), btree_set_empty_value{});
+    }
+
+    // insert_or_assign - inserts or updates value (C++17) - map mode only
     // Single traversal implementation for optimal performance
     template <typename M>
+        requires(!is_set_mode)
     auto insert_or_assign(const Key& key, M&& value) -> std::pair<iterator, bool> {
         return insert_or_assign_impl(key, std::forward<M>(value));
     }
 
     template <typename M>
+        requires(!is_set_mode)
     auto insert_or_assign(Key&& key, M&& value) -> std::pair<iterator, bool> {
         return insert_or_assign_impl(std::move(key), std::forward<M>(value));
     }
 
-    // insert_or_assign with hint (hint is ignored)
+    // insert_or_assign with hint (hint is ignored) - map mode only
     template <typename M>
+        requires(!is_set_mode)
     auto insert_or_assign([[maybe_unused]] const_iterator hint, const Key& key, M&& value) -> iterator {
         return insert_or_assign(key, std::forward<M>(value)).first;
     }
 
     template <typename M>
+        requires(!is_set_mode)
     auto insert_or_assign([[maybe_unused]] const_iterator hint, Key&& key, M&& value) -> iterator {
         return insert_or_assign(std::move(key), std::forward<M>(value)).first;
     }
 
-    // try_emplace - only constructs value if key doesn't exist (C++17)
+    // try_emplace - only constructs value if key doesn't exist (C++17) - map mode only
     // Single traversal: finds position and inserts in one pass
     template <typename... Args>
+        requires(!is_set_mode)
     auto try_emplace(const Key& key, Args&&... args) -> std::pair<iterator, bool> {
         return try_emplace_impl(key, std::forward<Args>(args)...);
     }
 
     template <typename... Args>
+        requires(!is_set_mode)
     auto try_emplace(Key&& key, Args&&... args) -> std::pair<iterator, bool> {
         return try_emplace_impl(std::move(key), std::forward<Args>(args)...);
     }
 
-    // try_emplace with hint (hint is ignored)
+    // try_emplace with hint (hint is ignored) - map mode only
     template <typename... Args>
+        requires(!is_set_mode)
     auto try_emplace([[maybe_unused]] const_iterator hint, const Key& key, Args&&... args) -> iterator {
         return try_emplace(key, std::forward<Args>(args)...).first;
     }
 
     template <typename... Args>
+        requires(!is_set_mode)
     auto try_emplace([[maybe_unused]] const_iterator hint, Key&& key, Args&&... args) -> iterator {
         return try_emplace(std::move(key), std::forward<Args>(args)...).first;
     }
@@ -4288,8 +4470,10 @@ class btree_map
         return const_iterator(const_cast<btree_map*>(this)->find_impl(key));
     }
 
-    // operator[] - uses try_emplace to avoid constructing Value if key exists
-    auto operator[](const Key& key) -> Value& {
+    // operator[] - uses try_emplace to avoid constructing Value if key exists (map mode only)
+    auto operator[](const Key& key) -> Value&
+        requires(!is_set_mode)
+    {
         auto [it, inserted] = try_emplace(key);
         if (it._node->is_leaf_node()) {
             return static_cast<leaf_node*>(it._node)->value(it._pos);
@@ -4297,8 +4481,10 @@ class btree_map
         return static_cast<internal_node*>(it._node)->value(it._pos);
     }
 
-    // operator[] with rvalue key - avoids key copy
-    auto operator[](Key&& key) -> Value& {
+    // operator[] with rvalue key - avoids key copy (map mode only)
+    auto operator[](Key&& key) -> Value&
+        requires(!is_set_mode)
+    {
         auto [it, inserted] = try_emplace(std::move(key));
         if (it._node->is_leaf_node()) {
             return static_cast<leaf_node*>(it._node)->value(it._pos);
@@ -4306,8 +4492,10 @@ class btree_map
         return static_cast<internal_node*>(it._node)->value(it._pos);
     }
 
-    // at
-    [[nodiscard]] auto at(const Key& key) -> Value& {
+    // at (map mode only)
+    [[nodiscard]] auto at(const Key& key) -> Value&
+        requires(!is_set_mode)
+    {
         auto it = find(key);
         if (it == end()) {
             throw std::out_of_range("btree_map::at: key not found");
@@ -4318,7 +4506,9 @@ class btree_map
         return static_cast<internal_node*>(it._node)->value(it._pos);
     }
 
-    [[nodiscard]] auto at(const Key& key) const -> const Value& {
+    [[nodiscard]] auto at(const Key& key) const -> const Value&
+        requires(!is_set_mode)
+    {
         auto it = find(key);
         if (it == end()) {
             throw std::out_of_range("btree_map::at: key not found");
@@ -4388,8 +4578,18 @@ class btree_map
     // upper_bound
     [[nodiscard]] auto upper_bound(const Key& key) -> iterator {
         auto it = lower_bound(key);
-        if (it != end() && !_comp(key, it->first) && !_comp(it->first, key)) {
-            ++it;
+        if (it != end()) {
+            // Get the key from iterator (in set mode, *it is the key; in map mode, it->first)
+            const Key& iter_key = [&]() -> const Key& {
+                if constexpr (is_set_mode) {
+                    return *it;
+                } else {
+                    return it->first;
+                }
+            }();
+            if (!_comp(key, iter_key) && !_comp(iter_key, key)) {
+                ++it;
+            }
         }
         return it;
     }
@@ -4594,14 +4794,18 @@ class btree_map
             return node_type{};
         }
 
-        // Get key and value before erasing
-        Key key = pos->first;
-        Value value = std::move(const_cast<Value&>(pos->second));
-
-        // Erase the element
-        erase(pos);
-
-        return node_type(std::move(key), std::move(value));
+        if constexpr (is_set_mode) {
+            // Set mode: just get the key
+            Key key = *pos;
+            erase(pos);
+            return node_type(std::move(key));
+        } else {
+            // Map mode: get key and value before erasing
+            Key key = pos->first;
+            Value value = std::move(const_cast<Value&>(pos->second));
+            erase(pos);
+            return node_type(std::move(key), std::move(value));
+        }
     }
 
     // Extract node by key (C++17)
@@ -4630,14 +4834,18 @@ class btree_map
             return {node_type{}, end()};
         }
 
-        // Get key and value before erasing
-        Key key = pos->first;
-        Value value = std::move(const_cast<Value&>(pos->second));
-
-        // Erase returns iterator to next element
-        iterator next = erase(pos);
-
-        return {node_type(std::move(key), std::move(value)), next};
+        if constexpr (is_set_mode) {
+            // Set mode: just get the key
+            Key key = *pos;
+            iterator next = erase(pos);
+            return {node_type(std::move(key)), next};
+        } else {
+            // Map mode: get key and value before erasing
+            Key key = pos->first;
+            Value value = std::move(const_cast<Value&>(pos->second));
+            iterator next = erase(pos);
+            return {node_type(std::move(key), std::move(value)), next};
+        }
     }
 
     // Insert node handle (C++17)
@@ -4646,12 +4854,21 @@ class btree_map
             return {end(), false, std::move(nh)};
         }
 
-        auto [it, inserted] = insert(std::move(nh._storage.first), std::move(nh._storage.second));
-        if (inserted) {
-            nh._valid = false;
-            return {it, true, node_type{}};
+        if constexpr (is_set_mode) {
+            auto [it, inserted] = insert(std::move(nh._storage));
+            if (inserted) {
+                nh._valid = false;
+                return {it, true, node_type{}};
+            }
+            return {it, false, std::move(nh)};
+        } else {
+            auto [it, inserted] = insert(std::move(nh._storage.first), std::move(nh._storage.second));
+            if (inserted) {
+                nh._valid = false;
+                return {it, true, node_type{}};
+            }
+            return {it, false, std::move(nh)};
         }
-        return {it, false, std::move(nh)};
     }
 
     // Insert node handle with hint (C++17)
@@ -5070,5 +5287,30 @@ erase_if(btree_map<Key, Value, Compare, Allocator, N>& c, Pred pred) {
     }
     return old_size - c.size();
 }
+
+// =============================================================================
+// btree_set - B-tree based ordered set (implemented as btree_map with empty value)
+// =============================================================================
+
+// btree_set is a template alias for btree_map in "set mode"
+// When Value is btree_set_empty_value:
+//   - value_type is Key (not pair<const Key, Value>)
+//   - Iterators dereference to const Key&
+//   - insert() takes just a key, not a key-value pair
+//   - operator[] and at() are disabled
+//   - Memory is optimized (empty value uses [[no_unique_address]])
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, btree_set_empty_value>()>
+using btree_set = btree_map<Key, btree_set_empty_value, Compare, Allocator, TargetNodeSize>;
+
+// btree_set_auto is kept for backward compatibility
+template <typename Key, typename Compare = std::less<Key>>
+using btree_set_auto = btree_set<Key, Compare>;
+
+// Explicit 256-byte node size for minimal memory footprint
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
+using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 
 }  // namespace stdb::container
