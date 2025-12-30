@@ -29,6 +29,12 @@
 #include <compare>
 #endif
 
+// PMR support requires C++17
+#if __cplusplus >= 201703L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
+#include <memory_resource>
+#define BTREE_HAS_PMR 1
+#endif
+
 #include "vectra.hpp"
 
 #define BTREE_DEBUG 0
@@ -5314,3 +5320,40 @@ template <typename Key, typename Compare = std::less<Key>,
 using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 
 }  // namespace stdb::container
+
+// =============================================================================
+// PMR (Polymorphic Memory Resource) support
+// =============================================================================
+#ifdef BTREE_HAS_PMR
+
+namespace stdb::pmr {
+
+// btree_map with polymorphic allocator
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, Value>()>
+using btree_map = container::btree_map<Key, Value, Compare,
+                                       std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                       TargetNodeSize>;
+
+// btree_map_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using btree_map_compact = container::btree_map<Key, Value, Compare,
+                                               std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                               256>;
+
+// btree_set with polymorphic allocator
+template <typename Key, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, container::btree_set_empty_value>()>
+using btree_set = container::btree_set<Key, Compare,
+                                       std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                       TargetNodeSize>;
+
+// btree_set_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Compare = std::less<Key>>
+using btree_set_compact = container::btree_set<Key, Compare,
+                                               std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                               256>;
+
+}  // namespace stdb::pmr
+
+#endif  // BTREE_HAS_PMR
