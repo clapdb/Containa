@@ -1,123 +1,196 @@
 # Containa
 
-A high-performance C++ container library centered around the `vectra` class - an optimized vector implementation.
+A high-performance C++ container library featuring `btree_map` and `vectra` - optimized alternatives to standard containers.
 
-## Features
+## Containers
 
-- **High Performance**: Optimized vector implementation with 64-byte default capacity
-- **Safety Modes**: Safe and Unsafe variants for performance-critical operations
-- **Type Optimization**: Special handling for relocatable and zero-initializable types
-- **Modern C++**: Requires C++20
+### btree_map
+
+A high-performance B-tree based ordered map, optimized to outperform `absl::btree_map`.
+
+### vectra
+
+An optimized vector implementation with 64-byte default capacity and special handling for relocatable types.
+
+---
+
+## btree_map Design
+
+### Why B-tree, Not B+ Tree?
+
+We initially implemented both `btree_map` (B-tree) and `bplus_tree_map` (B+ tree). After extensive benchmarking, we chose B-tree:
+
+| Metric | B+ Tree | B-tree |
+|--------|---------|--------|
+| **Find (int)** | +8% faster | baseline |
+| **Insert** | **-50% to -70% slower** | baseline |
+| **Memory** | 2x (duplicated keys) | 1x |
+
+**The Problem with B+ Tree**: Our B+ tree used a separate `keys[]` array for SIMD-accelerated search, plus `slots[]` for key-value storage. Every insert/erase had to maintain both arrays, causing significant overhead.
+
+**Conclusion**: 8% find improvement does not justify 50-70% insert penalty.
+
+### Key Optimizations
+
+#### 1. SIMD-Accelerated Node Search
+
+Linear SIMD scan outperforms binary search for small node sizes (<64 keys):
+
+| Platform | Instruction Set | Elements/Iteration |
+|----------|-----------------|-------------------|
+| x86_64 | AVX-512 | 16 x int32, 8 x int64 |
+| x86_64 | AVX2 | 8 x int32 |
+| x86_64 | SSE2 | 4 x int32 |
+| ARM | NEON | 4 x int32 |
+| ARM | SVE | Hardware-dependent |
+
+**Why manual loads instead of AVX2 gather?** `vpgatherdd` has 12-20 cycle latency. For stride access (interleaved key-value storage), manual loads with `_mm256_set_epi32` are faster.
+
+#### 2. O(1) end() with Cached Rightmost Leaf
+
+```cpp
+// Before: O(log n) tree traversal for each end() call
+iterator end() { return traverse_to_rightmost(); }
+
+// After: O(1) cached pointer
+leaf_node* _rightmost_leaf;
+iterator end() { return iterator(_rightmost_leaf, _rightmost_leaf->count); }
+```
+
+#### 3. Optimized Node Split with memcpy
+
+```cpp
+// Before: Two loops - copy all, then shift to remove median
+for (i = 0; i < right_count; ++i)
+    right->slots[i] = std::move(left->slots[mid + i]);
+for (i = 0; i < right->count - 1; ++i)
+    right->slots[i] = std::move(right->slots[i + 1]);
+
+// After: Single memcpy - extract median first, copy remaining directly
+Key median_key = std::move(left->slots[mid].first);
+std::memcpy(&right->slots[0], &left->slots[mid + 1], right_count * sizeof(storage_type));
+```
+
+#### 4. Prefetch for Tree Traversal
+
+```cpp
+// Prefetch next node before traversing (hides memory latency)
+__builtin_prefetch(internal->children[pos], 0, 3);
+node = internal->children[pos];
+```
+
+#### 5. Three-Way Comparison for Strings
+
+String comparison is expensive. Using three-way comparison (`<=>`) avoids redundant comparisons:
+
+```cpp
+// Before: Two comparisons
+pos = lower_bound(key);  // uses <
+if (pos < count && !(key < slots[pos].key))  // uses < again
+
+// After: Single three-way comparison
+auto [pos, exact_match] = lower_bound_with_match(key);  // uses <=>
+if (exact_match) return iterator(node, pos);
+```
+
+#### 6. Sorted Insert Fast Path
+
+Sequential insertions (common in bulk loading) skip tree traversal:
+
+```cpp
+if (_comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
+    // Key > max key, append directly to rightmost leaf
+    insert_at_rightmost(key, value);
+}
+```
+
+---
+
+## Performance vs Abseil btree_map
+
+**Test Environment**: Intel i7-10700 @ 2.90GHz, Clang 21.1, `-O3 -march=native`
+
+### Clang + libstdc++
+
+| Operation | 10K int | 100K int | 10K string | 100K string |
+|-----------|---------|----------|------------|-------------|
+| **Sorted Insert** | 3.4x faster | 3.1x faster | 2.1x faster | 1.9x faster |
+| **Random Insert** | 1.11x faster | 1.12x faster | 1.02x faster | 1.07x faster |
+| **Find** | 1.15x faster | 1.01x faster | 1.01x faster | 1.07x faster |
+| **Erase** | 1.22x faster | 1.09x faster | - | - |
+| Iterate | 0.89x | 0.93x | 2.1x faster | 2.4x faster |
+
+### Clang + libc++
+
+| Operation | 10K int | 100K int | 10K string | 100K string |
+|-----------|---------|----------|------------|-------------|
+| **Sorted Insert** | 2.8x faster | 3.3x faster | 2.6x faster | 2.4x faster |
+| **Random Insert** | 1.19x faster | 1.09x faster | 1.10x faster | 1.06x faster |
+| **Find** | 1.20x faster | 1.06x faster | ~1.0x | 1.02x faster |
+| **Erase** | 1.17x faster | 1.11x faster | - | - |
+| Iterate | 0.80x | 0.87x | 1.4x faster | 1.5x faster |
+
+See [benchmark_result.md](benchmark_result.md) for detailed results.
+
+---
 
 ## Building
 
 ### Requirements
 
-- CMake 3.20 or higher
-- C++20 compatible compiler (GCC 10+, Clang 10+, or MSVC 2019+)
+- CMake 3.20+
+- C++20 compiler (GCC 10+, Clang 10+, MSVC 2019+)
 
 ### Basic Build
 
 ```bash
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-### Build Types
-
-- **Release** (default): Optimized build with `-O3`
-- **Debug**: Debug build with symbols and no optimization
+### Build with Abseil Benchmarks
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake -B build -DENABLE_ABSL_BENCH=ON
+cmake --build build --target btree_bench
+./build/bench/btree_bench
 ```
 
 ## Testing
 
-### Running Tests
-
 ```bash
 cmake --build build --target containa_test
-build/tests/containa_test
+./build/tests/containa_test
 ```
 
-### Memory Leak Detection with AddressSanitizer (ASAN)
-
-The project supports AddressSanitizer for detecting memory leaks, buffer overflows, use-after-free, and other memory errors.
-
-#### Build with ASAN
+### With Sanitizers
 
 ```bash
-# Using Clang (recommended for ASAN)
-CC=clang CXX=clang++ cmake -B build -DENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --target containa_test
-
-# Or with GCC
+# AddressSanitizer
 cmake -B build -DENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target containa_test
-```
+./build/tests/containa_test
 
-#### Run Tests with ASAN
-
-```bash
-build/tests/containa_test
-```
-
-ASAN will automatically report any memory errors detected during test execution. If memory issues are found, ASAN will:
-- Print detailed error reports with stack traces
-- Exit with a non-zero status code
-- Show the exact location and type of memory error
-
-#### Additional Sanitizers
-
-**UndefinedBehaviorSanitizer (UBSan)**: Detects undefined behavior
-
-```bash
+# UndefinedBehaviorSanitizer
 cmake -B build -DENABLE_UBSAN=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-build/tests/containa_test
 ```
 
-**Both ASAN and UBSan**: Enable both sanitizers together
-
-```bash
-cmake -B build -DENABLE_ASAN=ON -DENABLE_UBSAN=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-build/tests/containa_test
-```
-
-### ASAN Environment Variables
-
-You can customize ASAN behavior using environment variables:
-
-```bash
-# Detect memory leaks
-ASAN_OPTIONS=detect_leaks=1 build/tests/containa_test
-
-# Continue after first error (useful for finding multiple issues)
-ASAN_OPTIONS=halt_on_error=0 build/tests/containa_test
-
-# More verbose output
-ASAN_OPTIONS=verbosity=1 build/tests/containa_test
-```
-
-## Benchmarks
-
-```bash
-cmake --build build --target vb
-build/bench/vb
-```
-
-Benchmarks also support ASAN for memory leak detection during performance testing.
+---
 
 ## Project Structure
 
-- `vectra.hpp` - Main library implementation (header-only)
-- `tests/` - Test suite using doctest
-- `bench/` - Performance benchmarks using nanobench
-- `doctest/` - Doctest framework (git submodule)
-- `nanobench/` - Nanobench framework (git submodule)
+```
+container/
+  btree_map.hpp      # B-tree map implementation
+  btree_set.hpp      # B-tree set implementation
+  skiplist_map.hpp   # Skip list map implementation
+  vectra.hpp         # Optimized vector
+  ...
+tests/               # Test suite (doctest)
+bench/               # Benchmarks (nanobench)
+benchmark_result.md  # Detailed benchmark results
+tradeoff.md          # Design decisions and tradeoffs
+```
 
 ## License
 
