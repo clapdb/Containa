@@ -18,6 +18,9 @@ add_bench_target(vb vector_bench.cc)
 # Skiplist benchmarks
 add_bench_target(skiplist_bench skiplist_bench.cc)
 
+# Bitmap benchmarks
+add_bench_target(bitmap_bench bitmap_bench.cc)
+
 # Concurrent benchmark (skiplist vs btree)
 add_executable(skiplist_concurrent_bench skiplist_concurrent_bench.cc)
 target_compile_definitions(skiplist_concurrent_bench PRIVATE NDEBUG)
