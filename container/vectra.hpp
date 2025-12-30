@@ -2111,8 +2111,10 @@ auto operator==(const vectra<T>& lhs, const vectra<T>& rhs) -> bool {
     if (lhs.size() == 0) {
         return true;
     }
-    // Use memcmp for trivially copyable types (fastest path - compiler-optimized)
-    if constexpr (std::is_trivially_copyable_v<T>) {
+    // Use memcmp only for types with unique object representations (no padding)
+    // has_unique_object_representations ensures the bit representation uniquely
+    // determines equality (e.g., int, but NOT structs with padding or std::optional)
+    if constexpr (std::has_unique_object_representations_v<T>) {
         return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
     } else {
         for (std::size_t i = 0; i < lhs.size(); ++i) {

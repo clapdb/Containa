@@ -1863,6 +1863,96 @@ TEST_CASE("Hilbert::stdb_vector::move_struct::erase") {
     }
 }
 
+// Test for structs with padding - ensures memcmp is NOT used for types with padding
+// Regression test: using is_trivially_copyable_v incorrectly allows memcmp for padded structs
+TEST_CASE("vectra::comparison_with_padding") {
+    // Struct with padding: char (1 byte) + padding (7 bytes) + int64_t (8 bytes) = 16 bytes
+    struct PaddedStruct {
+        char c;       // 1 byte + 7 bytes padding
+        int64_t val;  // 8 bytes
+
+        bool operator==(const PaddedStruct& other) const {
+            return c == other.c && val == other.val;
+        }
+        bool operator!=(const PaddedStruct& other) const { return !(*this == other); }
+        auto operator<=>(const PaddedStruct& other) const {
+            if (auto cmp = c <=> other.c; cmp != 0) return cmp;
+            return val <=> other.val;
+        }
+    };
+
+    // Verify assumptions about the type
+    static_assert(sizeof(PaddedStruct) == 16, "PaddedStruct should have padding");
+    static_assert(std::is_trivially_copyable_v<PaddedStruct>, "PaddedStruct is trivially copyable");
+    static_assert(!std::has_unique_object_representations_v<PaddedStruct>,
+                  "PaddedStruct should NOT have unique object representations due to padding");
+
+    SUBCASE("equal_structs_with_different_padding_bytes") {
+        // Create two vectors with elements that have equal member values
+        // but potentially different padding bytes
+        vectra<PaddedStruct> v1, v2;
+
+        // Use memset to set different patterns in padding bytes
+        PaddedStruct s1, s2;
+        std::memset(&s1, 0xAA, sizeof(s1));  // Fill with 0xAA pattern
+        std::memset(&s2, 0x55, sizeof(s2));  // Fill with 0x55 pattern
+
+        // Set the same member values
+        s1.c = 'X';
+        s1.val = 12345;
+        s2.c = 'X';
+        s2.val = 12345;
+
+        // The structs should be equal by member comparison
+        CHECK(s1 == s2);
+
+        v1.push_back(s1);
+        v2.push_back(s2);
+
+        // Vectors should be equal even though padding bytes differ
+        // This test would FAIL if memcmp was incorrectly used for comparison
+        CHECK(v1 == v2);
+        CHECK_FALSE(v1 != v2);
+    }
+
+    SUBCASE("multiple_elements_with_padding") {
+        vectra<PaddedStruct> v1, v2;
+
+        for (int i = 0; i < 10; ++i) {
+            PaddedStruct s1, s2;
+            // Different garbage in padding
+            std::memset(&s1, static_cast<unsigned char>(i), sizeof(s1));
+            std::memset(&s2, static_cast<unsigned char>(255 - i), sizeof(s2));
+
+            s1.c = static_cast<char>('A' + i);
+            s1.val = i * 1000;
+            s2.c = static_cast<char>('A' + i);
+            s2.val = i * 1000;
+
+            v1.push_back(s1);
+            v2.push_back(s2);
+        }
+
+        CHECK(v1 == v2);
+    }
+
+    SUBCASE("unequal_structs_detected") {
+        vectra<PaddedStruct> v1, v2;
+
+        PaddedStruct s1{}, s2{};
+        s1.c = 'A';
+        s1.val = 100;
+        s2.c = 'A';
+        s2.val = 200;  // Different value
+
+        v1.push_back(s1);
+        v2.push_back(s2);
+
+        CHECK_FALSE(v1 == v2);
+        CHECK(v1 != v2);
+    }
+}
+
 }  // namespace stdb::container
 
 namespace stdb {
