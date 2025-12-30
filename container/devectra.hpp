@@ -853,7 +853,8 @@ template <typename T>
 auto operator==(const devectra<T>& lhs, const devectra<T>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
     if (lhs.size() == 0) return true;
-    if constexpr (std::is_trivially_copyable_v<T>) {
+    // Use memcmp only for types with unique object representations (no padding)
+    if constexpr (std::has_unique_object_representations_v<T>) {
         return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
     } else {
         for (std::size_t i = 0; i < lhs.size(); ++i) {

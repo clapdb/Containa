@@ -632,7 +632,8 @@ template <typename T, std::size_t N>
 auto operator==(const static_vectra<T, N>& lhs, const static_vectra<T, N>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
     if (lhs.size() == 0) return true;
-    if constexpr (std::is_trivially_copyable_v<T>) {
+    // Use memcmp only for types with unique object representations (no padding)
+    if constexpr (std::has_unique_object_representations_v<T>) {
         return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
     } else {
         for (std::size_t i = 0; i < lhs.size(); ++i) {
@@ -659,7 +660,8 @@ requires(N1 != N2)
 auto operator==(const static_vectra<T, N1>& lhs, const static_vectra<T, N2>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
     if (lhs.size() == 0) return true;
-    if constexpr (std::is_trivially_copyable_v<T>) {
+    // Use memcmp only for types with unique object representations (no padding)
+    if constexpr (std::has_unique_object_representations_v<T>) {
         return std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
     } else {
         for (std::size_t i = 0; i < lhs.size(); ++i) {
