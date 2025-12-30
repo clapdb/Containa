@@ -314,6 +314,7 @@ class btree_map
 
     // Root node and tree state
     node_base* _root = nullptr;
+    leaf_node* _rightmost_leaf = nullptr;  // Cached for O(1) end()
     size_type _size = 0;
     [[no_unique_address]] Compare _comp;
     [[no_unique_address]] leaf_allocator_type _leaf_alloc;
@@ -714,6 +715,74 @@ class btree_map
                 return i + __builtin_ctz(~mask & 0xF);
             }
             i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX2 lower_bound for int32_t - processes 8 keys at a time with manual loads
+    template <typename T>
+    static auto simd_lower_bound_s32_avx2(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        __m256i target_vec = _mm256_set1_epi32(target);
+        size_type i = 0;
+
+        // Process 8 elements at a time
+        while (i + 8 <= count) {
+            __m256i key_vec = _mm256_set_epi32(
+                keys[(i + 7) * stride], keys[(i + 6) * stride],
+                keys[(i + 5) * stride], keys[(i + 4) * stride],
+                keys[(i + 3) * stride], keys[(i + 2) * stride],
+                keys[(i + 1) * stride], keys[i * stride]);
+            __m256i lt = _mm256_cmpgt_epi32(target_vec, key_vec);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(lt));
+
+            if (mask != 0xFF) {
+                return i + __builtin_ctz(~mask & 0xFF);
+            }
+            i += 8;
+        }
+
+        // Handle remaining elements
+        for (; i < count; ++i) {
+            if (keys[i * stride] >= target) return i;
+        }
+        return count;
+    }
+
+    // AVX2 lower_bound for uint32_t - processes 8 keys at a time with manual loads
+    template <typename T>
+    static auto simd_lower_bound_u32_avx2(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        __m256i sign_bit = _mm256_set1_epi32(static_cast<int32_t>(0x80000000));
+        __m256i target_vec = _mm256_xor_si256(_mm256_set1_epi32(static_cast<int32_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 8 <= count) {
+            __m256i key_vec = _mm256_set_epi32(
+                static_cast<int32_t>(keys[(i + 7) * stride]), static_cast<int32_t>(keys[(i + 6) * stride]),
+                static_cast<int32_t>(keys[(i + 5) * stride]), static_cast<int32_t>(keys[(i + 4) * stride]),
+                static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
+                static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
+            key_vec = _mm256_xor_si256(key_vec, sign_bit);
+            __m256i lt = _mm256_cmpgt_epi32(target_vec, key_vec);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(lt));
+
+            if (mask != 0xFF) {
+                return i + __builtin_ctz(~mask & 0xFF);
+            }
+            i += 8;
         }
 
         for (; i < count; ++i) {
@@ -1548,7 +1617,28 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_u16(leaf->slots, leaf->count, key);
         }
-#ifndef BTREE_HAS_AVX512  // Use SSE2 only if AVX-512 not available
+#if defined(BTREE_HAS_AVX2) && !defined(BTREE_HAS_AVX512)
+        // AVX2 paths (process 8 elements for 32-bit)
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s32_avx2(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u32_avx2(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_double_avx(leaf->slots, leaf->count, key);
+        }
+#elif defined(BTREE_HAS_SSE2) && !defined(BTREE_HAS_AVX512)
+        // SSE2 fallback (no AVX2)
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(leaf->slots, leaf->count, key);
         }
@@ -1560,19 +1650,6 @@ class btree_map
         }
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_double(leaf->slots, leaf->count, key);
-        }
-#endif
-#endif
-#ifdef BTREE_HAS_AVX2
-#ifndef BTREE_HAS_AVX512  // Use AVX2 only if AVX-512 not available
-        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_s64(leaf->slots, leaf->count, key);
-        }
-        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_u64(leaf->slots, leaf->count, key);
-        }
-        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_double_avx(leaf->slots, leaf->count, key);
         }
 #endif
 #endif
@@ -1681,7 +1758,28 @@ class btree_map
         if constexpr (std::is_same_v<Key, uint16_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_u16(internal->slots, internal->count, key);
         }
-#ifndef BTREE_HAS_AVX512  // Use SSE2 only if AVX-512 not available
+#if defined(BTREE_HAS_AVX2) && !defined(BTREE_HAS_AVX512)
+        // AVX2 paths (process 8 elements for 32-bit)
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s32_avx2(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u32_avx2(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_u64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_lower_bound_double_avx(internal->slots, internal->count, key);
+        }
+#elif defined(BTREE_HAS_SSE2) && !defined(BTREE_HAS_AVX512)
+        // SSE2 fallback (no AVX2)
         if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_s32(internal->slots, internal->count, key);
         }
@@ -1693,19 +1791,6 @@ class btree_map
         }
         if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
             return simd_lower_bound_double(internal->slots, internal->count, key);
-        }
-#endif
-#endif
-#ifdef BTREE_HAS_AVX2
-#ifndef BTREE_HAS_AVX512  // Use AVX2 only if AVX-512 not available
-        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_s64(internal->slots, internal->count, key);
-        }
-        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_u64(internal->slots, internal->count, key);
-        }
-        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
-            return simd_lower_bound_double_avx(internal->slots, internal->count, key);
         }
 #endif
 #endif
@@ -2074,34 +2159,35 @@ class btree_map
     }
 
     // Split a full leaf node, returns the new right node and the median key/value
+    // Optimized: single copy operation instead of copy-then-shift
     auto split_leaf(leaf_node* left) -> std::tuple<leaf_node*, Key, Value> {
         auto* right = create_leaf();
         size_type mid = left->count / 2;
 
-        // Move upper half to right node
-        size_type right_count = left->count - mid;
-        for (size_type i = 0; i < right_count; ++i) {
-            right->slots[i] = std::move(left->slots[mid + i]);
+        // Extract median first (the element at mid goes up to parent)
+        Key median_key = std::move(left->slots[mid].first);
+        Value median_value = std::move(left->slots[mid].second);
+
+        // Move elements after median directly to right node (skip the two-step process)
+        size_type right_count = left->count - mid - 1;  // Exclude median
+        if constexpr (std::is_trivially_copyable_v<storage_type>) {
+            if (right_count > 0) {
+                std::memcpy(&right->slots[0], &left->slots[mid + 1], right_count * sizeof(storage_type));
+            }
+        } else {
+            for (size_type i = 0; i < right_count; ++i) {
+                right->slots[i] = std::move(left->slots[mid + 1 + i]);
+            }
         }
+
         right->count = static_cast<uint16_t>(right_count);
-
-        // Get the median (first key of right node for B+ tree style, but we use B-tree)
-        // For B-tree, median goes up to parent
-        Key median_key = right->slots[0].first;
-        Value median_value = right->slots[0].second;
-
-        // Shift right node to remove median
-        for (size_type i = 0; i < right->count - 1; ++i) {
-            right->slots[i] = std::move(right->slots[i + 1]);
-        }
-        --right->count;
-
         left->count = static_cast<uint16_t>(mid);
 
         return {right, std::move(median_key), std::move(median_value)};
     }
 
     // Split a full internal node
+    // Optimized: use memcpy for slots and children pointers
     auto split_internal(internal_node* left) -> std::tuple<internal_node*, Key, Value> {
         auto* right = create_internal();
         size_type mid = left->count / 2;
@@ -2112,13 +2198,22 @@ class btree_map
 
         // Move upper half to right node (excluding median)
         size_type right_count = left->count - mid - 1;
-        for (size_type i = 0; i < right_count; ++i) {
-            right->slots[i] = std::move(left->slots[mid + 1 + i]);
+        if constexpr (std::is_trivially_copyable_v<storage_type>) {
+            if (right_count > 0) {
+                std::memcpy(&right->slots[0], &left->slots[mid + 1], right_count * sizeof(storage_type));
+            }
+        } else {
+            for (size_type i = 0; i < right_count; ++i) {
+                right->slots[i] = std::move(left->slots[mid + 1 + i]);
+            }
         }
 
-        // Move children
-        for (size_type i = 0; i <= right_count; ++i) {
-            right->children[i] = left->children[mid + 1 + i];
+        // Move children pointers with memcpy, then update parent/position
+        size_type children_count = right_count + 1;
+        std::memcpy(&right->children[0], &left->children[mid + 1], children_count * sizeof(node_base*));
+
+        // Update parent and position for moved children, clear old pointers
+        for (size_type i = 0; i < children_count; ++i) {
             if (right->children[i]) {
                 right->children[i]->parent = right;
                 right->children[i]->position = static_cast<uint16_t>(i);
@@ -2291,6 +2386,11 @@ class btree_map
                 insert_into_leaf(new_right, right_pos, std::forward<K>(key), std::forward<V>(value));
                 inserted_node = new_right;
                 inserted_pos = right_pos;
+            }
+
+            // Update rightmost leaf cache if we just split the rightmost leaf
+            if (leaf == _rightmost_leaf) {
+                _rightmost_leaf = new_right;
             }
 
             if (leaf->parent == nullptr) {
@@ -2641,6 +2741,11 @@ class btree_map
         // Remove separator from parent (this also removes children[parent_pos + 1])
         remove_slot_from_internal(parent, parent_pos);
 
+        // Update rightmost leaf cache if we're deleting the rightmost leaf
+        if (right == _rightmost_leaf) {
+            _rightmost_leaf = left;
+        }
+
         // Delete right node
         destroy_leaf(right);
     }
@@ -2874,6 +2979,7 @@ class btree_map
             if (leaf == _root && leaf->count == 0) {
                 destroy_leaf(leaf);
                 _root = nullptr;
+                _rightmost_leaf = nullptr;
                 return;
             }
 
@@ -3512,22 +3618,26 @@ class btree_map
           _internal_alloc(std::allocator_traits<internal_allocator_type>::select_on_container_copy_construction(
               other._internal_alloc)) {
         _root = deep_copy_node(other._root, nullptr);
+        _rightmost_leaf = const_cast<leaf_node*>(rightmost_leaf());
     }
 
     // Copy constructor with allocator
     btree_map(const btree_map& other, const Allocator& alloc)
         : _comp(other._comp), _size(other._size), _leaf_alloc(alloc), _internal_alloc(alloc) {
         _root = deep_copy_node(other._root, nullptr);
+        _rightmost_leaf = const_cast<leaf_node*>(rightmost_leaf());
     }
 
     // Move constructor
     btree_map(btree_map&& other) noexcept
         : _root(other._root),
+          _rightmost_leaf(other._rightmost_leaf),
           _size(other._size),
           _comp(std::move(other._comp)),
           _leaf_alloc(std::move(other._leaf_alloc)),
           _internal_alloc(std::move(other._internal_alloc)) {
         other._root = nullptr;
+        other._rightmost_leaf = nullptr;
         other._size = 0;
     }
 
@@ -3537,8 +3647,10 @@ class btree_map
         if (_leaf_alloc == other._leaf_alloc) {
             // Same allocator - can steal resources
             _root = other._root;
+            _rightmost_leaf = other._rightmost_leaf;
             _size = other._size;
             other._root = nullptr;
+            other._rightmost_leaf = nullptr;
             other._size = 0;
         } else {
             // Different allocator - must copy elements
@@ -3557,6 +3669,7 @@ class btree_map
             _comp = other._comp;
             _size = other._size;
             _root = deep_copy_node(other._root, nullptr);
+            _rightmost_leaf = const_cast<leaf_node*>(rightmost_leaf());
         }
         return *this;
     }
@@ -3566,9 +3679,11 @@ class btree_map
         if (this != &other) {
             destroy_node(_root);
             _root = other._root;
+            _rightmost_leaf = other._rightmost_leaf;
             _size = other._size;
             _comp = std::move(other._comp);
             other._root = nullptr;
+            other._rightmost_leaf = nullptr;
             other._size = 0;
         }
         return *this;
@@ -3582,6 +3697,7 @@ class btree_map
     void clear() noexcept {
         destroy_node(_root);
         _root = nullptr;
+        _rightmost_leaf = nullptr;
         _size = 0;
     }
 
@@ -3678,6 +3794,7 @@ class btree_map
             auto* leaf = static_cast<leaf_node*>(_root);
             leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
             leaf->count = 1;
+            _rightmost_leaf = leaf;
             ++_size;
             return {iterator(leaf, 0), true};
         }
@@ -3686,19 +3803,17 @@ class btree_map
         // For string-like types: only check when tree has depth > 1 (comparison is expensive)
         if constexpr (string_like<Key>) {
             if (!_root->is_leaf_node()) {
-                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                     auto [inserted_node, inserted_pos] =
-                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                      insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
                     ++_size;
                     return {iterator(inserted_node, inserted_pos), true};
                 }
             }
         } else {
-            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+            if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                 auto [inserted_node, inserted_pos] =
-                  insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                  insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
                 ++_size;
                 return {iterator(inserted_node, inserted_pos), true};
             }
@@ -3775,6 +3890,7 @@ class btree_map
             auto* leaf = static_cast<leaf_node*>(_root);
             leaf->slots[0] = storage_type(std::forward<K>(key), Value(std::forward<Args>(args)...));
             leaf->count = 1;
+            _rightmost_leaf = leaf;
             ++_size;
             return {iterator(leaf, 0), true};
         }
@@ -3782,19 +3898,17 @@ class btree_map
         // Fast path: check if key > max key (sequential append case)
         if constexpr (string_like<Key>) {
             if (!_root->is_leaf_node()) {
-                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                     auto [inserted_node, inserted_pos] = insert_and_split_impl(
-                      right_leaf, right_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
+                      _rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
                     ++_size;
                     return {iterator(inserted_node, inserted_pos), true};
                 }
             }
         } else {
-            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+            if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                 auto [inserted_node, inserted_pos] = insert_and_split_impl(
-                  right_leaf, right_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
+                  _rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), Value(std::forward<Args>(args)...));
                 ++_size;
                 return {iterator(inserted_node, inserted_pos), true};
             }
@@ -3867,6 +3981,7 @@ class btree_map
             auto* leaf = static_cast<leaf_node*>(_root);
             leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
             leaf->count = 1;
+            _rightmost_leaf = leaf;
             ++_size;
             return {iterator(leaf, 0), true};
         }
@@ -3874,19 +3989,17 @@ class btree_map
         // Fast path: check if key > max key (sequential append case)
         if constexpr (string_like<Key>) {
             if (!_root->is_leaf_node()) {
-                auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-                if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+                if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                     auto [inserted_node, inserted_pos] =
-                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                      insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
                     ++_size;
                     return {iterator(inserted_node, inserted_pos), true};
                 }
             }
         } else {
-            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-            if (right_leaf->count > 0 && _comp(right_leaf->key(right_leaf->count - 1), key)) {
+            if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                 auto [inserted_node, inserted_pos] =
-                  insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                  insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
                 ++_size;
                 return {iterator(inserted_node, inserted_pos), true};
             }
@@ -3966,6 +4079,7 @@ class btree_map
             auto* leaf = static_cast<leaf_node*>(_root);
             leaf->slots[0] = storage_type(std::forward<K>(key), std::forward<V>(value));
             leaf->count = 1;
+            _rightmost_leaf = leaf;
             ++_size;
             return iterator(leaf, 0);
         }
@@ -3973,13 +4087,12 @@ class btree_map
         // Fast path: hint is end() and key > all existing keys (append case)
         if (hint._node == nullptr) {
             // Hint is end() - check if we can append to rightmost leaf
-            auto* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
-            if (right_leaf != nullptr && right_leaf->count > 0) {
+            if (_rightmost_leaf != nullptr && _rightmost_leaf->count > 0) {
                 // Check if key > last key (most common case for sequential insert)
-                if (_comp(right_leaf->key(right_leaf->count - 1), key)) {
+                if (_comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
                     // Can append at end of rightmost leaf
                     auto [inserted_node, inserted_pos] =
-                      insert_and_split_impl(right_leaf, right_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                      insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
                     ++_size;
                     return iterator(inserted_node, inserted_pos);
                 }
@@ -4331,15 +4444,13 @@ class btree_map
     [[nodiscard]] auto cbegin() const noexcept -> const_iterator { return begin(); }
 
     [[nodiscard]] auto end() noexcept -> iterator {
-        auto* rm = const_cast<leaf_node*>(rightmost_leaf());
-        if (rm == nullptr) return iterator(nullptr, 0);
-        return iterator(static_cast<node_base*>(rm), rm->count);
+        if (_rightmost_leaf == nullptr) return iterator(nullptr, 0);
+        return iterator(static_cast<node_base*>(_rightmost_leaf), _rightmost_leaf->count);
     }
 
     [[nodiscard]] auto end() const noexcept -> const_iterator {
-        auto* rm = rightmost_leaf();
-        if (rm == nullptr) return const_iterator(nullptr, 0);
-        return const_iterator(static_cast<const node_base*>(rm), rm->count);
+        if (_rightmost_leaf == nullptr) return const_iterator(nullptr, 0);
+        return const_iterator(static_cast<const node_base*>(_rightmost_leaf), _rightmost_leaf->count);
     }
 
     [[nodiscard]] auto cend() const noexcept -> const_iterator { return end(); }
@@ -4423,6 +4534,7 @@ class btree_map
         if (leaf == _root && leaf->count == 0) {
             destroy_leaf(leaf);
             _root = nullptr;
+            _rightmost_leaf = nullptr;
             return end();
         }
 
@@ -4691,10 +4803,11 @@ class btree_map
         // Handle empty tree
         if (_root == nullptr) [[unlikely]] {
             _root = create_leaf();
+            _rightmost_leaf = static_cast<leaf_node*>(_root);
         }
 
-        // Cache the rightmost leaf - only traverse once
-        leaf_node* right_leaf = const_cast<leaf_node*>(rightmost_leaf());
+        // Use the cached rightmost leaf
+        leaf_node* right_leaf = _rightmost_leaf;
 
         while (first != last) {
             // Fill current leaf as much as possible
@@ -4714,6 +4827,7 @@ class btree_map
 
             // Leaf is full, need to split - use optimized append split
             right_leaf = split_rightmost_leaf_for_append(right_leaf);
+            _rightmost_leaf = right_leaf;
         }
     }
 
