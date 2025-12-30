@@ -5216,8 +5216,14 @@ class btree_map
         auto it1 = lhs.begin();
         auto it2 = rhs.begin();
         while (it1 != lhs.end()) {
-            if (it1->first != it2->first || it1->second != it2->second) {
-                return false;
+            if constexpr (is_set_mode) {
+                if (*it1 != *it2) {
+                    return false;
+                }
+            } else {
+                if (it1->first != it2->first || it1->second != it2->second) {
+                    return false;
+                }
             }
             ++it1;
             ++it2;
@@ -5229,12 +5235,16 @@ class btree_map
 
     // Lexicographical comparison operators (C++20)
     friend auto operator<(const btree_map& lhs, const btree_map& rhs) -> bool {
-        return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-                                            [](const value_type& a, const value_type& b) {
-                                                if (a.first < b.first) return true;
-                                                if (b.first < a.first) return false;
-                                                return a.second < b.second;
-                                            });
+        if constexpr (is_set_mode) {
+            return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
+        } else {
+            return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
+                                                [](const value_type& a, const value_type& b) {
+                                                    if (a.first < b.first) return true;
+                                                    if (b.first < a.first) return false;
+                                                    return a.second < b.second;
+                                                });
+        }
     }
 
     friend auto operator<=(const btree_map& lhs, const btree_map& rhs) -> bool { return !(rhs < lhs); }
@@ -5247,8 +5257,12 @@ class btree_map
         auto it1 = lhs.begin();
         auto it2 = rhs.begin();
         while (it1 != lhs.end() && it2 != rhs.end()) {
-            if (auto cmp = it1->first <=> it2->first; cmp != 0) return cmp;
-            if (auto cmp = it1->second <=> it2->second; cmp != 0) return cmp;
+            if constexpr (is_set_mode) {
+                if (auto cmp = *it1 <=> *it2; cmp != 0) return cmp;
+            } else {
+                if (auto cmp = it1->first <=> it2->first; cmp != 0) return cmp;
+                if (auto cmp = it1->second <=> it2->second; cmp != 0) return cmp;
+            }
             ++it1;
             ++it2;
         }
