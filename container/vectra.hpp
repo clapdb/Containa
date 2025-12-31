@@ -1104,7 +1104,9 @@ class core
     }
 
     // move [src, _finish) to [dst, dst + (_finish - src))
-    void move_backward(T* __restrict__ dst, T* __restrict__ src) {
+    // Note: dst and src ranges may overlap when called from insert()
+    // Cannot use __restrict__ as it causes UB when ranges overlap
+    void move_backward(T* dst, T* src) {
         Assert(dst != nullptr && src != nullptr, "dst and src can not be nullptr");
         // if src == _finish or src == _finish -1, just use move_forward
         Assert(src < (_finish - 1), "src should always before _finish - 1, or can not move backward");
@@ -1117,10 +1119,9 @@ class core
         T* src_end = _finish - 1;
 
         if constexpr (IsRelocatable<T>) {
-            // trivially backward move
-            for (std::size_t i = 0; i < count; ++i) {
-                *(dst_end--) = *(src_end--);
-            }
+            // memmove correctly handles both overlapping and non-overlapping ranges
+            // and is highly optimized by compilers (often as fast as memcpy for non-overlap)
+            std::memmove(dst, src, count * sizeof(T));
         } else if constexpr (std::is_move_constructible_v<T>) {
             // do not support throwable move constructor.
             static_assert(std::is_nothrow_move_constructible_v<T>);
