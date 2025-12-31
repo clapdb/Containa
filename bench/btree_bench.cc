@@ -44,7 +44,7 @@ void run_int_benchmark(const std::string& label) {
 
     std::cout << "\n=== Integer Keys: " << label << " (" << N << " elements) ===\n";
 
-    // Sorted insert
+    // Sorted insert (operator[])
     bench.run("stdb sorted insert", [&] {
         btree_map<int, int> map;
         for (int k : sorted_keys) map[k] = k;
@@ -54,6 +54,60 @@ void run_int_benchmark(const std::string& label) {
     bench.run("absl sorted insert", [&] {
         absl::btree_map<int, int> map;
         for (int k : sorted_keys) map[k] = k;
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#endif
+
+    // Sorted insert with hint (end() hint - optimal for append)
+    bench.run("stdb sorted hint insert", [&] {
+        btree_map<int, int> map;
+        for (int k : sorted_keys) {
+            map.insert(map.end(), {k, k});
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#ifdef ENABLE_ABSL
+    bench.run("absl sorted hint insert", [&] {
+        absl::btree_map<int, int> map;
+        for (int k : sorted_keys) {
+            map.insert(map.end(), {k, k});
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#endif
+
+    // Sorted emplace_hint
+    bench.run("stdb sorted emplace_hint", [&] {
+        btree_map<int, int> map;
+        for (int k : sorted_keys) {
+            map.emplace_hint(map.end(), k, k);
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#ifdef ENABLE_ABSL
+    bench.run("absl sorted emplace_hint", [&] {
+        absl::btree_map<int, int> map;
+        for (int k : sorted_keys) {
+            map.emplace_hint(map.end(), k, k);
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#endif
+
+    // Random insert with bad hint (begin() - worst case for random data)
+    bench.run("stdb random bad hint", [&] {
+        btree_map<int, int> map;
+        for (int k : random_keys) {
+            map.insert(map.begin(), {k, k});
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#ifdef ENABLE_ABSL
+    bench.run("absl random bad hint", [&] {
+        absl::btree_map<int, int> map;
+        for (int k : random_keys) {
+            map.insert(map.begin(), {k, k});
+        }
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 #endif
@@ -156,7 +210,7 @@ void run_string_benchmark(const std::string& label) {
 
     std::cout << "\n=== String Keys: " << label << " (" << N << " elements) ===\n";
 
-    // Sorted insert
+    // Sorted insert (operator[])
     bench.run("stdb sorted insert", [&] {
         btree_map<std::string, int> map;
         int i = 0;
@@ -168,6 +222,26 @@ void run_string_benchmark(const std::string& label) {
         absl::btree_map<std::string, int> map;
         int i = 0;
         for (const auto& k : sorted_string_keys) map[k] = i++;
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#endif
+
+    // Sorted emplace_hint (fair comparison - same copy semantics as operator[])
+    bench.run("stdb sorted emplace_hint", [&] {
+        btree_map<std::string, int> map;
+        int i = 0;
+        for (const auto& k : sorted_string_keys) {
+            map.emplace_hint(map.end(), k, i++);
+        }
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+#ifdef ENABLE_ABSL
+    bench.run("absl sorted emplace_hint", [&] {
+        absl::btree_map<std::string, int> map;
+        int i = 0;
+        for (const auto& k : sorted_string_keys) {
+            map.emplace_hint(map.end(), k, i++);
+        }
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 #endif

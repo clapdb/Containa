@@ -3904,8 +3904,27 @@ class btree_map
     }
 
     // emplace_hint - uses hint for O(1) amortized insertion for sequential patterns (C++11) (map mode)
+    // Optimized overload for (key, value) case - avoids temporary pair construction
+    // Inlined fast path for end() hint to minimize overhead for sorted insert pattern
+    template <typename K, typename V>
+        requires(!is_set_mode && std::is_constructible_v<Key, K&&> && std::is_constructible_v<Value, V&&>)
+    [[gnu::hot]] auto emplace_hint(const_iterator hint, K&& key, V&& value) -> iterator {
+        // Fast path: hint is end() - most common case for sorted insert
+        // If key > max, insert directly at rightmost leaf (O(1) amortized)
+        if (hint._node == nullptr && _root != nullptr) [[likely]] {
+            if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) [[likely]] {
+                auto [inserted_node, inserted_pos] =
+                  insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
+                ++_size;
+                return iterator(inserted_node, inserted_pos);
+            }
+        }
+        return insert_with_hint_impl(hint, std::forward<K>(key), std::forward<V>(value));
+    }
+
+    // General emplace_hint for constructing pair from arbitrary args (map mode)
     template <typename... Args>
-        requires(!is_set_mode)
+        requires(!is_set_mode && sizeof...(Args) != 2)
     auto emplace_hint(const_iterator hint, Args&&... args) -> iterator {
         std::pair<const Key, Value> val(std::forward<Args>(args)...);
         return insert_with_hint_impl(hint, std::move(const_cast<Key&>(val.first)), std::move(val.second));
@@ -3988,23 +4007,11 @@ class btree_map
         }
 
         // Fast path: check if key > max key (sequential append case)
-        // For string-like types: only check when tree has depth > 1 (comparison is expensive)
-        if constexpr (string_like<Key>) {
-            if (!_root->is_leaf_node()) {
-                if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
-                    auto [inserted_node, inserted_pos] =
-                      insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
-                    ++_size;
-                    return {iterator(inserted_node, inserted_pos), true};
-                }
-            }
-        } else {
-            if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
-                auto [inserted_node, inserted_pos] =
-                  insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
-                ++_size;
-                return {iterator(inserted_node, inserted_pos), true};
-            }
+        if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+            return {iterator(inserted_node, inserted_pos), true};
         }
 
         // Find insertion point - traverse to leaf using specialized search
@@ -4261,7 +4268,7 @@ class btree_map
 
     // Insert with hint implementation - O(1) when hint is correct for sequential inserts
     template <typename K, typename V>
-    __attribute__((hot)) auto insert_with_hint_impl(const_iterator hint, K&& key, V&& value) -> iterator {
+    [[gnu::hot]] auto insert_with_hint_impl(const_iterator hint, K&& key, V&& value) -> iterator {
         if (_root == nullptr) [[unlikely]] {
             _root = create_leaf();
             auto* leaf = static_cast<leaf_node*>(_root);
@@ -4272,21 +4279,18 @@ class btree_map
             return iterator(leaf, 0);
         }
 
-        // Fast path: hint is end() and key > all existing keys (append case)
-        if (hint._node == nullptr) {
-            // Hint is end() - check if we can append to rightmost leaf
-            if (_rightmost_leaf != nullptr && _rightmost_leaf->count > 0) {
-                // Check if key > last key (most common case for sequential insert)
-                if (_comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
-                    // Can append at end of rightmost leaf
-                    auto [inserted_node, inserted_pos] =
-                      insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
-                    ++_size;
-                    return iterator(inserted_node, inserted_pos);
-                }
-            }
-        } else if (hint._node->is_leaf_node()) {
-            // Hint points to a leaf position
+        // Fast path: check if key > max key (sequential append case)
+        // This is the most common case for sorted insert - check it first regardless of hint
+        if (_rightmost_leaf->count > 0 && _comp(_rightmost_leaf->key(_rightmost_leaf->count - 1), key)) {
+            auto [inserted_node, inserted_pos] =
+              insert_and_split_impl(_rightmost_leaf, _rightmost_leaf->count, std::forward<K>(key), std::forward<V>(value));
+            ++_size;
+            return iterator(inserted_node, inserted_pos);
+        }
+
+        // Try to use hint if it points to a valid leaf position
+        // For end() hint (most common), this branch is skipped entirely
+        if (hint._node != nullptr && hint._node->is_leaf_node()) [[unlikely]] {
             auto* hint_leaf = const_cast<leaf_node*>(static_cast<const leaf_node*>(hint._node));
             size_type hint_pos = hint._pos;
 

@@ -12,7 +12,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Compiler flags
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+# Use -march=native to enable AVX2/AVX512 SIMD optimizations
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
 # Default build type
