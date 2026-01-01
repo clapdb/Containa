@@ -1,16 +1,24 @@
 # Containa
 
-A high-performance C++ container library featuring `btree_map` and `vectra` - optimized alternatives to standard containers.
+A high-performance C++ container library featuring `btree_map`, `small_vectra`, and `devectra` - optimized alternatives to standard containers.
 
 ## Containers
 
-### btree_map
+### btree_map / btree_set
 
-A high-performance B-tree based ordered map, optimized to outperform `absl::btree_map`.
+A high-performance B-tree based ordered map and set, optimized to outperform `absl::btree_map`.
 
-### vectra
+### small_vectra
 
-An optimized vector implementation with 64-byte default capacity and special handling for relocatable types.
+A small buffer optimized vector that stores elements inline (no heap allocation) for small sizes.
+
+### devectra
+
+A double-ended vector with O(1) amortized push_front and push_back operations.
+
+### static_vectra
+
+A fixed-capacity vector with embedded storage - never performs dynamic memory allocation.
 
 ---
 
@@ -181,15 +189,19 @@ cmake -B build -DENABLE_UBSAN=ON -DCMAKE_BUILD_TYPE=Debug
 
 ```
 container/
-  btree_map.hpp      # B-tree map implementation
-  btree_set.hpp      # B-tree set implementation
-  skiplist_map.hpp   # Skip list map implementation
-  vectra.hpp         # Optimized vector
+  btree_map.hpp       # B-tree map implementation
+  btree_set.hpp       # B-tree set implementation
+  skiplist_map.hpp    # Skip list map implementation
+  small_vectra.hpp    # Small buffer optimized vector
+  devectra.hpp        # Double-ended vector
+  static_vectra.hpp   # Fixed-capacity vector
+  ring_buffer.hpp     # Circular buffer
+  container_base.hpp  # Common utilities
   ...
-tests/               # Test suite (doctest)
-bench/               # Benchmarks (nanobench)
-benchmark_result.md  # Detailed benchmark results
-tradeoff.md          # Design decisions and tradeoffs
+tests/                # Test suite (doctest)
+bench/                # Benchmarks (nanobench)
+benchmark_result.md   # Detailed benchmark results
+tradeoff.md           # Design decisions and tradeoffs
 ```
 
 ## License
