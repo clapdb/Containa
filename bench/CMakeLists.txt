@@ -18,6 +18,9 @@ add_bench_target(skiplist_bench skiplist_bench.cc)
 # Bitmap benchmarks
 add_bench_target(bitmap_bench bitmap_bench.cc)
 
+# Boolean vector benchmarks
+add_bench_target(boolean_vector_bench boolean_vector_bench.cc)
+
 # Container benchmarks (small_vectra, devectra, ring_buffer)
 add_bench_target(container_bench container_bench.cc)
 
