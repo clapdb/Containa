@@ -17,7 +17,7 @@
 #pragma once
 #include <algorithm>
 
-#include "vectra.hpp"
+#include "container_base.hpp"
 
 namespace stdb::container {
 
@@ -110,7 +110,10 @@ class devectra
         size_type new_offset = (new_cap - _size) / 2;
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -179,7 +182,10 @@ class devectra
         }
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -245,7 +251,10 @@ class devectra
         }
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -410,7 +419,10 @@ class devectra
             return;  // Don't throw, just keep current allocation
         }
 
-        (void)move_range_without_overlap(new_buffer, data_start(), data_end());
+        T* old_start = data_start();
+        T* old_end = data_end();
+        (void)move_range_without_overlap(new_buffer, old_start, old_end);
+        destroy_range(old_start, old_end);
         deallocate();
         _buffer = new_buffer;
         _offset = 0;
