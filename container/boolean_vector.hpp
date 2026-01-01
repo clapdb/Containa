@@ -33,6 +33,8 @@
 #include <immintrin.h>
 #if defined(__AVX2__)
 #define BOOLVEC_HAS_AVX2 1
+#elif defined(__SSE4_1__)
+#define BOOLVEC_HAS_SSE4 1
 #elif defined(__SSE2__)
 #define BOOLVEC_HAS_SSE2 1
 #endif
@@ -529,7 +531,7 @@ public:
             v = _mm256_xor_si256(v, ones);
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(p + i), v);
         }
-#elif defined(BOOLVEC_HAS_SSE2)
+#elif defined(BOOLVEC_HAS_SSE4) || defined(BOOLVEC_HAS_SSE2)
         const __m128i ones = _mm_set1_epi8(1);
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
@@ -569,7 +571,7 @@ public:
         __m256i sum16 = _mm256_sad_epu8(acc, _mm256_setzero_si256());
         total = _mm256_extract_epi64(sum16, 0) + _mm256_extract_epi64(sum16, 1) +
                 _mm256_extract_epi64(sum16, 2) + _mm256_extract_epi64(sum16, 3);
-#elif defined(BOOLVEC_HAS_SSE2)
+#elif defined(BOOLVEC_HAS_SSE4)
         __m128i acc = _mm_setzero_si128();
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
@@ -577,6 +579,17 @@ public:
         }
         __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
         total = _mm_extract_epi64(sum16, 0) + _mm_extract_epi64(sum16, 1);
+#elif defined(BOOLVEC_HAS_SSE2)
+        __m128i acc = _mm_setzero_si128();
+        for (; i + 16 <= _size; i += 16) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+            acc = _mm_add_epi8(acc, v);
+        }
+        __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
+        // SSE2 fallback: extract via shuffle and store
+        alignas(16) uint64_t tmp[2];
+        _mm_store_si128(reinterpret_cast<__m128i*>(tmp), sum16);
+        total = tmp[0] + tmp[1];
 #elif defined(BOOLVEC_HAS_NEON)
         uint64x2_t acc = vdupq_n_u64(0);
         for (; i + 16 <= _size; i += 16) {
@@ -603,10 +616,17 @@ public:
             __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
             if (!_mm256_testz_si256(v, v)) return true;
         }
-#elif defined(BOOLVEC_HAS_SSE2)
+#elif defined(BOOLVEC_HAS_SSE4)
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
             if (!_mm_testz_si128(v, v)) return true;
+        }
+#elif defined(BOOLVEC_HAS_SSE2)
+        const __m128i zeros = _mm_setzero_si128();
+        for (; i + 16 <= _size; i += 16) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+            __m128i cmp = _mm_cmpeq_epi8(v, zeros);
+            if (_mm_movemask_epi8(cmp) != 0xFFFF) return true;
         }
 #elif defined(BOOLVEC_HAS_NEON)
         for (; i + 16 <= _size; i += 16) {
@@ -631,7 +651,7 @@ public:
             __m256i cmp = _mm256_cmpeq_epi8(v, ones);
             if (_mm256_movemask_epi8(cmp) != -1) return false;
         }
-#elif defined(BOOLVEC_HAS_SSE2)
+#elif defined(BOOLVEC_HAS_SSE4) || defined(BOOLVEC_HAS_SSE2)
         const __m128i ones = _mm_set1_epi8(1);
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
