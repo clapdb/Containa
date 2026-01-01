@@ -17,7 +17,7 @@
 #pragma once
 #include <algorithm>
 
-#include "vectra.hpp"
+#include "container_base.hpp"
 
 namespace stdb::container {
 
@@ -63,8 +63,8 @@ class devectra
     size_type _capacity = 0;  // Total buffer capacity
 
     static constexpr size_type kDefaultCapacity = 8;
-    static constexpr size_type kGrowthNumerator = 3;
-    static constexpr size_type kGrowthDenominator = 2;
+    // Use 2x growth factor (matches libstdc++ std::vector for better performance)
+    static constexpr size_type kGrowthFactor = 2;
 
     [[nodiscard, gnu::always_inline]] auto data_start() noexcept -> T* { return _buffer + _offset; }
 
@@ -96,7 +96,7 @@ class devectra
 
     // Grow the buffer, centering elements to leave space at both ends
     void grow(size_type min_capacity) {
-        size_type new_cap = std::max(min_capacity, (_capacity * kGrowthNumerator) / kGrowthDenominator + 1);
+        size_type new_cap = std::max(min_capacity, _capacity * kGrowthFactor);
         if (new_cap < kDefaultCapacity) {
             new_cap = kDefaultCapacity;
         }
@@ -110,7 +110,10 @@ class devectra
         size_type new_offset = (new_cap - _size) / 2;
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -121,7 +124,8 @@ class devectra
 
     // Make room at front by shifting elements or growing
     // Optimized to avoid shifting on every alternating push_front/push_back
-    void make_room_front(size_type count = 1) {
+    // [[gnu::noinline, gnu::cold]] helps compiler optimize the hot path in push_front
+    [[gnu::noinline, gnu::cold]] void make_room_front(size_type count = 1) {
         if (front_spare() >= count) {
             return;
         }
@@ -161,7 +165,7 @@ class devectra
 
         // Grow and center elements - leave room for both front and back operations
         size_type min_cap = count + _size + count;  // Extra slack for back too
-        size_type new_cap = std::max(min_cap, (_capacity * kGrowthNumerator) / kGrowthDenominator + 1);
+        size_type new_cap = std::max(min_cap, _capacity * kGrowthFactor);
         if (new_cap < kDefaultCapacity) {
             new_cap = kDefaultCapacity;
         }
@@ -178,7 +182,10 @@ class devectra
         }
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -189,7 +196,8 @@ class devectra
 
     // Make room at back by shifting elements or growing
     // Optimized to avoid shifting on every alternating push_front/push_back
-    void make_room_back(size_type count = 1) {
+    // [[gnu::noinline, gnu::cold]] helps compiler optimize the hot path in push_back
+    [[gnu::noinline, gnu::cold]] void make_room_back(size_type count = 1) {
         if (back_spare() >= count) {
             return;
         }
@@ -226,7 +234,7 @@ class devectra
 
         // Grow and center elements - leave room for both front and back operations
         size_type min_cap = count + _size + count;  // Extra slack for front too
-        size_type new_cap = std::max(min_cap, (_capacity * kGrowthNumerator) / kGrowthDenominator + 1);
+        size_type new_cap = std::max(min_cap, _capacity * kGrowthFactor);
         if (new_cap < kDefaultCapacity) {
             new_cap = kDefaultCapacity;
         }
@@ -243,7 +251,10 @@ class devectra
         }
 
         if (_size > 0) {
-            (void)move_range_without_overlap(new_buffer + new_offset, data_start(), data_end());
+            T* old_start = data_start();
+            T* old_end = data_end();
+            (void)move_range_without_overlap(new_buffer + new_offset, old_start, old_end);
+            destroy_range(old_start, old_end);
         }
 
         deallocate();
@@ -408,7 +419,10 @@ class devectra
             return;  // Don't throw, just keep current allocation
         }
 
-        (void)move_range_without_overlap(new_buffer, data_start(), data_end());
+        T* old_start = data_start();
+        T* old_end = data_end();
+        (void)move_range_without_overlap(new_buffer, old_start, old_end);
+        destroy_range(old_start, old_end);
         deallocate();
         _buffer = new_buffer;
         _offset = 0;
@@ -465,25 +479,32 @@ class devectra
     }
 
     // Modifiers - Front operations
+    // Optimization: inline the fast path check, only call make_room_front when needed
     void push_front(const value_type& value) {
-        make_room_front(1);
+        if (_offset == 0) [[unlikely]] {
+            make_room_front(1);
+        }
         --_offset;
-        copy_cref(data_start(), value);
+        copy_cref(_buffer + _offset, value);
         ++_size;
     }
 
     void push_front(value_type&& value) {
-        make_room_front(1);
+        if (_offset == 0) [[unlikely]] {
+            make_room_front(1);
+        }
         --_offset;
-        copy_value(data_start(), std::move(value));
+        copy_value(_buffer + _offset, std::move(value));
         ++_size;
     }
 
     template <typename... Args>
     auto emplace_front(Args&&... args) -> reference {
-        make_room_front(1);
+        if (_offset == 0) [[unlikely]] {
+            make_room_front(1);
+        }
         --_offset;
-        new (data_start()) T(std::forward<Args>(args)...);
+        new (_buffer + _offset) T(std::forward<Args>(args)...);
         ++_size;
         return front();
     }
@@ -496,22 +517,29 @@ class devectra
     }
 
     // Modifiers - Back operations
+    // Optimization: inline the fast path check, only call make_room_back when needed
     void push_back(const value_type& value) {
-        make_room_back(1);
-        copy_cref(data_end(), value);
+        if (back_spare() == 0) [[unlikely]] {
+            make_room_back(1);
+        }
+        copy_cref(_buffer + _offset + _size, value);
         ++_size;
     }
 
     void push_back(value_type&& value) {
-        make_room_back(1);
-        copy_value(data_end(), std::move(value));
+        if (back_spare() == 0) [[unlikely]] {
+            make_room_back(1);
+        }
+        copy_value(_buffer + _offset + _size, std::move(value));
         ++_size;
     }
 
     template <typename... Args>
     auto emplace_back(Args&&... args) -> reference {
-        make_room_back(1);
-        new (data_end()) T(std::forward<Args>(args)...);
+        if (back_spare() == 0) [[unlikely]] {
+            make_room_back(1);
+        }
+        new (_buffer + _offset + _size) T(std::forward<Args>(args)...);
         ++_size;
         return back();
     }

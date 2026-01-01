@@ -4,49 +4,64 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is **Containa**, a high-performance C++ container library centered around the `vectra` class - an optimized vector implementation. The main component is `vectra.hpp`, a single-header library that provides the `stdb::container::vectra` template class.
+**Containa** is a high-performance C++ container library providing optimized implementations of common data structures. The library is header-only and requires C++20.
+
+## Build Commands
+
+```bash
+# Configure and build (Release mode by default)
+cmake -B build && cmake --build build
+
+# Build with Debug mode
+cmake -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build
+
+# Build with sanitizers
+cmake -B build -DENABLE_ASAN=ON -DENABLE_UBSAN=ON && cmake --build build
+
+# Build with Abseil comparison benchmarks
+cmake -B build -DENABLE_ABSL_BENCH=ON && cmake --build build
+
+# Run tests
+./build/tests/containa_test
+
+# Run benchmarks
+./build/bench/btree_bench
+./build/bench/container_bench
+./build/bench/skiplist_bench
+```
 
 ## Architecture
 
-- **Core Library**: `vectra.hpp` - Single header containing the entire `vectra` implementation
-- **Namespace Structure**: 
-  - `stdb` - Base namespace containing type traits (`Relocatable`, `ZeroInitable`)
-  - `stdb::container` - Container implementations, primarily `vectra`
-- **Dependencies**: 
-  - Missing `assert_config.hpp` (referenced but not present in codebase)
-  - Missing `container/vectra.hpp` (referenced by tests/benchmarks but not present)
-
-## Key Features
-
-The `vectra` is designed as a high-performance replacement for `std::vector` with:
-- **Memory optimization** with 64-byte default capacity
-- **Safety modes**: Safe and Unsafe variants for performance-critical operations
-- **Type optimization**: Special handling for relocatable and zero-initializable types
-- **Advanced operations**: `get_writebuffer()`, unsafe variants of standard operations
-- **Template specialization**: Optimized paths for trivially copyable types
-
-## Build and Test Commands
-
-The codebase currently lacks build configuration files. Based on the structure:
-
-- **Test Framework**: Uses doctest (referenced in `tests/vectra_test.cc`)
-- **Benchmark Framework**: Uses nanobench (referenced in `bench/vector_bench.cc`)
-
-To work with this codebase you'll need to:
-1. Create appropriate build system (CMakeLists.txt, Makefile, or meson.build)
-2. Provide missing header files (`assert_config.hpp`, `container/vectra.hpp`)
-3. Set up nanobench and doctest dependencies
+- **Namespace**: `stdb::container` - All container implementations
+- **Type Traits**: `stdb::Relocatable`, `stdb::ZeroInitable` - For optimization hints
+- **Build System**: CMake 3.20+, C++20
 
 ## Code Organization
 
-- `/vectra.hpp` - Main library implementation
-- `/tests/vectra_test.cc` - Test suite using doctest
-- `/bench/vector_bench.cc` - Performance benchmarks using nanobench  
-- `/LICENSE` - Apache License 2.0
+```
+container/
+├── small_vectra.hpp    # Small buffer optimized vector
+├── devectra.hpp        # Double-ended vector
+├── ring_buffer.hpp     # Circular buffer
+├── btree_map.hpp       # B-tree based map
+├── btree_set.hpp       # B-tree based set
+├── skiplist_map.hpp    # Skip list map
+├── skiplist_set.hpp    # Skip list set
+├── concurrent_skiplist.hpp  # Thread-safe skip list
+├── static_vectra.hpp   # Fixed-capacity vector
+└── bitmap.hpp          # Bitmap implementation
 
-## Important Notes
+tests/                  # Test suite (doctest)
+bench/                  # Benchmarks (nanobench)
+doctest/                # Testing framework
+nanobench/              # Benchmark framework
+```
 
-- The project references missing header files that need to be created or paths corrected
-- No build system configuration present - needs to be added for compilation
-- The `vectra` supports both safe and unsafe operations via template parameters
-- Extensive type trait system for optimization based on type characteristics
+## Key Features
+
+- **small_vectra**: Small buffer optimized vector
+- **devectra**: Double-ended vector with O(1) push_front/push_back
+- **btree_map/set**: Cache-friendly B-tree containers
+- **skiplist**: Lock-free concurrent data structures
+- **Type optimization**: Special handling for relocatable and zero-initializable types
+- **SIMD**: Uses `-march=native` for AVX2/AVX512 optimizations in Release builds
