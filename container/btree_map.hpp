@@ -93,10 +93,12 @@ namespace stdb::container {
 
 // Concept to detect string-like types (have data() and size(), expensive comparison)
 // Binary search is preferred for these types to reduce comparison count
+// Requires compare() method for three-way comparison optimization
 template <typename T>
-concept string_like = requires(const T& a) {
+concept string_like = requires(const T& a, const T& b) {
     { a.data() };
     { a.size() } -> std::convertible_to<std::size_t>;
+    { a.compare(b) } -> std::convertible_to<int>;
 };
 
 // Trait to detect transparent comparators (have is_transparent type member)
@@ -2303,7 +2305,7 @@ class btree_map
                     size_type left_space = kLeafSlots - left_sibling->count;
                     if (left_space >= 1) {
                         size_type to_move = 1;
-                        size_type new_leaf_count = leaf->count - to_move;
+                        [[maybe_unused]] size_type new_leaf_count = leaf->count - to_move;
 
                         if (pos == 0 && left_space >= 2) {
                             size_type old_left_count = left_sibling->count;
@@ -2495,7 +2497,7 @@ class btree_map
                     size_type left_space = kInternalSlots - left_sibling->count;
                     if (left_space >= 1) {
                         size_type to_move = 1;  // Move just 1 to make room
-                        size_type new_node_count = internal->count - to_move;
+                        [[maybe_unused]] size_type new_node_count = internal->count - to_move;
 
                         if (pos == 0 && left_space >= 2) {
                             // Element goes into left sibling
@@ -3736,8 +3738,8 @@ class btree_map
 
     // Copy constructor - O(n) deep copy of tree structure
     btree_map(const btree_map& other)
-        : _comp(other._comp),
-          _size(other._size),
+        : _size(other._size),
+          _comp(other._comp),
           _leaf_alloc(std::allocator_traits<leaf_allocator_type>::select_on_container_copy_construction(
               other._leaf_alloc)),
           _internal_alloc(std::allocator_traits<internal_allocator_type>::select_on_container_copy_construction(
@@ -3748,7 +3750,7 @@ class btree_map
 
     // Copy constructor with allocator
     btree_map(const btree_map& other, const Allocator& alloc)
-        : _comp(other._comp), _size(other._size), _leaf_alloc(alloc), _internal_alloc(alloc) {
+        : _size(other._size), _comp(other._comp), _leaf_alloc(alloc), _internal_alloc(alloc) {
         _root = deep_copy_node(other._root, nullptr);
         _rightmost_leaf = const_cast<leaf_node*>(rightmost_leaf());
     }
@@ -4880,7 +4882,8 @@ class btree_map
     }
 
     // Insert node handle with hint (C++17)
-    auto insert(const_iterator hint, node_type&& nh) -> iterator {
+    // Note: hint parameter is for API compatibility, currently ignored
+    auto insert([[maybe_unused]] const_iterator hint, node_type&& nh) -> iterator {
         if (nh.empty()) {
             return end();
         }
