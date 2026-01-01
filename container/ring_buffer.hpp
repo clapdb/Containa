@@ -16,11 +16,29 @@
 
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <optional>
+#include <stdexcept>
 
-#include "vectra.hpp"
+// Simple assert macro (in release builds, this is a no-op)
+#ifndef RING_BUFFER_ASSERT
+#ifdef NDEBUG
+#define RING_BUFFER_ASSERT(cond, msg) ((void)0)
+#else
+#define RING_BUFFER_ASSERT(cond, msg) assert((cond) && (msg))
+#endif
+#endif
 
 namespace stdb::container {
+
+namespace detail {
+template <typename T>
+inline void destroy_ptr(T* ptr) noexcept {
+    if constexpr (!std::is_trivially_destructible_v<T>) {
+        ptr->~T();
+    }
+}
+}  // namespace detail
 
 /*
  * ring_buffer is a fixed-size circular buffer.
@@ -48,6 +66,10 @@ class ring_buffer
 {
     static_assert(N > 0, "ring_buffer capacity must be greater than 0");
 
+    // Optimization: use bitwise AND for power-of-2 sizes (faster than modulo)
+    static constexpr bool is_power_of_2 = (N & (N - 1)) == 0;
+    static constexpr size_t mask = N - 1;
+
    public:
     using size_type = std::size_t;
     using value_type = T;
@@ -70,14 +92,23 @@ class ring_buffer
         return reinterpret_cast<const T*>(_storage);
     }
 
+    // Wrap index to buffer size (use bitwise AND for power-of-2, modulo otherwise)
+    [[nodiscard, gnu::always_inline]] static constexpr auto wrap_index(size_type idx) noexcept -> size_type {
+        if constexpr (is_power_of_2) {
+            return idx & mask;
+        } else {
+            return idx % N;
+        }
+    }
+
     // Get the actual index in storage for a logical index
     [[nodiscard, gnu::always_inline]] constexpr auto actual_index(size_type logical_idx) const noexcept -> size_type {
-        return (_head + logical_idx) % N;
+        return wrap_index(_head + logical_idx);
     }
 
     // Get the tail index (where next element will be written)
     [[nodiscard, gnu::always_inline]] constexpr auto tail_index() const noexcept -> size_type {
-        return (_head + _size) % N;
+        return wrap_index(_head + _size);
     }
 
    public:
@@ -148,12 +179,12 @@ class ring_buffer
 
     // Element access
     [[nodiscard, gnu::always_inline]] auto operator[](size_type index) noexcept -> reference {
-        Assert(index < _size, "index out of range");
+        RING_BUFFER_ASSERT(index < _size, "index out of range");
         return storage_ptr()[actual_index(index)];
     }
 
     [[nodiscard, gnu::always_inline]] auto operator[](size_type index) const noexcept -> const_reference {
-        Assert(index < _size, "index out of range");
+        RING_BUFFER_ASSERT(index < _size, "index out of range");
         return storage_ptr()[actual_index(index)];
     }
 
@@ -172,63 +203,67 @@ class ring_buffer
     }
 
     [[nodiscard, gnu::always_inline]] auto front() noexcept -> reference {
-        Assert(_size > 0, "front on empty buffer");
+        RING_BUFFER_ASSERT(_size > 0, "front on empty buffer");
         return storage_ptr()[_head];
     }
 
     [[nodiscard, gnu::always_inline]] auto front() const noexcept -> const_reference {
-        Assert(_size > 0, "front on empty buffer");
+        RING_BUFFER_ASSERT(_size > 0, "front on empty buffer");
         return storage_ptr()[_head];
     }
 
     [[nodiscard, gnu::always_inline]] auto back() noexcept -> reference {
-        Assert(_size > 0, "back on empty buffer");
+        RING_BUFFER_ASSERT(_size > 0, "back on empty buffer");
         return storage_ptr()[actual_index(_size - 1)];
     }
 
     [[nodiscard, gnu::always_inline]] auto back() const noexcept -> const_reference {
-        Assert(_size > 0, "back on empty buffer");
+        RING_BUFFER_ASSERT(_size > 0, "back on empty buffer");
         return storage_ptr()[actual_index(_size - 1)];
     }
 
     // Modifiers
 
     // Push element to the back. If full, overwrites the oldest element.
+    // Optimization: use likely hint for the common case (buffer not full)
     void push_back(const value_type& value) {
-        if (_size == N) {
-            // Overwrite oldest element
-            storage_ptr()[_head] = value;
-            _head = (_head + 1) % N;
-        } else {
-            new (storage_ptr() + tail_index()) T(value);
+        T* const base = storage_ptr();
+        if (_size != N) [[likely]] {
+            new (base + tail_index()) T(value);
             ++_size;
+        } else {
+            // Overwrite oldest element
+            base[_head] = value;
+            _head = wrap_index(_head + 1);
         }
     }
 
     void push_back(value_type&& value) {
-        if (_size == N) {
-            // Overwrite oldest element
-            storage_ptr()[_head] = std::move(value);
-            _head = (_head + 1) % N;
-        } else {
-            new (storage_ptr() + tail_index()) T(std::move(value));
+        T* const base = storage_ptr();
+        if (_size != N) [[likely]] {
+            new (base + tail_index()) T(std::move(value));
             ++_size;
+        } else {
+            // Overwrite oldest element
+            base[_head] = std::move(value);
+            _head = wrap_index(_head + 1);
         }
     }
 
     template <typename... Args>
     auto emplace_back(Args&&... args) -> reference {
-        if (_size == N) {
-            // Destroy oldest and construct new in its place
-            T* ptr = storage_ptr() + _head;
-            ptr->~T();
-            new (ptr) T(std::forward<Args>(args)...);
-            _head = (_head + 1) % N;
-            return *ptr;
-        } else {
-            T* ptr = storage_ptr() + tail_index();
+        T* const base = storage_ptr();
+        if (_size != N) [[likely]] {
+            T* ptr = base + tail_index();
             new (ptr) T(std::forward<Args>(args)...);
             ++_size;
+            return *ptr;
+        } else {
+            // Destroy oldest and construct new in its place
+            T* ptr = base + _head;
+            ptr->~T();
+            new (ptr) T(std::forward<Args>(args)...);
+            _head = wrap_index(_head + 1);
             return *ptr;
         }
     }
@@ -254,17 +289,17 @@ class ring_buffer
 
     // Pop from front (oldest element)
     void pop_front() noexcept {
-        Assert(_size > 0, "pop_front on empty buffer");
-        destroy_ptr(storage_ptr() + _head);
-        _head = (_head + 1) % N;
+        RING_BUFFER_ASSERT(_size > 0, "pop_front on empty buffer");
+        detail::destroy_ptr(storage_ptr() + _head);
+        _head = wrap_index(_head + 1);
         --_size;
     }
 
     // Pop from back (newest element)
     void pop_back() noexcept {
-        Assert(_size > 0, "pop_back on empty buffer");
+        RING_BUFFER_ASSERT(_size > 0, "pop_back on empty buffer");
         --_size;
-        destroy_ptr(storage_ptr() + actual_index(_size));
+        detail::destroy_ptr(storage_ptr() + actual_index(_size));
     }
 
     // Try to pop front, returns the value if successful
@@ -274,15 +309,15 @@ class ring_buffer
         }
         T* ptr = storage_ptr() + _head;
         std::optional<T> result(std::move(*ptr));
-        destroy_ptr(ptr);
-        _head = (_head + 1) % N;
+        detail::destroy_ptr(ptr);
+        _head = wrap_index(_head + 1);
         --_size;
         return result;
     }
 
     void clear() noexcept {
         for (size_type i = 0; i < _size; ++i) {
-            destroy_ptr(storage_ptr() + actual_index(i));
+            detail::destroy_ptr(storage_ptr() + actual_index(i));
         }
         _head = 0;
         _size = 0;
