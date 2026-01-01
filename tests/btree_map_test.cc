@@ -2136,4 +2136,205 @@ TEST_CASE("btree_set::pmr") {
 
 #endif  // BTREE_HAS_PMR
 
+// ============================================================================
+// Bug Fix Tests - Covering fixes for line 4886 and lines 3741/3753
+// ============================================================================
+
+TEST_CASE("btree_map::node_handle_insert_with_hint") {
+    btree_map<int, std::string> map;
+
+    // Populate map with some initial data
+    for (int i = 0; i < 100; i += 10) {
+        map[i] = "value_" + std::to_string(i);
+    }
+
+    SUBCASE("insert node handle with hint - correct position") {
+        // Extract a node
+        auto nh = map.extract(50);
+        CHECK_FALSE(nh.empty());
+        CHECK_EQ(nh.key(), 50);
+        CHECK_EQ(map.size(), 9);
+
+        // Create another map and insert with hint
+        btree_map<int, std::string> map2;
+        for (int i = 0; i < 10; ++i) {
+            map2[i * 5] = "other_" + std::to_string(i * 5);
+        }
+
+        // Insert with hint (using hint parameter that was previously unused)
+        auto hint = map2.find(45);  // Hint near where 50 should go
+        auto it = map2.insert(hint, std::move(nh));
+
+        CHECK(nh.empty());  // Node handle should be empty after successful insertion
+        CHECK_EQ(it->first, 50);
+        CHECK_EQ(it->second, "value_50");
+        CHECK_EQ(map2.size(), 11);
+        CHECK(map2.contains(50));
+    }
+
+    SUBCASE("insert node handle with hint - duplicate key") {
+        auto nh = map.extract(40);
+        CHECK_FALSE(nh.empty());
+
+        btree_map<int, std::string> map2;
+        map2[40] = "duplicate";  // Same key
+        map2[50] = "other";
+
+        auto hint = map2.find(50);
+        auto it = map2.insert(hint, std::move(nh));
+
+        // Should return iterator to existing element
+        // Note: with hint version, node handle is consumed even if insertion fails
+        CHECK_EQ(it->first, 40);
+        CHECK_EQ(it->second, "duplicate");  // Original value preserved
+        CHECK(nh.empty());  // Node handle is consumed
+        CHECK_EQ(map2.size(), 2);  // Size unchanged
+    }
+
+    SUBCASE("insert empty node handle with hint") {
+        btree_map<int, std::string>::node_type nh;  // Empty node handle
+        CHECK(nh.empty());
+
+        auto hint = map.find(50);
+        auto it = map.insert(hint, std::move(nh));
+
+        CHECK(it == map.end());  // Should return end() for empty node handle
+        CHECK_EQ(map.size(), 10);  // Size unchanged
+    }
+
+    SUBCASE("insert node handle with hint - end hint") {
+        auto nh = map.extract(90);
+
+        btree_map<int, std::string> map2;
+        for (int i = 0; i < 5; ++i) {
+            map2[i] = "val_" + std::to_string(i);
+        }
+
+        // Use end() as hint
+        auto it = map2.insert(map2.end(), std::move(nh));
+
+        CHECK(nh.empty());
+        CHECK_EQ(it->first, 90);
+        CHECK_EQ(it->second, "value_90");
+        CHECK_EQ(map2.size(), 6);
+    }
+}
+
+TEST_CASE("btree_map::copy_constructor_comprehensive") {
+    SUBCASE("copy constructor with large map - verifies member init order") {
+        btree_map<int, std::string> original;
+
+        // Insert enough elements to trigger multiple node allocations and splits
+        // This ensures that _size and _comp are both used during copy construction
+        for (int i = 0; i < 1000; ++i) {
+            original[i] = "value_" + std::to_string(i * 2);
+        }
+
+        CHECK_EQ(original.size(), 1000);
+
+        // Copy construct - this tests the fixed initialization order (line 3741)
+        btree_map<int, std::string> copy(original);
+
+        // Verify size is correct
+        CHECK_EQ(copy.size(), 1000);
+        CHECK_EQ(copy.size(), original.size());
+
+        // Verify all elements copied correctly
+        for (int i = 0; i < 1000; ++i) {
+            CHECK(copy.contains(i));
+            CHECK_EQ(copy.at(i), "value_" + std::to_string(i * 2));
+            CHECK_EQ(copy.at(i), original.at(i));
+        }
+
+        // Verify ordering is preserved
+        int prev = -1;
+        for (const auto& [k, v] : copy) {
+            CHECK_GT(k, prev);
+            prev = k;
+        }
+
+        // Modify copy and ensure original is unchanged
+        copy[500] = "modified";
+        copy[1001] = "new_element";
+        copy.erase(100);
+
+        CHECK_EQ(original.at(500), "value_1000");  // Unchanged
+        CHECK_FALSE(original.contains(1001));
+        CHECK(original.contains(100));
+        CHECK_EQ(original.size(), 1000);
+        CHECK_EQ(copy.size(), 1000);  // 1000 - 1 (erased) + 1 (added) = 1000
+    }
+
+    SUBCASE("copy constructor with custom comparator - verifies _comp initialization") {
+        btree_map<int, int, std::greater<int>> original(std::greater<int>{});
+
+        // Insert in ascending order, but map should store in descending order
+        for (int i = 0; i < 500; ++i) {
+            original[i] = i * 10;
+        }
+
+        // Copy construct - ensures comparator is copied correctly (line 3741)
+        btree_map<int, int, std::greater<int>> copy(original);
+
+        CHECK_EQ(copy.size(), 500);
+
+        // Verify ordering is descending (comparator working correctly)
+        int prev = 1000;  // Start with large number
+        for (const auto& [k, v] : copy) {
+            CHECK_LT(k, prev);  // Should be descending
+            prev = k;
+        }
+
+        // Verify first element is largest
+        auto it = copy.begin();
+        CHECK_EQ(it->first, 499);
+    }
+
+    SUBCASE("copy constructor with allocator - verifies line 3753 fix") {
+        btree_map<int, int> original;
+
+        for (int i = 0; i < 200; ++i) {
+            original[i] = i * 3;
+        }
+
+        std::allocator<std::pair<const int, int>> alloc;
+
+        // Copy construct with allocator - tests line 3753 initialization order
+        btree_map<int, int> copy(original, alloc);
+
+        CHECK_EQ(copy.size(), 200);
+        CHECK_EQ(copy.size(), original.size());
+
+        // Verify all elements
+        for (int i = 0; i < 200; ++i) {
+            CHECK_EQ(copy.at(i), i * 3);
+        }
+    }
+
+    SUBCASE("copy empty map - edge case") {
+        btree_map<int, int> original;
+
+        btree_map<int, int> copy(original);
+
+        CHECK(copy.empty());
+        CHECK_EQ(copy.size(), 0);
+        CHECK(copy.begin() == copy.end());
+    }
+
+    SUBCASE("copy single element map - edge case") {
+        btree_map<int, std::string> original;
+        original[42] = "answer";
+
+        btree_map<int, std::string> copy(original);
+
+        CHECK_EQ(copy.size(), 1);
+        CHECK(copy.contains(42));
+        CHECK_EQ(copy.at(42), "answer");
+
+        // Modify copy
+        copy[42] = "modified";
+        CHECK_EQ(original.at(42), "answer");  // Original unchanged
+    }
+}
+
 }  // namespace stdb::container
