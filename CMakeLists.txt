@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Containa
     VERSION 1.0.0
-    DESCRIPTION "High-performance C++ container library with vectra"
+    DESCRIPTION "High-performance C++ container library"
     LANGUAGES CXX
 )
 
@@ -75,18 +75,18 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/)
 
 # Header-only library target
-add_library(vectra INTERFACE)
-target_include_directories(vectra INTERFACE
+add_library(containa INTERFACE)
+target_include_directories(containa INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(vectra INTERFACE cxx_std_20)
+target_compile_features(containa INTERFACE cxx_std_20)
 
 # Add compiler warnings
 if(MSVC)
-    target_compile_options(vectra INTERFACE /W4)
+    target_compile_options(containa INTERFACE /W4)
 else()
-    target_compile_options(vectra INTERFACE 
+    target_compile_options(containa INTERFACE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow
     )
 endif()
@@ -100,12 +100,12 @@ add_subdirectory(bench)
 # Custom targets
 add_custom_target(test_run
     COMMAND ${CMAKE_CTEST_COMMAND} --verbose
-    DEPENDS vectra_test
+    DEPENDS containa_test
     COMMENT "Running tests"
 )
 
 add_custom_target(benchmark_run
-    COMMAND vector_bench
-    DEPENDS vector_bench
+    COMMAND btree_bench
+    DEPENDS btree_bench
     COMMENT "Running benchmarks"
 )

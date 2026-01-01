@@ -18,6 +18,7 @@
 
 #include <doctest/doctest.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -525,6 +526,278 @@ TEST_CASE("ring_buffer::edge_cases") {
         auto val = buf.try_pop_front();
         CHECK_EQ(val.has_value(), false);
         CHECK_EQ(buf.empty(), true);
+    }
+}
+
+// ============================================================================
+// Type-specific tests
+// ============================================================================
+
+// Tracks construction/destruction for leak detection
+struct RingLifetimeTracker {
+    static inline int alive_count = 0;
+    static inline int construct_count = 0;
+    static inline int destruct_count = 0;
+
+    int value;
+
+    static void reset() {
+        alive_count = 0;
+        construct_count = 0;
+        destruct_count = 0;
+    }
+
+    RingLifetimeTracker() : value(0) {
+        ++alive_count;
+        ++construct_count;
+    }
+
+    explicit RingLifetimeTracker(int v) : value(v) {
+        ++alive_count;
+        ++construct_count;
+    }
+
+    RingLifetimeTracker(const RingLifetimeTracker& other) : value(other.value) {
+        ++alive_count;
+        ++construct_count;
+    }
+
+    RingLifetimeTracker(RingLifetimeTracker&& other) noexcept : value(other.value) {
+        other.value = -1;
+        ++alive_count;
+        ++construct_count;
+    }
+
+    RingLifetimeTracker& operator=(const RingLifetimeTracker& other) {
+        value = other.value;
+        return *this;
+    }
+
+    RingLifetimeTracker& operator=(RingLifetimeTracker&& other) noexcept {
+        value = other.value;
+        other.value = -1;
+        return *this;
+    }
+
+    ~RingLifetimeTracker() {
+        --alive_count;
+        ++destruct_count;
+    }
+
+    bool operator==(const RingLifetimeTracker& other) const { return value == other.value; }
+};
+
+TEST_CASE("ring_buffer::types::string") {
+    SUBCASE("push and access strings") {
+        ring_buffer<std::string, 4> buf;
+        buf.push_back("hello");
+        buf.push_back("world");
+        buf.push_back("foo");
+        buf.push_back("bar");
+
+        CHECK_EQ(buf.size(), 4);
+        CHECK_EQ(buf[0], "hello");
+        CHECK_EQ(buf[3], "bar");
+    }
+
+    SUBCASE("overflow with strings") {
+        ring_buffer<std::string, 3> buf;
+        buf.push_back("one");
+        buf.push_back("two");
+        buf.push_back("three");
+        buf.push_back("four");  // overwrites "one"
+
+        CHECK_EQ(buf.front(), "two");
+        CHECK_EQ(buf.back(), "four");
+    }
+
+    SUBCASE("pop_front with strings") {
+        ring_buffer<std::string, 4> buf{"alpha", "beta", "gamma"};
+        buf.pop_front();
+        CHECK_EQ(buf.front(), "beta");
+        CHECK_EQ(buf.size(), 2);
+    }
+
+    SUBCASE("copy and move strings") {
+        ring_buffer<std::string, 4> buf1{"a", "b", "c"};
+        auto buf2 = buf1;  // copy
+        CHECK_EQ(buf2[0], "a");
+
+        auto buf3 = std::move(buf1);  // move
+        CHECK_EQ(buf3[0], "a");
+        CHECK_EQ(buf1.size(), 0);
+    }
+}
+
+TEST_CASE("ring_buffer::types::lifetime_tracking") {
+    RingLifetimeTracker::reset();
+
+    SUBCASE("proper destruction on clear") {
+        {
+            ring_buffer<RingLifetimeTracker, 4> buf;
+            buf.emplace_back(1);
+            buf.emplace_back(2);
+            buf.emplace_back(3);
+            CHECK_EQ(RingLifetimeTracker::alive_count, 3);
+
+            buf.clear();
+            CHECK_EQ(RingLifetimeTracker::alive_count, 0);
+        }
+        CHECK_EQ(RingLifetimeTracker::alive_count, 0);
+    }
+
+    RingLifetimeTracker::reset();
+
+    SUBCASE("proper destruction on scope exit") {
+        {
+            ring_buffer<RingLifetimeTracker, 4> buf;
+            buf.emplace_back(1);
+            buf.emplace_back(2);
+            CHECK_EQ(RingLifetimeTracker::alive_count, 2);
+        }
+        CHECK_EQ(RingLifetimeTracker::alive_count, 0);
+    }
+
+    RingLifetimeTracker::reset();
+
+    SUBCASE("proper destruction on overflow") {
+        {
+            ring_buffer<RingLifetimeTracker, 3> buf;
+            buf.emplace_back(1);
+            buf.emplace_back(2);
+            buf.emplace_back(3);
+            CHECK_EQ(RingLifetimeTracker::alive_count, 3);
+
+            buf.emplace_back(4);  // overwrites element with value 1
+            CHECK_EQ(RingLifetimeTracker::alive_count, 3);  // still 3 alive
+            CHECK_EQ(buf.front().value, 2);
+        }
+        CHECK_EQ(RingLifetimeTracker::alive_count, 0);
+    }
+
+    RingLifetimeTracker::reset();
+
+    SUBCASE("pop_front destroys element") {
+        ring_buffer<RingLifetimeTracker, 4> buf;
+        buf.emplace_back(1);
+        buf.emplace_back(2);
+        CHECK_EQ(RingLifetimeTracker::alive_count, 2);
+
+        buf.pop_front();
+        CHECK_EQ(RingLifetimeTracker::alive_count, 1);
+        CHECK_EQ(buf.size(), 1);
+    }
+
+    RingLifetimeTracker::reset();
+
+    SUBCASE("pop_back destroys element") {
+        ring_buffer<RingLifetimeTracker, 4> buf;
+        buf.emplace_back(1);
+        buf.emplace_back(2);
+        CHECK_EQ(RingLifetimeTracker::alive_count, 2);
+
+        buf.pop_back();
+        CHECK_EQ(RingLifetimeTracker::alive_count, 1);
+        CHECK_EQ(buf.front().value, 1);
+    }
+}
+
+TEST_CASE("ring_buffer::types::unique_ptr") {
+    SUBCASE("push and access") {
+        ring_buffer<std::unique_ptr<int>, 4> buf;
+        buf.push_back(std::make_unique<int>(1));
+        buf.push_back(std::make_unique<int>(2));
+
+        CHECK_EQ(*buf[0], 1);
+        CHECK_EQ(*buf[1], 2);
+    }
+
+    SUBCASE("overflow cleans up") {
+        ring_buffer<std::unique_ptr<int>, 2> buf;
+        buf.push_back(std::make_unique<int>(1));
+        buf.push_back(std::make_unique<int>(2));
+        buf.push_back(std::make_unique<int>(3));  // should destroy the unique_ptr with 1
+
+        CHECK_EQ(buf.size(), 2);
+        CHECK_EQ(*buf[0], 2);
+        CHECK_EQ(*buf[1], 3);
+    }
+
+    SUBCASE("move semantics") {
+        ring_buffer<std::unique_ptr<int>, 4> buf1;
+        buf1.push_back(std::make_unique<int>(42));
+
+        auto buf2 = std::move(buf1);
+        CHECK_EQ(*buf2[0], 42);
+        CHECK_EQ(buf1.size(), 0);
+    }
+}
+
+// Struct with padding
+struct RingPaddedStruct {
+    char c;
+    // 3 bytes padding
+    int i;
+
+    RingPaddedStruct() : c('x'), i(0) {}
+    RingPaddedStruct(char ch, int val) : c(ch), i(val) {}
+
+    bool operator==(const RingPaddedStruct& other) const {
+        return c == other.c && i == other.i;
+    }
+};
+
+static_assert(sizeof(RingPaddedStruct) == 8);
+
+TEST_CASE("ring_buffer::types::padded_struct") {
+    SUBCASE("push and access") {
+        ring_buffer<RingPaddedStruct, 4> buf;
+        buf.emplace_back('a', 1);
+        buf.emplace_back('b', 2);
+
+        CHECK_EQ(buf[0].c, 'a');
+        CHECK_EQ(buf[0].i, 1);
+        CHECK_EQ(buf[1].c, 'b');
+        CHECK_EQ(buf[1].i, 2);
+    }
+
+    SUBCASE("overflow with padded struct") {
+        ring_buffer<RingPaddedStruct, 2> buf;
+        buf.emplace_back('x', 10);
+        buf.emplace_back('y', 20);
+        buf.emplace_back('z', 30);  // overwrites first
+
+        CHECK_EQ(buf[0].c, 'y');
+        CHECK_EQ(buf[1].c, 'z');
+    }
+
+    SUBCASE("comparison") {
+        ring_buffer<RingPaddedStruct, 4> buf1;
+        buf1.emplace_back('a', 1);
+        buf1.emplace_back('b', 2);
+
+        ring_buffer<RingPaddedStruct, 4> buf2;
+        buf2.emplace_back('a', 1);
+        buf2.emplace_back('b', 2);
+
+        CHECK_EQ(buf1, buf2);
+    }
+}
+
+TEST_CASE("ring_buffer::types::nested") {
+    SUBCASE("ring_buffer of vectors") {
+        ring_buffer<std::vector<int>, 3> buf;
+        buf.push_back({1, 2, 3});
+        buf.push_back({4, 5});
+        buf.push_back({6});
+
+        CHECK_EQ(buf[0].size(), 3);
+        CHECK_EQ(buf[1].size(), 2);
+        CHECK_EQ(buf[2].size(), 1);
+
+        buf.push_back({7, 8, 9, 10});  // overwrites first
+        CHECK_EQ(buf[0].size(), 2);
+        CHECK_EQ(buf[2].size(), 4);
     }
 }
 

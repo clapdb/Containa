@@ -17,7 +17,7 @@
 #pragma once
 #include <algorithm>
 
-#include "vectra.hpp"
+#include "container_base.hpp"
 
 namespace stdb::container {
 
@@ -100,6 +100,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
     }
 
@@ -117,6 +118,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
         std::free(old_start);
     }
@@ -141,6 +143,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
         std::free(old_start);
     }
@@ -155,46 +158,61 @@ class small_vectra
     }
 
     // Reallocate and emplace an element at the end
+    // Order: allocate -> construct new element -> relocate old elements -> deallocate
+    // This order is cache-friendly (writes to new buffer are sequential)
     template <typename... Args>
     void realloc_and_emplace_back(size_type new_cap, Args&&... args) {
-        Assert(new_cap > size(), "new_cap should be larger than current size");
-
         T* old_start = _start;
         T* old_finish = _finish;
-        size_type old_size = size();
+        size_type old_size = static_cast<size_type>(old_finish - old_start);
         bool was_inline = is_inline();
 
-        allocate_heap(new_cap);
-        _finish = _start + old_size;
-        new (_finish++) T(std::forward<Args>(args)...);
-
-        if (old_size > 0) {
-            (void)move_range_without_overlap(_start, old_start, old_finish);
+        // Allocate new buffer
+        T* new_start = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
+        if (new_start == nullptr) [[unlikely]] {
+            throw std::bad_alloc();
         }
 
+        // Construct new element first (at the end position)
+        T* new_finish = new_start + old_size;
+        new (new_finish) T(std::forward<Args>(args)...);
+        ++new_finish;
+
+        // Relocate old elements to new buffer
+        if (old_size > 0) {
+            if constexpr (IsRelocatable<T>) {
+                std::memcpy(new_start, old_start, old_size * sizeof(T));
+            } else {
+                T* dst = new_start;
+                for (T* src = old_start; src != old_finish; ++src, ++dst) {
+                    new (dst) T(std::move(*src));
+                    if constexpr (NeedsCleanUp<T>) {
+                        src->~T();
+                    }
+                }
+            }
+        }
+
+        // Update pointers
+        _start = new_start;
+        _finish = new_finish;
+        _edge = new_start + new_cap;
+
+        // Free old buffer if on heap
         if (!was_inline) {
             std::free(old_start);
         }
     }
 
-    [[nodiscard]] auto compute_new_capacity(size_type new_size) const -> size_type {
-        Assert(new_size > capacity(), "new_size should be larger than current capacity");
-        if (auto next_cap = compute_next_capacity(); next_cap > new_size) {
-            return next_cap;
-        }
-        return new_size;
-    }
-
-    [[nodiscard]] auto compute_next_capacity() const -> size_type {
+    // Growth factor: 2x (matches libstdc++ std::vector for better performance)
+    [[nodiscard]] auto compute_next_capacity() const noexcept -> size_type {
         auto cap = capacity();
-        if (cap < 4096 * 32 / sizeof(T) && cap >= N) [[likely]] {
-            return (cap * 3 + 1) / 2;
+        // Use 2x growth for better amortized performance
+        // For inline->heap transition, at least 2*N
+        if (cap < N) {
+            return N * 2;
         }
-        if (cap >= 4096 * 32 / sizeof(T)) [[likely]] {
-            return cap * 2;
-        }
-        // Initial expansion from inline: at least double the inline capacity
-        return std::max(N * 2, size_type(1));
+        return cap * 2;
     }
 
    public:
@@ -266,6 +284,7 @@ class small_vectra
             size_type other_size = other.size();
             if (other_size > 0) {
                 (void)move_range_without_overlap(_start, other._start, other._finish);
+                destroy_range(other._start, other._finish);
                 _finish = _start + other_size;
             }
             other._finish = other._start;
@@ -329,6 +348,7 @@ class small_vectra
             size_type other_size = other.size();
             if (other_size > 0) {
                 (void)move_range_without_overlap(_start, other._start, other._finish);
+                destroy_range(other._start, other._finish);
             }
             _finish = _start + other_size;
             other._finish = other._start;
@@ -582,42 +602,52 @@ class small_vectra
     }
 
     // Modifiers
+    // Optimization: match libstdc++ style - direct member access without local variables
+    // The [[gnu::noinline, gnu::cold]] on slow path helps compiler optimize hot path
     template <Safety safety = Safety::Safe>
     void push_back(const value_type& value) {
         if constexpr (safety == Safety::Safe) {
-            if (_finish == _edge) [[unlikely]] {
+            if (this->_finish != this->_edge) [[likely]] {
+                copy_cref(this->_finish, value);
+                ++this->_finish;
+            } else {
                 realloc_and_emplace_back(compute_next_capacity(), value);
-                return;
             }
         } else {
             Assert(_finish != _edge, "push_back on full container");
             VECTRA_ASSUME(_finish < _edge);
+            copy_cref(this->_finish, value);
+            ++this->_finish;
         }
-        copy_cref(_finish, value);
-        ++_finish;
     }
 
     template <Safety safety = Safety::Safe>
     void push_back(value_type&& value) {
         if constexpr (safety == Safety::Safe) {
-            if (_finish == _edge) [[unlikely]] {
+            if (this->_finish != this->_edge) [[likely]] {
+                copy_value(this->_finish, std::move(value));
+                ++this->_finish;
+            } else {
                 realloc_and_emplace_back(compute_next_capacity(), std::move(value));
-                return;
             }
         } else {
             Assert(_finish != _edge, "push_back on full container");
             VECTRA_ASSUME(_finish < _edge);
+            copy_value(this->_finish, std::move(value));
+            ++this->_finish;
         }
-        copy_value(_finish, std::move(value));
-        ++_finish;
     }
 
     template <Safety safety = Safety::Safe, typename... Args>
     auto emplace_back(Args&&... args) -> reference {
         if constexpr (safety == Safety::Safe) {
-            if (_finish == _edge) [[unlikely]] {
+            if (this->_finish != this->_edge) [[likely]] {
+                new (this->_finish) T(std::forward<Args>(args)...);
+                ++this->_finish;
+                return *(this->_finish - 1);
+            } else {
                 realloc_and_emplace_back(compute_next_capacity(), std::forward<Args>(args)...);
-                return *(_finish - 1);
+                return *(this->_finish - 1);
             }
         } else {
             Assert(_finish != _edge, "emplace_back on full container");
