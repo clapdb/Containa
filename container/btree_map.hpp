@@ -35,8 +35,6 @@
 #define BTREE_HAS_PMR 1
 #endif
 
-#include "vectra.hpp"
-
 #define BTREE_DEBUG 0
 
 // Portable assume macro for compiler optimization hints
