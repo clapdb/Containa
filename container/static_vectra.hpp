@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-#include "vectra.hpp"
+#include "container_base.hpp"
 
 namespace stdb::container {
 
@@ -132,6 +132,7 @@ class static_vectra
     static_vectra(static_vectra&& other) noexcept : _size(0) {
         if (other._size > 0) {
             (void)move_range_without_overlap(data_ptr(), other.data_ptr(), other.data_ptr() + other._size);
+            destroy_range(other.data_ptr(), other.data_ptr() + other._size);
             _size = other._size;
             other._size = 0;
         }
@@ -158,6 +159,7 @@ class static_vectra
         destroy_range(data_ptr(), data_ptr() + _size);
         if (other._size > 0) {
             (void)move_range_without_overlap(data_ptr(), other.data_ptr(), other.data_ptr() + other._size);
+            destroy_range(other.data_ptr(), other.data_ptr() + other._size);
         }
         _size = other._size;
         other._size = 0;

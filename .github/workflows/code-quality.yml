@@ -35,7 +35,7 @@ jobs:
     - name: Run clang-tidy on core library
       run: |
         cd build.analysis
-        clang-tidy ../container/vectra.hpp \
+        clang-tidy ../container/btree_map.hpp \
           -p . \
           --checks='-*,readability-*,performance-*,modernize-*,bugprone-*' \
           --warnings-as-errors=false
@@ -43,7 +43,7 @@ jobs:
     - name: Run clang-tidy on tests
       run: |
         cd build.analysis
-        clang-tidy ../tests/vectra_test.cc \
+        clang-tidy ../tests/btree_map_test.cc \
           -p . \
           --checks='-*,readability-*,performance-*,modernize-*,bugprone-*' \
           --warnings-as-errors=false

@@ -17,7 +17,7 @@
 #pragma once
 #include <algorithm>
 
-#include "vectra.hpp"
+#include "container_base.hpp"
 
 namespace stdb::container {
 
@@ -100,6 +100,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
     }
 
@@ -117,6 +118,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
         std::free(old_start);
     }
@@ -141,6 +143,7 @@ class small_vectra
 
         if (old_size > 0) {
             (void)move_range_without_overlap(_start, old_start, old_finish);
+            destroy_range(old_start, old_finish);
         }
         std::free(old_start);
     }
@@ -281,6 +284,7 @@ class small_vectra
             size_type other_size = other.size();
             if (other_size > 0) {
                 (void)move_range_without_overlap(_start, other._start, other._finish);
+                destroy_range(other._start, other._finish);
                 _finish = _start + other_size;
             }
             other._finish = other._start;
@@ -344,6 +348,7 @@ class small_vectra
             size_type other_size = other.size();
             if (other_size > 0) {
                 (void)move_range_without_overlap(_start, other._start, other._finish);
+                destroy_range(other._start, other._finish);
             }
             _finish = _start + other_size;
             other._finish = other._start;
