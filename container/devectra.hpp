@@ -16,6 +16,7 @@
 
 #pragma once
 #include <algorithm>
+#include <stdexcept>
 
 #include "container_base.hpp"
 
