@@ -24,6 +24,20 @@ add_bench_target(boolean_vector_bench boolean_vector_bench.cc)
 # Container benchmarks (small_vectra, devectra, ring_buffer)
 add_bench_target(container_bench container_bench.cc)
 
+# Dense map benchmarks
+add_executable(dense_map_bench dense_map_bench.cc)
+target_compile_definitions(dense_map_bench PRIVATE NDEBUG)
+target_link_libraries(dense_map_bench nanobench)
+if(ENABLE_ABSL_BENCH)
+    target_compile_definitions(dense_map_bench PRIVATE ENABLE_ABSL)
+    target_link_libraries(dense_map_bench absl::flat_hash_map absl::hash)
+endif()
+
+# Comprehensive dense_map benchmark (vs ankerl vs tsl)
+add_executable(dense_map_comprehensive_bench dense_map_comprehensive_bench.cc)
+target_compile_definitions(dense_map_comprehensive_bench PRIVATE NDEBUG)
+target_link_libraries(dense_map_comprehensive_bench nanobench)
+
 # Concurrent benchmark (skiplist vs btree)
 add_executable(skiplist_concurrent_bench skiplist_concurrent_bench.cc)
 target_compile_definitions(skiplist_concurrent_bench PRIVATE NDEBUG)
