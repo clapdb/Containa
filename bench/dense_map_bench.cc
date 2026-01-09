@@ -75,9 +75,23 @@ void run_int_benchmark(const std::string& label) {
 
     std::cout << "\n=== Integer Keys: " << label << " (" << N << " elements) ===\n";
 
+    // Type aliases for different policies
+    using dense_map_default = dense_map<int64_t, int64_t>;
+    using dense_map_find_opt = dense_map<int64_t, int64_t, dense_hash<int64_t>,
+                                          std::equal_to<int64_t>,
+                                          std::allocator<std::pair<int64_t, int64_t>>,
+                                          find_optimized_policy>;
+
     // ========== INSERT BENCHMARK ==========
     bench.run("dense_map insert", [&] {
-        dense_map<int64_t, int64_t> map;
+        dense_map_default map;
+        map.reserve(N);
+        for (auto k : keys) map[k] = k;
+        ankerl::nanobench::doNotOptimizeAway(map);
+    });
+
+    bench.run("dense_map (find_opt) insert", [&] {
+        dense_map_find_opt map;
         map.reserve(N);
         for (auto k : keys) map[k] = k;
         ankerl::nanobench::doNotOptimizeAway(map);
@@ -179,9 +193,13 @@ void run_int_benchmark(const std::string& label) {
     });
 
     // ========== PREPARE MAPS FOR LOOKUP ==========
-    dense_map<int64_t, int64_t> dense;
+    dense_map_default dense;
     dense.reserve(N);
     for (auto k : keys) dense[k] = k;
+
+    dense_map_find_opt dense_find_opt;
+    dense_find_opt.reserve(N);
+    for (auto k : keys) dense_find_opt[k] = k;
 
     flat_map<int64_t, int64_t> flat;
     flat.reserve(N);
@@ -215,6 +233,15 @@ void run_int_benchmark(const std::string& label) {
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
+    bench.run("dense_map (find_opt) find (50% hit)", [&] {
+        int64_t sum = 0;
+        for (auto k : lookup_keys) {
+            auto it = dense_find_opt.find(k);
+            if (it != dense_find_opt.end()) sum += it->second;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
     bench.run("ankerl find (50% hit)", [&] {
         int64_t sum = 0;
         for (auto k : lookup_keys) {
@@ -238,6 +265,15 @@ void run_int_benchmark(const std::string& label) {
         int64_t sum = 0;
         for (auto k : keys) {  // Use keys that all exist
             auto it = dense.find(k);
+            sum += it->second;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    bench.run("dense_map (find_opt) find (100% hit)", [&] {
+        int64_t sum = 0;
+        for (auto k : keys) {
+            auto it = dense_find_opt.find(k);
             sum += it->second;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);
@@ -303,6 +339,14 @@ void run_int_benchmark(const std::string& label) {
     bench.run("dense_map iterate", [&] {
         int64_t sum = 0;
         for (const auto& [k, v] : dense) {
+            sum += v;
+        }
+        ankerl::nanobench::doNotOptimizeAway(sum);
+    });
+
+    bench.run("dense_map (find_opt) iterate", [&] {
+        int64_t sum = 0;
+        for (const auto& [k, v] : dense_find_opt) {
             sum += v;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);

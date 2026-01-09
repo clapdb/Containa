@@ -483,19 +483,47 @@ struct default_memory_policy {
 };
 
 // Force inline storage (Swiss Table style)
+// Best for: find-heavy workloads, small value types
+// Trade-off: Fast find (1 cache line), but slow iteration (skip empty slots)
 struct force_inline_policy {
     using storage_tag = inline_storage_tag;
 };
 
 // Force indirect storage (Swiss Table + indirect values)
+// Best for: string keys, large value types
+// Trade-off: SIMD matching + pointer stability, but 2 cache lines for find
 struct force_indirect_policy {
     using storage_tag = indirect_storage_tag;
 };
 
 // Force flat storage (ankerl/Robin Hood style - best for small keys)
+// Best for: balanced workloads with iteration
+// Trade-off: Fast iteration + insert, find needs 2 memory accesses
 struct force_flat_policy {
     using storage_tag = flat_storage_tag;
 };
+
+// Alias: Swiss Table storage (SIMD-accelerated)
+// Best for:
+// - Large maps (1M+ elements) with high miss rates
+// - Workloads where most finds() return end() (key not found)
+// Trade-offs:
+// - Slower iteration (must skip empty slots)
+// - Slower for 100% hit workloads (Robin Hood is faster)
+// - No pointer/iterator stability across rehash
+using swiss_table_policy = force_inline_policy;
+
+// Alias: Robin Hood flat storage (optimized for most use cases)
+// Best for:
+// - Fast iteration over all elements
+// - Balanced insert/find/iterate performance
+// - High hit rate workloads
+// - Pointer stability for values (not invalidated by insert)
+using robin_hood_policy = force_flat_policy;
+
+// Legacy aliases for compatibility
+using find_optimized_policy = swiss_table_policy;
+using iteration_optimized_policy = robin_hood_policy;
 
 // ============================================================================
 // Bucket for flat storage (ankerl-style Robin Hood)
