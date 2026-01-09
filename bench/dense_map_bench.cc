@@ -76,11 +76,11 @@ void run_int_benchmark(const std::string& label) {
     std::cout << "\n=== Integer Keys: " << label << " (" << N << " elements) ===\n";
 
     // Type aliases for different policies
-    using dense_map_default = dense_map<int64_t, int64_t>;
-    using dense_map_find_opt = dense_map<int64_t, int64_t, dense_hash<int64_t>,
-                                          std::equal_to<int64_t>,
-                                          std::allocator<std::pair<int64_t, int64_t>>,
-                                          find_optimized_policy>;
+    using dense_map_default = dense_map<int64_t, int64_t>;  // flat storage (like ankerl)
+    using dense_map_inline = dense_map<int64_t, int64_t, dense_hash<int64_t>,
+                                        std::equal_to<int64_t>,
+                                        std::allocator<std::pair<int64_t, int64_t>>,
+                                        inline_storage_policy>;  // inline storage (like tsl)
 
     // ========== INSERT BENCHMARK ==========
     bench.run("dense_map insert", [&] {
@@ -90,8 +90,8 @@ void run_int_benchmark(const std::string& label) {
         ankerl::nanobench::doNotOptimizeAway(map);
     });
 
-    bench.run("dense_map (find_opt) insert", [&] {
-        dense_map_find_opt map;
+    bench.run("dense_map (inline) insert", [&] {
+        dense_map_inline map;
         map.reserve(N);
         for (auto k : keys) map[k] = k;
         ankerl::nanobench::doNotOptimizeAway(map);
@@ -197,9 +197,9 @@ void run_int_benchmark(const std::string& label) {
     dense.reserve(N);
     for (auto k : keys) dense[k] = k;
 
-    dense_map_find_opt dense_find_opt;
-    dense_find_opt.reserve(N);
-    for (auto k : keys) dense_find_opt[k] = k;
+    dense_map_inline dense_inline;
+    dense_inline.reserve(N);
+    for (auto k : keys) dense_inline[k] = k;
 
     flat_map<int64_t, int64_t> flat;
     flat.reserve(N);
@@ -233,11 +233,11 @@ void run_int_benchmark(const std::string& label) {
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
-    bench.run("dense_map (find_opt) find (50% hit)", [&] {
+    bench.run("dense_map (inline) find (50% hit)", [&] {
         int64_t sum = 0;
         for (auto k : lookup_keys) {
-            auto it = dense_find_opt.find(k);
-            if (it != dense_find_opt.end()) sum += it->second;
+            auto it = dense_inline.find(k);
+            if (it != dense_inline.end()) sum += it->second;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
@@ -270,10 +270,10 @@ void run_int_benchmark(const std::string& label) {
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
-    bench.run("dense_map (find_opt) find (100% hit)", [&] {
+    bench.run("dense_map (inline) find (100% hit)", [&] {
         int64_t sum = 0;
         for (auto k : keys) {
-            auto it = dense_find_opt.find(k);
+            auto it = dense_inline.find(k);
             sum += it->second;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);
@@ -344,9 +344,9 @@ void run_int_benchmark(const std::string& label) {
         ankerl::nanobench::doNotOptimizeAway(sum);
     });
 
-    bench.run("dense_map (find_opt) iterate", [&] {
+    bench.run("dense_map (inline) iterate", [&] {
         int64_t sum = 0;
-        for (const auto& [k, v] : dense_find_opt) {
+        for (const auto& [k, v] : dense_inline) {
             sum += v;
         }
         ankerl::nanobench::doNotOptimizeAway(sum);

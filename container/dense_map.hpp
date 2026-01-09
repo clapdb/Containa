@@ -503,27 +503,34 @@ struct force_flat_policy {
     using storage_tag = flat_storage_tag;
 };
 
-// Alias: Swiss Table storage (SIMD-accelerated)
+// ============================================================================
+// User-friendly storage policy aliases
+// ============================================================================
+
+// Inline storage: key-value pairs stored directly in hash table slots
+// Similar to: tsl::robin_map, absl::flat_hash_map
 // Best for:
 // - Large maps (1M+ elements) with high miss rates
 // - Workloads where most finds() return end() (key not found)
 // Trade-offs:
 // - Slower iteration (must skip empty slots)
-// - Slower for 100% hit workloads (Robin Hood is faster)
 // - No pointer/iterator stability across rehash
-using swiss_table_policy = force_inline_policy;
+// - More memory movement on insert (shift entire KV pairs)
+using inline_storage_policy = force_inline_policy;
 
-// Alias: Robin Hood flat storage (optimized for most use cases)
+// Flat storage: buckets store index, values in separate contiguous array
+// Similar to: ankerl::unordered_dense
 // Best for:
-// - Fast iteration over all elements
+// - Fast iteration over all elements (contiguous memory)
 // - Balanced insert/find/iterate performance
 // - High hit rate workloads
-// - Pointer stability for values (not invalidated by insert)
-using robin_hood_policy = force_flat_policy;
+// - Pointer stability for values (not invalidated by non-rehashing insert)
+// - Large value types (only 8-byte buckets are shifted)
+using flat_storage_policy = force_flat_policy;
 
-// Legacy aliases for compatibility
-using find_optimized_policy = swiss_table_policy;
-using iteration_optimized_policy = robin_hood_policy;
+// Legacy/convenience aliases
+using swiss_table_policy = inline_storage_policy;
+using robin_hood_policy = flat_storage_policy;  // Note: different from tsl::robin_map!
 
 // ============================================================================
 // Bucket for flat storage (ankerl-style Robin Hood)
