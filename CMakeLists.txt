@@ -6,15 +6,31 @@ project(Containa
     LANGUAGES CXX
 )
 
-# Set C++ standard
-set(CMAKE_CXX_STANDARD 20)
+# Set C++ standard (C++23 for std::flat_map)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Default to Clang compiler
+if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED CMAKE_CXX_COMPILER)
+    find_program(CLANG_C_COMPILER clang)
+    find_program(CLANG_CXX_COMPILER clang++)
+    if(CLANG_C_COMPILER AND CLANG_CXX_COMPILER)
+        set(CMAKE_C_COMPILER ${CLANG_C_COMPILER} CACHE STRING "C compiler" FORCE)
+        set(CMAKE_CXX_COMPILER ${CLANG_CXX_COMPILER} CACHE STRING "C++ compiler" FORCE)
+    endif()
+endif()
 
 # Compiler flags
 # Use -march=native to enable AVX2/AVX512 SIMD optimizations
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+
+# Use libc++ with Clang for std::flat_map support
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-stdlib=libc++)
+    add_link_options(-stdlib=libc++)
+endif()
 
 # Default build type
 if(NOT CMAKE_BUILD_TYPE)
