@@ -1158,6 +1158,7 @@ class btree_map
     }
 
     // NEON lower_bound for int16_t keys (signed) - processes 8 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_s16(const T* slots, size_type count, int16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int16_t))
@@ -1172,13 +1173,15 @@ class btree_map
             int16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
                                  keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
                                  keys[(i + 6) * stride], keys[(i + 7) * stride]};
-            uint16x8_t lt = vcltq_s16(key_vec, target_vec);
+            uint16x8_t ge = vcgeq_s16(key_vec, target_vec);  // >= comparison directly
 
-            // Use vminvq_u16 to detect if any lane is 0 (key >= target)
-            if (vminvq_u16(lt) == 0) {
-                for (size_type j = 0; j < 8; ++j) {
-                    if (keys[(i + j) * stride] >= target) return i + j;
-                }
+            // Narrow to 8-bit and extract as 64-bit value for bitmask
+            uint8x8_t narrow = vmovn_u16(ge);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrow), 0);
+
+            if (mask != 0) {
+                // Find first set 8-bit lane
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 8);
             }
             i += 8;
         }
@@ -1190,6 +1193,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint16_t keys (unsigned) - processes 8 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_u16(const T* slots, size_type count, uint16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint16_t))
@@ -1204,13 +1208,15 @@ class btree_map
             uint16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
                                   keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
                                   keys[(i + 6) * stride], keys[(i + 7) * stride]};
-            uint16x8_t lt = vcltq_u16(key_vec, target_vec);
+            uint16x8_t ge = vcgeq_u16(key_vec, target_vec);  // >= comparison directly
 
-            // Use vminvq_u16 to detect if any lane is 0 (key >= target)
-            if (vminvq_u16(lt) == 0) {
-                for (size_type j = 0; j < 8; ++j) {
-                    if (keys[(i + j) * stride] >= target) return i + j;
-                }
+            // Narrow to 8-bit and extract as 64-bit value for bitmask
+            uint8x8_t narrow = vmovn_u16(ge);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrow), 0);
+
+            if (mask != 0) {
+                // Find first set 8-bit lane
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 8);
             }
             i += 8;
         }
@@ -1222,6 +1228,7 @@ class btree_map
     }
 
     // NEON lower_bound for int8_t keys (signed) - processes 16 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_s8(const T* slots, size_type count, int8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int8_t))
@@ -1238,13 +1245,16 @@ class btree_map
               keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
               keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
               keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
-            uint8x16_t lt = vcltq_s8(key_vec, target_vec);
+            uint8x16_t ge = vcgeq_s8(key_vec, target_vec);  // >= comparison directly
 
-            // Use vminvq_u8 to detect if any lane is 0 (key >= target)
-            if (vminvq_u8(lt) == 0) {
-                for (size_type j = 0; j < 16; ++j) {
-                    if (keys[(i + j) * stride] >= target) return i + j;
-                }
+            // Extract low and high 64-bit halves as bitmask
+            uint64_t mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 0);
+            if (mask_lo != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask_lo) / 8);
+            }
+            uint64_t mask_hi = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 1);
+            if (mask_hi != 0) {
+                return i + 8 + static_cast<size_type>(__builtin_ctzll(mask_hi) / 8);
             }
             i += 16;
         }
@@ -1256,6 +1266,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint8_t keys (unsigned) - processes 16 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_u8(const T* slots, size_type count, uint8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint8_t))
@@ -1272,13 +1283,16 @@ class btree_map
               keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
               keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
               keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
-            uint8x16_t lt = vcltq_u8(key_vec, target_vec);
+            uint8x16_t ge = vcgeq_u8(key_vec, target_vec);  // >= comparison directly
 
-            // Use vminvq_u8 to detect if any lane is 0 (key >= target)
-            if (vminvq_u8(lt) == 0) {
-                for (size_type j = 0; j < 16; ++j) {
-                    if (keys[(i + j) * stride] >= target) return i + j;
-                }
+            // Extract low and high 64-bit halves as bitmask
+            uint64_t mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 0);
+            if (mask_lo != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask_lo) / 8);
+            }
+            uint64_t mask_hi = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 1);
+            if (mask_hi != 0) {
+                return i + 8 + static_cast<size_type>(__builtin_ctzll(mask_hi) / 8);
             }
             i += 16;
         }
@@ -1290,6 +1304,7 @@ class btree_map
     }
 
     // NEON lower_bound for float keys - processes 4 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(float))
@@ -1303,13 +1318,15 @@ class btree_map
         while (i + 4 <= count) {
             float32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
                                    keys[(i + 3) * stride]};
-            uint32x4_t lt = vcltq_f32(key_vec, target_vec);
+            uint32x4_t ge = vcgeq_f32(key_vec, target_vec);  // >= comparison directly
 
-            // Use vminvq_u32 to detect if any lane is 0 (key >= target)
-            if (vminvq_u32(lt) == 0) {
-                for (size_type j = 0; j < 4; ++j) {
-                    if (keys[(i + j) * stride] >= target) return i + j;
-                }
+            // Narrow to 16-bit and extract as 64-bit value for bitmask
+            uint16x4_t narrow = vmovn_u32(ge);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                // Find first set 16-bit lane
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
             }
             i += 4;
         }
@@ -1321,6 +1338,7 @@ class btree_map
     }
 
     // NEON lower_bound for double keys - processes 2 keys at a time
+    // Optimized: use bitmask to find first match without inner loop
     template <typename T>
     static auto neon_lower_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(double))
@@ -1333,13 +1351,15 @@ class btree_map
 
         while (i + 2 <= count) {
             float64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
-            uint64x2_t lt = vcltq_f64(key_vec, target_vec);
+            uint64x2_t ge = vcgeq_f64(key_vec, target_vec);  // >= comparison directly
 
-            // Check if any key >= target (any lane is 0)
-            // AND lanes: result == 0 means at least one lane was 0
-            if ((vgetq_lane_u64(lt, 0) & vgetq_lane_u64(lt, 1)) == 0) {
-                if (keys[i * stride] >= target) return i;
-                if (keys[(i + 1) * stride] >= target) return i + 1;
+            // Narrow to 32-bit and extract for bitmask
+            uint32x2_t narrow = vmovn_u64(ge);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                // Find first set 32-bit lane
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
             }
             i += 2;
         }
