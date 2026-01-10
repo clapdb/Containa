@@ -1435,7 +1435,7 @@ class btree_map
     }
 
     // NEON lower_bound for float keys - processes 4 keys at a time
-    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
+    // Optimized: use direct vld1q load for contiguous keys, vld2q for stride==2, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(float))
@@ -1450,6 +1450,10 @@ class btree_map
             float32x4_t key_vec;
             if constexpr (stride == 1) {
                 key_vec = vld1q_f32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                // Use vld2 for efficient strided load (e.g., btree_map<float, float>)
+                float32x4x2_t interleaved = vld2q_f32(&keys[i * 2]);
+                key_vec = interleaved.val[0];  // Keys are at even indices
             } else {
                 key_vec = float32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
                                       keys[(i + 3) * stride]};
