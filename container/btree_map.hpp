@@ -1343,7 +1343,7 @@ class btree_map
     }
 
     // NEON lower_bound for int8_t keys (signed) - processes 16 keys at a time
-    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
+    // Optimized: use direct vld1q load for contiguous keys, vld2q for stride==2, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s8(const T* slots, size_type count, int8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int8_t))
@@ -1358,6 +1358,10 @@ class btree_map
             int8x16_t key_vec;
             if constexpr (stride == 1) {
                 key_vec = vld1q_s8(&keys[i]);
+            } else if constexpr (stride == 2) {
+                // Use vld2 for efficient strided load (e.g., btree_map<int8_t, int8_t>)
+                int8x16x2_t interleaved = vld2q_s8(&keys[i * 2]);
+                key_vec = interleaved.val[0];  // Keys are at even indices
             } else {
                 key_vec = int8x16_t{
                   keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
@@ -1385,7 +1389,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint8_t keys (unsigned) - processes 16 keys at a time
-    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
+    // Optimized: use direct vld1q load for contiguous keys, vld2q for stride==2, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u8(const T* slots, size_type count, uint8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint8_t))
@@ -1400,6 +1404,10 @@ class btree_map
             uint8x16_t key_vec;
             if constexpr (stride == 1) {
                 key_vec = vld1q_u8(&keys[i]);
+            } else if constexpr (stride == 2) {
+                // Use vld2 for efficient strided load (e.g., btree_map<uint8_t, uint8_t>)
+                uint8x16x2_t interleaved = vld2q_u8(&keys[i * 2]);
+                key_vec = interleaved.val[0];  // Keys are at even indices
             } else {
                 key_vec = uint8x16_t{
                   keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
