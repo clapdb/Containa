@@ -420,6 +420,7 @@ class btree_map
     // SIMD search helpers
 #ifdef BTREE_HAS_SSE2
     // SSE2 lower_bound for int32_t keys (signed)
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
@@ -431,8 +432,13 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m128i key_vec =
-              _mm_set_epi32(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                        keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
             int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
 
@@ -449,6 +455,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for uint32_t keys (unsigned)
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint32_t))
@@ -462,9 +469,15 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m128i key_vec =
-              _mm_set_epi32(static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
-                            static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(static_cast<int32_t>(keys[(i + 3) * stride]),
+                                        static_cast<int32_t>(keys[(i + 2) * stride]),
+                                        static_cast<int32_t>(keys[(i + 1) * stride]),
+                                        static_cast<int32_t>(keys[i * stride]));
+            }
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi32(key_vec, target_vec);
             int mask = _mm_movemask_ps(_mm_castsi128_ps(lt));
@@ -482,6 +495,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for int16_t keys (signed) - processes 8 keys at a time
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_s16(const T* slots, size_type count, int16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int16_t))
@@ -493,13 +507,17 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m128i key_vec = _mm_set_epi16(keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride],
-                                            keys[(i + 4) * stride], keys[(i + 3) * stride], keys[(i + 2) * stride],
-                                            keys[(i + 1) * stride], keys[i * stride]);
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi16(keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride],
+                                        keys[(i + 4) * stride], keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                        keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
 
-            // Each 16-bit element produces 2 bits in mask (both 1 if <, both 0 if >=)
             if (mask != 0xFFFF) {
                 return i + (__builtin_ctz(~mask) >> 1);
             }
@@ -513,6 +531,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for uint16_t keys (unsigned) - processes 8 keys at a time
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_u16(const T* slots, size_type count, uint16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint16_t))
@@ -526,11 +545,19 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m128i key_vec =
-              _mm_set_epi16(static_cast<int16_t>(keys[(i + 7) * stride]), static_cast<int16_t>(keys[(i + 6) * stride]),
-                            static_cast<int16_t>(keys[(i + 5) * stride]), static_cast<int16_t>(keys[(i + 4) * stride]),
-                            static_cast<int16_t>(keys[(i + 3) * stride]), static_cast<int16_t>(keys[(i + 2) * stride]),
-                            static_cast<int16_t>(keys[(i + 1) * stride]), static_cast<int16_t>(keys[i * stride]));
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi16(static_cast<int16_t>(keys[(i + 7) * stride]),
+                                        static_cast<int16_t>(keys[(i + 6) * stride]),
+                                        static_cast<int16_t>(keys[(i + 5) * stride]),
+                                        static_cast<int16_t>(keys[(i + 4) * stride]),
+                                        static_cast<int16_t>(keys[(i + 3) * stride]),
+                                        static_cast<int16_t>(keys[(i + 2) * stride]),
+                                        static_cast<int16_t>(keys[(i + 1) * stride]),
+                                        static_cast<int16_t>(keys[i * stride]));
+            }
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi16(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
@@ -548,6 +575,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for int8_t keys (signed) - processes 16 keys at a time
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_s8(const T* slots, size_type count, int8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int8_t))
@@ -559,11 +587,16 @@ class btree_map
         size_type i = 0;
 
         while (i + 16 <= count) {
-            __m128i key_vec = _mm_set_epi8(
-              keys[(i + 15) * stride], keys[(i + 14) * stride], keys[(i + 13) * stride], keys[(i + 12) * stride],
-              keys[(i + 11) * stride], keys[(i + 10) * stride], keys[(i + 9) * stride], keys[(i + 8) * stride],
-              keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride], keys[(i + 4) * stride],
-              keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi8(
+                  keys[(i + 15) * stride], keys[(i + 14) * stride], keys[(i + 13) * stride], keys[(i + 12) * stride],
+                  keys[(i + 11) * stride], keys[(i + 10) * stride], keys[(i + 9) * stride], keys[(i + 8) * stride],
+                  keys[(i + 7) * stride], keys[(i + 6) * stride], keys[(i + 5) * stride], keys[(i + 4) * stride],
+                  keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m128i lt = _mm_cmplt_epi8(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
 
@@ -580,6 +613,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for uint8_t keys (unsigned) - processes 16 keys at a time
+    // Optimized: use direct _mm_loadu_si128 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_u8(const T* slots, size_type count, uint8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint8_t))
@@ -593,15 +627,20 @@ class btree_map
         size_type i = 0;
 
         while (i + 16 <= count) {
-            __m128i key_vec =
-              _mm_set_epi8(static_cast<int8_t>(keys[(i + 15) * stride]), static_cast<int8_t>(keys[(i + 14) * stride]),
-                           static_cast<int8_t>(keys[(i + 13) * stride]), static_cast<int8_t>(keys[(i + 12) * stride]),
-                           static_cast<int8_t>(keys[(i + 11) * stride]), static_cast<int8_t>(keys[(i + 10) * stride]),
-                           static_cast<int8_t>(keys[(i + 9) * stride]), static_cast<int8_t>(keys[(i + 8) * stride]),
-                           static_cast<int8_t>(keys[(i + 7) * stride]), static_cast<int8_t>(keys[(i + 6) * stride]),
-                           static_cast<int8_t>(keys[(i + 5) * stride]), static_cast<int8_t>(keys[(i + 4) * stride]),
-                           static_cast<int8_t>(keys[(i + 3) * stride]), static_cast<int8_t>(keys[(i + 2) * stride]),
-                           static_cast<int8_t>(keys[(i + 1) * stride]), static_cast<int8_t>(keys[i * stride]));
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi8(
+                  static_cast<int8_t>(keys[(i + 15) * stride]), static_cast<int8_t>(keys[(i + 14) * stride]),
+                  static_cast<int8_t>(keys[(i + 13) * stride]), static_cast<int8_t>(keys[(i + 12) * stride]),
+                  static_cast<int8_t>(keys[(i + 11) * stride]), static_cast<int8_t>(keys[(i + 10) * stride]),
+                  static_cast<int8_t>(keys[(i + 9) * stride]), static_cast<int8_t>(keys[(i + 8) * stride]),
+                  static_cast<int8_t>(keys[(i + 7) * stride]), static_cast<int8_t>(keys[(i + 6) * stride]),
+                  static_cast<int8_t>(keys[(i + 5) * stride]), static_cast<int8_t>(keys[(i + 4) * stride]),
+                  static_cast<int8_t>(keys[(i + 3) * stride]), static_cast<int8_t>(keys[(i + 2) * stride]),
+                  static_cast<int8_t>(keys[(i + 1) * stride]), static_cast<int8_t>(keys[i * stride]));
+            }
             key_vec = _mm_xor_si128(key_vec, sign_bit);
             __m128i lt = _mm_cmplt_epi8(key_vec, target_vec);
             int mask = _mm_movemask_epi8(lt);
@@ -619,6 +658,7 @@ class btree_map
     }
 
     // SSE lower_bound for float keys - processes 4 keys at a time
+    // Optimized: use direct _mm_loadu_ps load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(float))
@@ -630,8 +670,13 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m128 key_vec =
-              _mm_set_ps(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
+            __m128 key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_ps(&keys[i]);
+            } else {
+                key_vec = _mm_set_ps(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m128 lt = _mm_cmplt_ps(key_vec, target_vec);
             int mask = _mm_movemask_ps(lt);
 
@@ -648,6 +693,7 @@ class btree_map
     }
 
     // SSE2 lower_bound for double keys - processes 2 keys at a time
+    // Optimized: use direct _mm_loadu_pd load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(double))
@@ -659,7 +705,12 @@ class btree_map
         size_type i = 0;
 
         while (i + 2 <= count) {
-            __m128d key_vec = _mm_set_pd(keys[(i + 1) * stride], keys[i * stride]);
+            __m128d key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_pd(&keys[i]);
+            } else {
+                key_vec = _mm_set_pd(keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m128d lt = _mm_cmplt_pd(key_vec, target_vec);
             int mask = _mm_movemask_pd(lt);
 
@@ -676,6 +727,7 @@ class btree_map
 
 #ifdef BTREE_HAS_AVX2
     // AVX2 lower_bound for int64_t keys (signed)
+    // Optimized: use direct _mm256_loadu_si256 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int64_t))
@@ -687,8 +739,13 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m256i key_vec = _mm256_set_epi64x(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride],
-                                                keys[i * stride]);
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                            keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
             int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
 
@@ -705,6 +762,7 @@ class btree_map
     }
 
     // AVX2 lower_bound for uint64_t keys (unsigned)
+    // Optimized: use direct _mm256_loadu_si256 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint64_t))
@@ -718,9 +776,15 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m256i key_vec = _mm256_set_epi64x(
-              static_cast<int64_t>(keys[(i + 3) * stride]), static_cast<int64_t>(keys[(i + 2) * stride]),
-              static_cast<int64_t>(keys[(i + 1) * stride]), static_cast<int64_t>(keys[i * stride]));
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(static_cast<int64_t>(keys[(i + 3) * stride]),
+                                            static_cast<int64_t>(keys[(i + 2) * stride]),
+                                            static_cast<int64_t>(keys[(i + 1) * stride]),
+                                            static_cast<int64_t>(keys[i * stride]));
+            }
             key_vec = _mm256_xor_si256(key_vec, sign_bit);
             __m256i lt = _mm256_cmpgt_epi64(target_vec, key_vec);
             int mask = _mm256_movemask_pd(_mm256_castsi256_pd(lt));
@@ -738,6 +802,7 @@ class btree_map
     }
 
     // AVX lower_bound for double keys - processes 4 keys at a time
+    // Optimized: use direct _mm256_loadu_pd load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_double_avx(const T* slots, size_type count, double target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(double))
@@ -749,8 +814,13 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            __m256d key_vec =
-              _mm256_set_pd(keys[(i + 3) * stride], keys[(i + 2) * stride], keys[(i + 1) * stride], keys[i * stride]);
+            __m256d key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_pd(&keys[i]);
+            } else {
+                key_vec = _mm256_set_pd(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                        keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m256d lt = _mm256_cmp_pd(key_vec, target_vec, _CMP_LT_OQ);
             int mask = _mm256_movemask_pd(lt);
 
@@ -766,7 +836,8 @@ class btree_map
         return count;
     }
 
-    // AVX2 lower_bound for int32_t - processes 8 keys at a time with manual loads
+    // AVX2 lower_bound for int32_t - processes 8 keys at a time
+    // Optimized: use direct _mm256_loadu_si256 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_s32_avx2(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
@@ -777,13 +848,17 @@ class btree_map
         __m256i target_vec = _mm256_set1_epi32(target);
         size_type i = 0;
 
-        // Process 8 elements at a time
         while (i + 8 <= count) {
-            __m256i key_vec = _mm256_set_epi32(
-                keys[(i + 7) * stride], keys[(i + 6) * stride],
-                keys[(i + 5) * stride], keys[(i + 4) * stride],
-                keys[(i + 3) * stride], keys[(i + 2) * stride],
-                keys[(i + 1) * stride], keys[i * stride]);
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi32(
+                    keys[(i + 7) * stride], keys[(i + 6) * stride],
+                    keys[(i + 5) * stride], keys[(i + 4) * stride],
+                    keys[(i + 3) * stride], keys[(i + 2) * stride],
+                    keys[(i + 1) * stride], keys[i * stride]);
+            }
             __m256i lt = _mm256_cmpgt_epi32(target_vec, key_vec);
             int mask = _mm256_movemask_ps(_mm256_castsi256_ps(lt));
 
@@ -800,7 +875,8 @@ class btree_map
         return count;
     }
 
-    // AVX2 lower_bound for uint32_t - processes 8 keys at a time with manual loads
+    // AVX2 lower_bound for uint32_t - processes 8 keys at a time
+    // Optimized: use direct _mm256_loadu_si256 load for contiguous keys
     template <typename T>
     static auto simd_lower_bound_u32_avx2(const T* slots, size_type count, uint32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint32_t))
@@ -813,11 +889,16 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            __m256i key_vec = _mm256_set_epi32(
-                static_cast<int32_t>(keys[(i + 7) * stride]), static_cast<int32_t>(keys[(i + 6) * stride]),
-                static_cast<int32_t>(keys[(i + 5) * stride]), static_cast<int32_t>(keys[(i + 4) * stride]),
-                static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
-                static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi32(
+                    static_cast<int32_t>(keys[(i + 7) * stride]), static_cast<int32_t>(keys[(i + 6) * stride]),
+                    static_cast<int32_t>(keys[(i + 5) * stride]), static_cast<int32_t>(keys[(i + 4) * stride]),
+                    static_cast<int32_t>(keys[(i + 3) * stride]), static_cast<int32_t>(keys[(i + 2) * stride]),
+                    static_cast<int32_t>(keys[(i + 1) * stride]), static_cast<int32_t>(keys[i * stride]));
+            }
             key_vec = _mm256_xor_si256(key_vec, sign_bit);
             __m256i lt = _mm256_cmpgt_epi32(target_vec, key_vec);
             int mask = _mm256_movemask_ps(_mm256_castsi256_ps(lt));
@@ -1028,7 +1109,7 @@ class btree_map
 
 #ifdef BTREE_HAS_NEON
     // NEON lower_bound for int32_t keys (signed)
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
@@ -1040,16 +1121,19 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            int32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
-                                 keys[(i + 3) * stride]};
-            uint32x4_t ge = vcgeq_s32(key_vec, target_vec);  // >= comparison directly
+            int32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s32(&keys[i]);
+            } else {
+                key_vec = int32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                    keys[(i + 3) * stride]};
+            }
+            uint32x4_t ge = vcgeq_s32(key_vec, target_vec);
 
-            // Narrow to 16-bit and extract as 64-bit value for bitmask
             uint16x4_t narrow = vmovn_u32(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 16-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
             }
             i += 4;
@@ -1062,7 +1146,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint32_t keys (unsigned)
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint32_t))
@@ -1074,16 +1158,19 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            uint32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
-                                  keys[(i + 3) * stride]};
-            uint32x4_t ge = vcgeq_u32(key_vec, target_vec);  // >= comparison directly
+            uint32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u32(&keys[i]);
+            } else {
+                key_vec = uint32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 3) * stride]};
+            }
+            uint32x4_t ge = vcgeq_u32(key_vec, target_vec);
 
-            // Narrow to 16-bit and extract as 64-bit value for bitmask
             uint16x4_t narrow = vmovn_u32(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 16-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
             }
             i += 4;
@@ -1096,7 +1183,7 @@ class btree_map
     }
 
     // NEON lower_bound for int64_t keys (signed)
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int64_t))
@@ -1108,15 +1195,18 @@ class btree_map
         size_type i = 0;
 
         while (i + 2 <= count) {
-            int64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
-            uint64x2_t ge = vcgeq_s64(key_vec, target_vec);  // >= comparison directly
+            int64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s64(&keys[i]);
+            } else {
+                key_vec = int64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t ge = vcgeq_s64(key_vec, target_vec);
 
-            // Narrow to 32-bit and extract for bitmask
             uint32x2_t narrow = vmovn_u64(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 32-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
             }
             i += 2;
@@ -1127,7 +1217,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint64_t keys (unsigned)
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint64_t))
@@ -1139,15 +1229,18 @@ class btree_map
         size_type i = 0;
 
         while (i + 2 <= count) {
-            uint64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
-            uint64x2_t ge = vcgeq_u64(key_vec, target_vec);  // >= comparison directly
+            uint64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u64(&keys[i]);
+            } else {
+                key_vec = uint64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t ge = vcgeq_u64(key_vec, target_vec);
 
-            // Narrow to 32-bit and extract for bitmask
             uint32x2_t narrow = vmovn_u64(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 32-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
             }
             i += 2;
@@ -1158,7 +1251,7 @@ class btree_map
     }
 
     // NEON lower_bound for int16_t keys (signed) - processes 8 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s16(const T* slots, size_type count, int16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int16_t))
@@ -1170,17 +1263,20 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            int16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
-                                 keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
-                                 keys[(i + 6) * stride], keys[(i + 7) * stride]};
-            uint16x8_t ge = vcgeq_s16(key_vec, target_vec);  // >= comparison directly
+            int16x8_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s16(&keys[i]);
+            } else {
+                key_vec = int16x8_t{keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                    keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
+                                    keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            }
+            uint16x8_t ge = vcgeq_s16(key_vec, target_vec);
 
-            // Narrow to 8-bit and extract as 64-bit value for bitmask
             uint8x8_t narrow = vmovn_u16(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 8-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 8);
             }
             i += 8;
@@ -1193,7 +1289,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint16_t keys (unsigned) - processes 8 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u16(const T* slots, size_type count, uint16_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint16_t))
@@ -1205,17 +1301,20 @@ class btree_map
         size_type i = 0;
 
         while (i + 8 <= count) {
-            uint16x8_t key_vec = {keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
-                                  keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
-                                  keys[(i + 6) * stride], keys[(i + 7) * stride]};
-            uint16x8_t ge = vcgeq_u16(key_vec, target_vec);  // >= comparison directly
+            uint16x8_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u16(&keys[i]);
+            } else {
+                key_vec = uint16x8_t{keys[i * stride],       keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 3) * stride], keys[(i + 4) * stride], keys[(i + 5) * stride],
+                                     keys[(i + 6) * stride], keys[(i + 7) * stride]};
+            }
+            uint16x8_t ge = vcgeq_u16(key_vec, target_vec);
 
-            // Narrow to 8-bit and extract as 64-bit value for bitmask
             uint8x8_t narrow = vmovn_u16(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 8-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 8);
             }
             i += 8;
@@ -1228,7 +1327,7 @@ class btree_map
     }
 
     // NEON lower_bound for int8_t keys (signed) - processes 16 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s8(const T* slots, size_type count, int8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int8_t))
@@ -1240,14 +1339,18 @@ class btree_map
         size_type i = 0;
 
         while (i + 16 <= count) {
-            int8x16_t key_vec = {
-              keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
-              keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
-              keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
-              keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
-            uint8x16_t ge = vcgeq_s8(key_vec, target_vec);  // >= comparison directly
+            int8x16_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s8(&keys[i]);
+            } else {
+                key_vec = int8x16_t{
+                  keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
+                  keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
+                  keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
+                  keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
+            }
+            uint8x16_t ge = vcgeq_s8(key_vec, target_vec);
 
-            // Extract low and high 64-bit halves as bitmask
             uint64_t mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 0);
             if (mask_lo != 0) {
                 return i + static_cast<size_type>(__builtin_ctzll(mask_lo) / 8);
@@ -1266,7 +1369,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint8_t keys (unsigned) - processes 16 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u8(const T* slots, size_type count, uint8_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint8_t))
@@ -1278,14 +1381,18 @@ class btree_map
         size_type i = 0;
 
         while (i + 16 <= count) {
-            uint8x16_t key_vec = {
-              keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
-              keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
-              keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
-              keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
-            uint8x16_t ge = vcgeq_u8(key_vec, target_vec);  // >= comparison directly
+            uint8x16_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u8(&keys[i]);
+            } else {
+                key_vec = uint8x16_t{
+                  keys[i * stride],        keys[(i + 1) * stride],  keys[(i + 2) * stride],  keys[(i + 3) * stride],
+                  keys[(i + 4) * stride],  keys[(i + 5) * stride],  keys[(i + 6) * stride],  keys[(i + 7) * stride],
+                  keys[(i + 8) * stride],  keys[(i + 9) * stride],  keys[(i + 10) * stride], keys[(i + 11) * stride],
+                  keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
+            }
+            uint8x16_t ge = vcgeq_u8(key_vec, target_vec);
 
-            // Extract low and high 64-bit halves as bitmask
             uint64_t mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(ge), 0);
             if (mask_lo != 0) {
                 return i + static_cast<size_type>(__builtin_ctzll(mask_lo) / 8);
@@ -1304,7 +1411,7 @@ class btree_map
     }
 
     // NEON lower_bound for float keys - processes 4 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(float))
@@ -1316,16 +1423,19 @@ class btree_map
         size_type i = 0;
 
         while (i + 4 <= count) {
-            float32x4_t key_vec = {keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
-                                   keys[(i + 3) * stride]};
-            uint32x4_t ge = vcgeq_f32(key_vec, target_vec);  // >= comparison directly
+            float32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f32(&keys[i]);
+            } else {
+                key_vec = float32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                      keys[(i + 3) * stride]};
+            }
+            uint32x4_t ge = vcgeq_f32(key_vec, target_vec);
 
-            // Narrow to 16-bit and extract as 64-bit value for bitmask
             uint16x4_t narrow = vmovn_u32(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 16-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
             }
             i += 4;
@@ -1338,7 +1448,7 @@ class btree_map
     }
 
     // NEON lower_bound for double keys - processes 2 keys at a time
-    // Optimized: use bitmask to find first match without inner loop
+    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(double))
@@ -1350,15 +1460,18 @@ class btree_map
         size_type i = 0;
 
         while (i + 2 <= count) {
-            float64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
-            uint64x2_t ge = vcgeq_f64(key_vec, target_vec);  // >= comparison directly
+            float64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f64(&keys[i]);
+            } else {
+                key_vec = float64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t ge = vcgeq_f64(key_vec, target_vec);
 
-            // Narrow to 32-bit and extract for bitmask
             uint32x2_t narrow = vmovn_u64(ge);
             uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
 
             if (mask != 0) {
-                // Find first set 32-bit lane
                 return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
             }
             i += 2;
