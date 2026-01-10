@@ -1043,7 +1043,8 @@ class btree_map
                                  keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_s32(key_vec, target_vec);
 
-            if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
+            // Use vminvq_u32 to detect if any lane is 0 (key >= target)
+            if (vminvq_u32(lt) == 0) {
                 for (size_type j = 0; j < 4; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1073,7 +1074,8 @@ class btree_map
                                   keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_u32(key_vec, target_vec);
 
-            if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
+            // Use vminvq_u32 to detect if any lane is 0 (key >= target)
+            if (vminvq_u32(lt) == 0) {
                 for (size_type j = 0; j < 4; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1102,7 +1104,9 @@ class btree_map
             int64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
             uint64x2_t lt = vcltq_s64(key_vec, target_vec);
 
-            if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
+            // Check if any key >= target (any lane is 0)
+            // AND lanes: result == 0 means at least one lane was 0
+            if ((vgetq_lane_u64(lt, 0) & vgetq_lane_u64(lt, 1)) == 0) {
                 if (keys[i * stride] >= target) return i;
                 if (keys[(i + 1) * stride] >= target) return i + 1;
             }
@@ -1128,7 +1132,9 @@ class btree_map
             uint64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
             uint64x2_t lt = vcltq_u64(key_vec, target_vec);
 
-            if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
+            // Check if any key >= target (any lane is 0)
+            // AND lanes: result == 0 means at least one lane was 0
+            if ((vgetq_lane_u64(lt, 0) & vgetq_lane_u64(lt, 1)) == 0) {
                 if (keys[i * stride] >= target) return i;
                 if (keys[(i + 1) * stride] >= target) return i + 1;
             }
@@ -1156,7 +1162,8 @@ class btree_map
                                  keys[(i + 6) * stride], keys[(i + 7) * stride]};
             uint16x8_t lt = vcltq_s16(key_vec, target_vec);
 
-            if (vmaxvq_u16(lt) != 0xFFFF) {
+            // Use vminvq_u16 to detect if any lane is 0 (key >= target)
+            if (vminvq_u16(lt) == 0) {
                 for (size_type j = 0; j < 8; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1187,7 +1194,8 @@ class btree_map
                                   keys[(i + 6) * stride], keys[(i + 7) * stride]};
             uint16x8_t lt = vcltq_u16(key_vec, target_vec);
 
-            if (vmaxvq_u16(lt) != 0xFFFF) {
+            // Use vminvq_u16 to detect if any lane is 0 (key >= target)
+            if (vminvq_u16(lt) == 0) {
                 for (size_type j = 0; j < 8; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1220,7 +1228,8 @@ class btree_map
               keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
             uint8x16_t lt = vcltq_s8(key_vec, target_vec);
 
-            if (vmaxvq_u8(lt) != 0xFF) {
+            // Use vminvq_u8 to detect if any lane is 0 (key >= target)
+            if (vminvq_u8(lt) == 0) {
                 for (size_type j = 0; j < 16; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1253,7 +1262,8 @@ class btree_map
               keys[(i + 12) * stride], keys[(i + 13) * stride], keys[(i + 14) * stride], keys[(i + 15) * stride]};
             uint8x16_t lt = vcltq_u8(key_vec, target_vec);
 
-            if (vmaxvq_u8(lt) != 0xFF) {
+            // Use vminvq_u8 to detect if any lane is 0 (key >= target)
+            if (vminvq_u8(lt) == 0) {
                 for (size_type j = 0; j < 16; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1283,7 +1293,8 @@ class btree_map
                                    keys[(i + 3) * stride]};
             uint32x4_t lt = vcltq_f32(key_vec, target_vec);
 
-            if (vmaxvq_u32(lt) != 0xFFFFFFFF) {
+            // Use vminvq_u32 to detect if any lane is 0 (key >= target)
+            if (vminvq_u32(lt) == 0) {
                 for (size_type j = 0; j < 4; ++j) {
                     if (keys[(i + j) * stride] >= target) return i + j;
                 }
@@ -1312,7 +1323,9 @@ class btree_map
             float64x2_t key_vec = {keys[i * stride], keys[(i + 1) * stride]};
             uint64x2_t lt = vcltq_f64(key_vec, target_vec);
 
-            if (vmaxvq_u64(lt) != 0xFFFFFFFFFFFFFFFFULL) {
+            // Check if any key >= target (any lane is 0)
+            // AND lanes: result == 0 means at least one lane was 0
+            if ((vgetq_lane_u64(lt, 0) & vgetq_lane_u64(lt, 1)) == 0) {
                 if (keys[i * stride] >= target) return i;
                 if (keys[(i + 1) * stride] >= target) return i + 1;
             }
