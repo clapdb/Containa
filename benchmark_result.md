@@ -198,6 +198,47 @@
 
 ---
 
+## NEON vld2q Stride==2 Optimization (btree_map)
+
+For `btree_map<K, V>` where `sizeof(K) == sizeof(V)`, keys are stored at stride==2 (interleaved with values). The `vld2q` instruction efficiently loads interleaved data, extracting keys in a single instruction.
+
+### Performance Improvements
+
+| Key Type | Elements | Before | After | Improvement |
+|----------|----------|--------|-------|-------------|
+| int32_t | 10K | 72 ns | 64 ns | **+11%** |
+| int32_t | 100K | 113 ns | 100 ns | **+12%** |
+| int32_t | 1000K | 274 ns | 263 ns | **+4%** |
+| int16_t | 10K | 66 ns | 47 ns | **+29%** |
+| int16_t | 100K | 88 ns | 68 ns | **+23%** |
+| int8_t | 100 | 41 ns | 18 ns | **+56%** |
+| int8_t | 200 | 45 ns | 28 ns | **+38%** |
+
+### Implementation
+
+```cpp
+// Before: scalar element-by-element construction
+key_vec = int32x4_t{keys[i*2], keys[(i+1)*2], keys[(i+2)*2], keys[(i+3)*2]};
+
+// After: single vld2q instruction for stride==2
+if constexpr (stride == 2) {
+    int32x4x2_t interleaved = vld2q_s32(&keys[i * 2]);
+    key_vec = interleaved.val[0];  // Keys at even indices
+}
+```
+
+### Applicable Types
+
+| Type | vld2 Instruction | Elements/Vector |
+|------|------------------|-----------------|
+| int8_t/uint8_t | vld2q_s8/u8 | 16 |
+| int16_t/uint16_t | vld2q_s16/u16 | 8 |
+| int32_t/uint32_t | vld2q_s32/u32 | 4 |
+
+Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vector).
+
+---
+
 ## Notes
 
 - Benchmarks were run with CPU frequency scaling enabled (powersave governor), which may introduce some variance
