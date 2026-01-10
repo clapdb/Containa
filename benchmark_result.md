@@ -148,6 +148,97 @@
 
 ---
 
+## btree_set vs absl::btree_set
+
+### Test Environment (ARM64)
+
+- **Platform**: AWS Graviton (ARM64)
+- **Compiler**: GCC with `-O3 -DNDEBUG`
+- **C++ Standard**: C++20
+
+### Summary
+
+| Operation | Speedup vs absl |
+|-----------|-----------------|
+| **Sorted Insert** | 10-12x faster |
+| **Random Insert** | 2-3x faster |
+| **Find** | 1.0-1.8x faster |
+| **Lower_bound** | 0.9-1.7x faster |
+| **Iterate** | 5-7x faster |
+| **Erase** | 1.3-2.6x faster |
+
+### Detailed Results (ns/op, lower is better)
+
+#### 10K elements
+
+| Container | SortIns | RandIns | Find | LowerBnd | Iterate | Erase |
+|-----------|---------|---------|------|----------|---------|-------|
+| stdb::btree_set | 12 | 80 | 54 | 55 | 2 | 80 |
+| absl::btree_set | 149 | 228 | 97 | 92 | 15 | 212 |
+
+#### 100K elements
+
+| Container | SortIns | RandIns | Find | LowerBnd | Iterate | Erase |
+|-----------|---------|---------|------|----------|---------|-------|
+| stdb::btree_set | 14 | 104 | 80 | 77 | 2 | 109 |
+| absl::btree_set | 158 | 253 | 120 | 113 | 15 | 238 |
+
+#### 1000K elements
+
+| Container | SortIns | RandIns | Find | LowerBnd | Iterate | Erase |
+|-----------|---------|---------|------|----------|---------|-------|
+| stdb::btree_set | 16 | 174 | 215 | 209 | 3 | 247 |
+| absl::btree_set | 179 | 334 | 196 | 188 | 17 | 322 |
+
+### btree_set Optimizations
+
+- **Direct SIMD vector loads**: For btree_set (stride=1), uses `vld1q_*` (NEON), `_mm_loadu_si128` (SSE2), `_mm256_loadu_si256` (AVX2) instead of element-by-element construction
+- **[[no_unique_address]]**: Empty value type uses zero storage, making key access contiguous
+- **~33% lower_bound improvement**: Direct load optimization specifically benefits btree_set
+
+---
+
+## NEON vld2q Stride==2 Optimization (btree_map)
+
+For `btree_map<K, V>` where `sizeof(K) == sizeof(V)`, keys are stored at stride==2 (interleaved with values). The `vld2q` instruction efficiently loads interleaved data, extracting keys in a single instruction.
+
+### Performance Improvements
+
+| Key Type | Elements | Before | After | Improvement |
+|----------|----------|--------|-------|-------------|
+| int32_t | 10K | 72 ns | 64 ns | **+11%** |
+| int32_t | 100K | 113 ns | 100 ns | **+12%** |
+| int32_t | 1000K | 274 ns | 263 ns | **+4%** |
+| int16_t | 10K | 66 ns | 47 ns | **+29%** |
+| int16_t | 100K | 88 ns | 68 ns | **+23%** |
+| int8_t | 100 | 41 ns | 18 ns | **+56%** |
+| int8_t | 200 | 45 ns | 28 ns | **+38%** |
+
+### Implementation
+
+```cpp
+// Before: scalar element-by-element construction
+key_vec = int32x4_t{keys[i*2], keys[(i+1)*2], keys[(i+2)*2], keys[(i+3)*2]};
+
+// After: single vld2q instruction for stride==2
+if constexpr (stride == 2) {
+    int32x4x2_t interleaved = vld2q_s32(&keys[i * 2]);
+    key_vec = interleaved.val[0];  // Keys at even indices
+}
+```
+
+### Applicable Types
+
+| Type | vld2 Instruction | Elements/Vector |
+|------|------------------|-----------------|
+| int8_t/uint8_t | vld2q_s8/u8 | 16 |
+| int16_t/uint16_t | vld2q_s16/u16 | 8 |
+| int32_t/uint32_t | vld2q_s32/u32 | 4 |
+
+Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vector).
+
+---
+
 ## Notes
 
 - Benchmarks were run with CPU frequency scaling enabled (powersave governor), which may introduce some variance
