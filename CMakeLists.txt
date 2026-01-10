@@ -26,8 +26,9 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
-# Use libc++ with Clang for std::flat_map support
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+# Use libc++ with Clang for std::flat_map support (requires libc++ installed)
+option(USE_LIBCXX_DEFAULT "Use libc++ by default with Clang" ON)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND USE_LIBCXX_DEFAULT)
     add_compile_options(-stdlib=libc++)
     add_link_options(-stdlib=libc++)
 endif()
