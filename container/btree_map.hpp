@@ -1109,7 +1109,7 @@ class btree_map
 
 #ifdef BTREE_HAS_NEON
     // NEON lower_bound for int32_t keys (signed)
-    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
+    // Optimized: use direct vld1q load for contiguous keys, vld2q for stride==2, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(int32_t))
@@ -1124,6 +1124,10 @@ class btree_map
             int32x4_t key_vec;
             if constexpr (stride == 1) {
                 key_vec = vld1q_s32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                // Use vld2 for efficient strided load (e.g., btree_map<int32_t, int32_t>)
+                int32x4x2_t interleaved = vld2q_s32(&keys[i * 2]);
+                key_vec = interleaved.val[0];  // Keys are at even indices
             } else {
                 key_vec = int32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
                                     keys[(i + 3) * stride]};
@@ -1146,7 +1150,7 @@ class btree_map
     }
 
     // NEON lower_bound for uint32_t keys (unsigned)
-    // Optimized: use direct vld1q load for contiguous keys, bitmask for first match
+    // Optimized: use direct vld1q load for contiguous keys, vld2q for stride==2, bitmask for first match
     template <typename T>
     static auto neon_lower_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
     requires(sizeof(T) >= sizeof(uint32_t))
@@ -1161,6 +1165,10 @@ class btree_map
             uint32x4_t key_vec;
             if constexpr (stride == 1) {
                 key_vec = vld1q_u32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                // Use vld2 for efficient strided load (e.g., btree_map<uint32_t, uint32_t>)
+                uint32x4x2_t interleaved = vld2q_u32(&keys[i * 2]);
+                key_vec = interleaved.val[0];  // Keys are at even indices
             } else {
                 key_vec = uint32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
                                      keys[(i + 3) * stride]};
