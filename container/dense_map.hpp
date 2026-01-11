@@ -44,6 +44,9 @@
 #if defined(__AVX2__)
 #define DENSE_MAP_AVX2 1
 #endif
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#define DENSE_MAP_AVX512 1
+#endif
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
 #define DENSE_MAP_NEON 1
@@ -274,7 +277,9 @@ DENSE_MAP_ALWAYS_INLINE constexpr int8_t h2(size_t hash) {
 DENSE_MAP_ALWAYS_INLINE constexpr size_t h1(size_t hash) { return hash; }
 
 // Group width for SIMD operations
-#if defined(DENSE_MAP_AVX2)
+#if defined(DENSE_MAP_AVX512)
+inline constexpr size_t kGroupWidth = 64;
+#elif defined(DENSE_MAP_AVX2)
 inline constexpr size_t kGroupWidth = 32;
 #elif defined(DENSE_MAP_SSE2) || defined(DENSE_MAP_NEON)
 inline constexpr size_t kGroupWidth = 16;
@@ -283,7 +288,28 @@ inline constexpr size_t kGroupWidth = 8;
 #endif
 
 // BitMask helper for iterating over set bits
+// Use 64-bit mask for AVX-512, 32-bit otherwise
 struct BitMask {
+#if defined(DENSE_MAP_AVX512)
+    uint64_t mask;
+
+    explicit BitMask(uint64_t m) : mask(m) {}
+
+    explicit operator bool() const { return mask != 0; }
+
+    uint32_t lowest_set_bit() const {
+        return static_cast<uint32_t>(std::countr_zero(mask));
+    }
+
+    BitMask& remove_lowest_bit() {
+        mask &= mask - 1;
+        return *this;
+    }
+
+    uint32_t trailing_zeros() const {
+        return static_cast<uint32_t>(std::countr_zero(mask));
+    }
+#else
     uint32_t mask;
 
     explicit BitMask(uint32_t m) : mask(m) {}
@@ -302,11 +328,39 @@ struct BitMask {
     uint32_t trailing_zeros() const {
         return static_cast<uint32_t>(std::countr_zero(mask));
     }
+#endif
 };
 
 // Group operations - SIMD-accelerated probe operations
 struct Group {
-#if defined(DENSE_MAP_AVX2)
+#if defined(DENSE_MAP_AVX512)
+    __m512i ctrl;
+
+    explicit Group(const int8_t* pos) {
+        ctrl = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(pos));
+    }
+
+    BitMask match(int8_t h) const {
+        auto match_vec = _mm512_set1_epi8(h);
+        // AVX-512BW: _mm512_cmpeq_epi8_mask returns 64-bit mask directly
+        return BitMask(_mm512_cmpeq_epi8_mask(match_vec, ctrl));
+    }
+
+    BitMask match_empty() const {
+        // Empty is 0b10000000, check for high bit set (negative in signed)
+        // Use mask comparison: ctrl < 0 means high bit is set
+        auto zero = _mm512_setzero_si512();
+        return BitMask(_mm512_cmplt_epi8_mask(ctrl, zero));
+    }
+
+    BitMask match_empty_or_deleted() const {
+        // Empty (0x80) and Deleted (0xFE) both have high bit set
+        // kSentinel (0x7F) is greater than both in signed comparison
+        auto special = _mm512_set1_epi8(static_cast<int8_t>(kSentinel));
+        return BitMask(_mm512_cmpgt_epi8_mask(special, ctrl));
+    }
+
+#elif defined(DENSE_MAP_AVX2)
     __m256i ctrl;
 
     explicit Group(const int8_t* pos) {
@@ -1795,7 +1849,11 @@ private:
 
             // Backward shift deletion: shift subsequent entries back
             size_t next_idx = (bucket_idx + 1) & mask;
+            // Prefetch ahead for better cache utilization
+            DENSE_MAP_PREFETCH(&buckets_[(next_idx + 1) & mask]);
             while (buckets_[next_idx].dist_and_fingerprint >= detail::Bucket::kDistInc * 2) {
+                // Prefetch next bucket
+                DENSE_MAP_PREFETCH(&buckets_[(next_idx + 2) & mask]);
                 // Move next bucket back and decrement its distance
                 buckets_[bucket_idx].value_idx = buckets_[next_idx].value_idx;
                 buckets_[bucket_idx].dist_and_fingerprint =
@@ -1812,13 +1870,20 @@ private:
                 const size_t last_hash = hash_(get_key(values_[last_idx]));
                 size_t last_pos = last_hash >> shift_;  // HIGH bits for bucket index
 
+                // Prefetch the expected bucket location
+                DENSE_MAP_PREFETCH(&buckets_[last_pos]);
+
                 while (buckets_[last_pos].value_idx != static_cast<uint32_t>(last_idx)) {
                     last_pos = (last_pos + 1) & mask;
                 }
                 buckets_[last_pos].value_idx = static_cast<uint32_t>(value_idx);
 
-                // Move last value to deleted position
-                values_[value_idx] = std::move(values_[last_idx]);
+                // Move last value to deleted position - use memcpy for trivial types
+                if constexpr (std::is_trivially_copyable_v<value_type>) {
+                    std::memcpy(values_ + value_idx, values_ + last_idx, sizeof(value_type));
+                } else {
+                    values_[value_idx] = std::move(values_[last_idx]);
+                }
             }
             AllocTraits::destroy(alloc_, values_ + last_idx);
 
@@ -1875,8 +1940,12 @@ private:
                     last_seq.next();
                 }
                 found_last:
-                // Move last value to deleted position
-                values_[value_idx] = std::move(values_[last_idx]);
+                // Move last value to deleted position - use memcpy for trivial types
+                if constexpr (std::is_trivially_copyable_v<value_type>) {
+                    std::memcpy(values_ + value_idx, values_ + last_idx, sizeof(value_type));
+                } else {
+                    values_[value_idx] = std::move(values_[last_idx]);
+                }
             }
             AllocTraits::destroy(alloc_, values_ + last_idx);
 
