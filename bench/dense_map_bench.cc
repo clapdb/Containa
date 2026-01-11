@@ -18,6 +18,7 @@
 #include "../nanobench/src/include/nanobench.h"
 
 #include <iostream>
+#include <malloc.h>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -686,22 +687,54 @@ void run_memory_benchmark() {
     std::unordered_map<int64_t, int64_t> std_map;
     for (auto k : keys) std_map[k] = k;
 
-    // Estimate memory
-    size_t dense_mem = dense.capacity() * (sizeof(std::pair<int64_t, int64_t>) + 1);
-    size_t ankerl_mem = ankerl_map.size() * sizeof(std::pair<int64_t, int64_t>) +
-                        ankerl_map.bucket_count() * sizeof(uint32_t);
-    size_t robin_mem = robin.bucket_count() * (sizeof(std::pair<int64_t, int64_t>) + 1);
-    size_t std_mem = std_map.bucket_count() * sizeof(void*) +
-                     std_map.size() * (sizeof(std::pair<int64_t, int64_t>) + sizeof(void*) * 2);
+    // Use mallinfo2 to measure actual memory usage including fragmentation
+    auto measure_memory = []() -> size_t {
+        #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+        auto info = mallinfo2();
+        return info.uordblks;  // Total allocated space
+        #else
+        auto info = mallinfo();
+        return static_cast<size_t>(info.uordblks);
+        #endif
+    };
 
-    std::cout << "dense_map:             " << dense_mem / 1024 << " KB (capacity=" << dense.capacity()
-              << ", load=" << dense.load_factor() << ")\n";
-    std::cout << "ankerl::unordered_dense: " << ankerl_mem / 1024 << " KB (size=" << ankerl_map.size()
-              << ", buckets=" << ankerl_map.bucket_count() << ")\n";
-    std::cout << "tsl::robin_map:        " << robin_mem / 1024 << " KB (buckets=" << robin.bucket_count()
-              << ", load=" << robin.load_factor() << ")\n";
-    std::cout << "std::unordered_map:    " << std_mem / 1024 << " KB (buckets=" << std_map.bucket_count()
-              << ", load=" << std_map.load_factor() << ")\n";
+    // Measure each container separately
+    size_t baseline = measure_memory();
+
+    {
+        dense_map<int64_t, int64_t> dm;
+        for (auto k : keys) dm[k] = k;
+        size_t dense_mem = measure_memory() - baseline;
+        std::cout << "dense_map:             " << dense_mem / 1024 << " KB (capacity=" << dm.capacity()
+                  << ", load=" << dm.load_factor() << ")\n";
+    }
+
+    baseline = measure_memory();
+    {
+        ankerl::unordered_dense::map<int64_t, int64_t> am;
+        for (auto k : keys) am[k] = k;
+        size_t ankerl_mem = measure_memory() - baseline;
+        std::cout << "ankerl::unordered_dense: " << ankerl_mem / 1024 << " KB (size=" << am.size()
+                  << ", buckets=" << am.bucket_count() << ")\n";
+    }
+
+    baseline = measure_memory();
+    {
+        tsl::robin_map<int64_t, int64_t> rm;
+        for (auto k : keys) rm[k] = k;
+        size_t robin_mem = measure_memory() - baseline;
+        std::cout << "tsl::robin_map:        " << robin_mem / 1024 << " KB (buckets=" << rm.bucket_count()
+                  << ", load=" << rm.load_factor() << ")\n";
+    }
+
+    baseline = measure_memory();
+    {
+        std::unordered_map<int64_t, int64_t> sm;
+        for (auto k : keys) sm[k] = k;
+        size_t std_mem = measure_memory() - baseline;
+        std::cout << "std::unordered_map:    " << std_mem / 1024 << " KB (buckets=" << sm.bucket_count()
+                  << ", load=" << sm.load_factor() << ")\n";
+    }
 }
 
 int main() {
