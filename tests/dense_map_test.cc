@@ -16,6 +16,7 @@
 
 #include "container/dense_map.hpp"
 
+#include <array>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -889,6 +890,573 @@ TEST_CASE("dense_map::find_patterns") {
     SUBCASE("find non-existing keys") {
         for (int i = 0; i < 1000; ++i) {
             auto it = map.find(i * 2 + 1);  // Odd keys don't exist
+            CHECK(it == map.end());
+        }
+    }
+}
+
+// ============================================================================
+// Comprehensive string key tests (Swiss Table indirect storage)
+// These tests specifically target the SIMD bitmask conversion and probing logic
+// ============================================================================
+
+TEST_CASE("dense_map::string_indirect_storage") {
+    SUBCASE("insert and find with random strings") {
+        // This test caught the magic multiply overflow bug
+        std::mt19937_64 rng(42);
+        dense_map<std::string, int64_t> map;
+        std::vector<std::string> keys;
+
+        auto random_string = [&rng](int len) {
+            static const char chars[] = "abcdefghijklmnopqrstuvwxyz";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[rng() % 26];
+            return s;
+        };
+
+        // Insert keys one by one and verify find after each
+        for (int i = 0; i < 100; ++i) {
+            auto key = random_string(16);
+            keys.push_back(key);
+            map[key] = i;
+
+            // Verify ALL keys are still findable
+            for (size_t j = 0; j <= static_cast<size_t>(i); ++j) {
+                auto it = map.find(keys[j]);
+                REQUIRE(it != map.end());
+                CHECK_EQ(it->second, static_cast<int64_t>(j));
+            }
+        }
+    }
+
+    SUBCASE("multiple rehashes with string keys") {
+        std::mt19937_64 rng(123);
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys;
+
+        auto random_string = [&rng](int len) {
+            static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[rng() % 62];
+            return s;
+        };
+
+        // Insert enough to trigger multiple rehashes
+        for (int i = 0; i < 10000; ++i) {
+            auto key = random_string(20);
+            keys.push_back(key);
+            map[key] = i;
+        }
+
+        CHECK_EQ(map.size(), 10000);
+
+        // Verify all keys
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, static_cast<int>(i));
+        }
+    }
+
+    SUBCASE("collision handling with similar hash values") {
+        dense_map<std::string, int> map;
+
+        // Insert strings that might have similar hash patterns
+        std::vector<std::string> keys;
+        for (int i = 0; i < 1000; ++i) {
+            keys.push_back("prefix_" + std::to_string(i) + "_suffix");
+        }
+
+        for (size_t i = 0; i < keys.size(); ++i) {
+            map[keys[i]] = static_cast<int>(i);
+        }
+
+        CHECK_EQ(map.size(), keys.size());
+
+        // Verify all
+        for (size_t i = 0; i < keys.size(); ++i) {
+            CHECK_EQ(map.at(keys[i]), static_cast<int>(i));
+        }
+    }
+
+    SUBCASE("empty string key") {
+        dense_map<std::string, int> map;
+        map[""] = 42;
+        CHECK_EQ(map.at(""), 42);
+        CHECK(map.contains(""));
+        CHECK_EQ(map.size(), 1);
+
+        map["non_empty"] = 100;
+        CHECK_EQ(map.at(""), 42);
+        CHECK_EQ(map.at("non_empty"), 100);
+    }
+
+    SUBCASE("very long string keys") {
+        dense_map<std::string, int> map;
+        std::string long_key(1000, 'x');
+
+        for (int i = 0; i < 100; ++i) {
+            std::string key = long_key + std::to_string(i);
+            map[key] = i;
+        }
+
+        CHECK_EQ(map.size(), 100);
+
+        for (int i = 0; i < 100; ++i) {
+            std::string key = long_key + std::to_string(i);
+            CHECK_EQ(map.at(key), i);
+        }
+    }
+
+    SUBCASE("erase and reinsert string keys") {
+        std::mt19937_64 rng(456);
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys;
+
+        auto random_string = [&rng](int len) {
+            static const char chars[] = "abcdefghijklmnopqrstuvwxyz";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[rng() % 26];
+            return s;
+        };
+
+        // Insert keys
+        for (int i = 0; i < 500; ++i) {
+            auto key = random_string(12);
+            keys.push_back(key);
+            map[key] = i;
+        }
+
+        // Erase half
+        for (int i = 0; i < 250; ++i) {
+            map.erase(keys[i]);
+        }
+        CHECK_EQ(map.size(), 250);
+
+        // Verify remaining
+        for (int i = 250; i < 500; ++i) {
+            REQUIRE(map.contains(keys[i]));
+            CHECK_EQ(map.at(keys[i]), i);
+        }
+
+        // Verify erased are gone
+        for (int i = 0; i < 250; ++i) {
+            CHECK_FALSE(map.contains(keys[i]));
+        }
+
+        // Reinsert erased keys with new values
+        for (int i = 0; i < 250; ++i) {
+            map[keys[i]] = i + 1000;
+        }
+        CHECK_EQ(map.size(), 500);
+
+        // Verify all
+        for (int i = 0; i < 250; ++i) {
+            CHECK_EQ(map.at(keys[i]), i + 1000);
+        }
+        for (int i = 250; i < 500; ++i) {
+            CHECK_EQ(map.at(keys[i]), i);
+        }
+    }
+
+    SUBCASE("iteration correctness with string keys") {
+        dense_map<std::string, int> map;
+        std::unordered_map<std::string, int> reference;
+
+        for (int i = 0; i < 1000; ++i) {
+            std::string key = "iter_key_" + std::to_string(i);
+            map[key] = i;
+            reference[key] = i;
+        }
+
+        // Verify via iteration
+        int count = 0;
+        for (const auto& [k, v] : map) {
+            auto it = reference.find(k);
+            REQUIRE(it != reference.end());
+            CHECK_EQ(v, it->second);
+            ++count;
+        }
+        CHECK_EQ(count, 1000);
+    }
+
+    SUBCASE("mixed insert and find operations") {
+        std::mt19937_64 rng(789);
+        dense_map<std::string, int> map;
+        std::unordered_map<std::string, int> reference;
+
+        auto random_string = [&rng](int len) {
+            static const char chars[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[rng() % 36];
+            return s;
+        };
+
+        // Mixed operations
+        for (int i = 0; i < 5000; ++i) {
+            if (rng() % 3 != 0) {
+                // Insert
+                auto key = random_string(8);
+                map[key] = i;
+                reference[key] = i;
+            } else if (!reference.empty()) {
+                // Find random existing key
+                auto it = reference.begin();
+                std::advance(it, rng() % reference.size());
+                auto map_it = map.find(it->first);
+                REQUIRE(map_it != map.end());
+                CHECK_EQ(map_it->second, it->second);
+            }
+        }
+
+        CHECK_EQ(map.size(), reference.size());
+    }
+
+    SUBCASE("small capacity transitions") {
+        // Test behavior around capacity boundaries (8, 16, 32, ...)
+        dense_map<std::string, int> map;
+
+        for (int i = 0; i < 50; ++i) {
+            std::string key = "key" + std::to_string(i);
+            map[key] = i;
+
+            // Verify all after each insert
+            for (int j = 0; j <= i; ++j) {
+                std::string check_key = "key" + std::to_string(j);
+                auto it = map.find(check_key);
+                REQUIRE(it != map.end());
+                CHECK_EQ(it->second, j);
+            }
+        }
+    }
+}
+
+TEST_CASE("dense_map::string_key_edge_cases") {
+    SUBCASE("keys with null bytes") {
+        dense_map<std::string, int> map;
+        // Use string constructor with explicit length to include null bytes
+        std::string key1("hello\0world", 11);
+        std::string key2("hello\0other", 11);
+
+        map[key1] = 1;
+        map[key2] = 2;
+
+        CHECK_EQ(map.size(), 2);
+        CHECK_EQ(map.at(key1), 1);
+        CHECK_EQ(map.at(key2), 2);
+    }
+
+    SUBCASE("keys with special characters") {
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys = {
+            "hello world",
+            "tab\there",
+            "newline\nhere",
+            "unicode: \xc3\xa9\xc3\xa0",  // UTF-8 éà
+            "emoji: \xf0\x9f\x98\x80",    // UTF-8 emoji
+        };
+
+        for (size_t i = 0; i < keys.size(); ++i) {
+            map[keys[i]] = static_cast<int>(i);
+        }
+
+        CHECK_EQ(map.size(), keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            CHECK_EQ(map.at(keys[i]), static_cast<int>(i));
+        }
+    }
+
+    SUBCASE("duplicate inserts") {
+        dense_map<std::string, int> map;
+        std::string key = "duplicate_key";
+
+        map[key] = 1;
+        CHECK_EQ(map.at(key), 1);
+
+        map[key] = 2;
+        CHECK_EQ(map.at(key), 2);
+        CHECK_EQ(map.size(), 1);
+
+        auto [it, inserted] = map.insert({key, 3});
+        CHECK_FALSE(inserted);
+        CHECK_EQ(map.at(key), 2);  // Not changed by insert
+    }
+
+    SUBCASE("clear and reuse") {
+        dense_map<std::string, int> map;
+
+        for (int round = 0; round < 3; ++round) {
+            for (int i = 0; i < 100; ++i) {
+                map["key_" + std::to_string(i)] = round * 100 + i;
+            }
+            CHECK_EQ(map.size(), 100);
+
+            for (int i = 0; i < 100; ++i) {
+                CHECK_EQ(map.at("key_" + std::to_string(i)), round * 100 + i);
+            }
+
+            map.clear();
+            CHECK_EQ(map.size(), 0);
+        }
+    }
+}
+
+TEST_CASE("dense_map::large_key_value") {
+    // Test with large keys (128-byte strings) and large values (256-byte struct)
+    struct LargeValue {
+        std::array<uint64_t, 32> data;  // 256 bytes
+
+        LargeValue() { data.fill(0); }
+        explicit LargeValue(uint64_t seed) {
+            for (size_t i = 0; i < data.size(); i++) {
+                data[i] = seed + i;
+            }
+        }
+
+        bool operator==(const LargeValue& other) const {
+            return data == other.data;
+        }
+    };
+
+    auto random_string = [](std::mt19937_64& rng, int len) {
+        static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        std::string s;
+        s.reserve(len);
+        for (int i = 0; i < len; i++) {
+            s += chars[rng() % (sizeof(chars) - 1)];
+        }
+        return s;
+    };
+
+    SUBCASE("large keys 128 bytes") {
+        std::mt19937_64 rng(42);
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys;
+
+        for (int i = 0; i < 1000; ++i) {
+            auto key = random_string(rng, 128);
+            keys.push_back(key);
+            map[key] = i;
+        }
+
+        CHECK_EQ(map.size(), 1000);
+
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, static_cast<int>(i));
+        }
+    }
+
+    SUBCASE("large values 256 bytes") {
+        dense_map<int, LargeValue> map;
+
+        for (int i = 0; i < 1000; ++i) {
+            map[i] = LargeValue(i);
+        }
+
+        CHECK_EQ(map.size(), 1000);
+
+        for (int i = 0; i < 1000; ++i) {
+            auto it = map.find(i);
+            REQUIRE(it != map.end());
+            CHECK(it->second == LargeValue(i));
+        }
+    }
+
+    SUBCASE("large keys and values together") {
+        std::mt19937_64 rng(123);
+        dense_map<std::string, LargeValue> map;
+        std::vector<std::string> keys;
+
+        for (int i = 0; i < 5000; ++i) {
+            auto key = random_string(rng, 128);
+            keys.push_back(key);
+            map[key] = LargeValue(i);
+        }
+
+        CHECK_EQ(map.size(), 5000);
+
+        // Verify all keys and values
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK(it->second == LargeValue(i));
+        }
+
+        // Verify iteration
+        size_t count = 0;
+        for (const auto& [k, v] : map) {
+            ++count;
+        }
+        CHECK_EQ(count, 5000);
+    }
+
+    SUBCASE("large keys with rehash") {
+        std::mt19937_64 rng(456);
+        dense_map<std::string, LargeValue> map;
+        std::vector<std::string> keys;
+
+        // Insert enough to trigger multiple rehashes
+        for (int i = 0; i < 10000; ++i) {
+            auto key = random_string(rng, 128);
+            keys.push_back(key);
+            map[key] = LargeValue(i);
+
+            // Verify all keys after every 1000 inserts
+            if ((i + 1) % 1000 == 0) {
+                for (size_t j = 0; j <= static_cast<size_t>(i); ++j) {
+                    auto it = map.find(keys[j]);
+                    if (it == map.end()) {
+                        FAIL("Key " << j << " not found after inserting " << (i + 1) << " keys");
+                    }
+                }
+            }
+        }
+
+        CHECK_EQ(map.size(), 10000);
+    }
+
+    SUBCASE("large keys erase and reinsert") {
+        std::mt19937_64 rng(789);
+        dense_map<std::string, LargeValue> map;
+        std::vector<std::string> keys;
+
+        // Insert
+        for (int i = 0; i < 1000; ++i) {
+            auto key = random_string(rng, 128);
+            keys.push_back(key);
+            map[key] = LargeValue(i);
+        }
+
+        // Erase half
+        for (int i = 0; i < 500; ++i) {
+            map.erase(keys[i]);
+        }
+        CHECK_EQ(map.size(), 500);
+
+        // Verify remaining
+        for (int i = 500; i < 1000; ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK(it->second == LargeValue(i));
+        }
+
+        // Reinsert with different values
+        for (int i = 0; i < 500; ++i) {
+            map[keys[i]] = LargeValue(i + 10000);
+        }
+        CHECK_EQ(map.size(), 1000);
+
+        // Verify all
+        for (int i = 0; i < 500; ++i) {
+            CHECK(map.at(keys[i]) == LargeValue(i + 10000));
+        }
+        for (int i = 500; i < 1000; ++i) {
+            CHECK(map.at(keys[i]) == LargeValue(i));
+        }
+    }
+
+    SUBCASE("very large keys 1KB") {
+        std::mt19937_64 rng(999);
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys;
+
+        for (int i = 0; i < 500; ++i) {
+            auto key = random_string(rng, 1024);  // 1KB keys
+            keys.push_back(key);
+            map[key] = i;
+        }
+
+        CHECK_EQ(map.size(), 500);
+
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, static_cast<int>(i));
+        }
+    }
+}
+
+TEST_CASE("dense_map::simd_bitmask_correctness") {
+    // These tests specifically target the SIMD bitmask logic
+    // that was buggy with the magic multiply approach
+
+    SUBCASE("many collisions at same probe position") {
+        dense_map<std::string, int> map;
+        // Create keys that will have various h2 values
+        for (int i = 0; i < 256; ++i) {
+            std::string key = "collision_test_" + std::to_string(i);
+            map[key] = i;
+        }
+
+        CHECK_EQ(map.size(), 256);
+
+        for (int i = 0; i < 256; ++i) {
+            std::string key = "collision_test_" + std::to_string(i);
+            auto it = map.find(key);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, i);
+        }
+    }
+
+    SUBCASE("interleaved insert-find pattern") {
+        // This pattern caught the bug where keys became unfindable
+        // after subsequent inserts
+        std::mt19937_64 rng(999);
+        dense_map<std::string, int> map;
+        std::vector<std::pair<std::string, int>> inserted;
+
+        auto random_string = [&rng](int len) {
+            static const char chars[] = "abcdefghijklmnopqrstuvwxyz";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[rng() % 26];
+            return s;
+        };
+
+        for (int i = 0; i < 200; ++i) {
+            // Insert new key
+            auto key = random_string(16);
+            map[key] = i;
+            inserted.emplace_back(key, i);
+
+            // Immediately verify ALL previously inserted keys
+            for (const auto& [k, v] : inserted) {
+                auto it = map.find(k);
+                if (it == map.end()) {
+                    // Detailed failure message
+                    FAIL("Key '" << k << "' (value=" << v
+                         << ") not found after inserting key " << i
+                         << " (map size=" << map.size() << ")");
+                }
+                CHECK_EQ(it->second, v);
+            }
+        }
+    }
+
+    SUBCASE("probe sequence exhaustive test") {
+        // Force many probe sequence iterations
+        dense_map<std::string, int> map;
+        map.reserve(16);  // Small capacity
+
+        // Insert keys to fill most slots
+        std::vector<std::string> keys;
+        for (int i = 0; i < 12; ++i) {  // High load factor
+            std::string key = "probe_" + std::to_string(i);
+            keys.push_back(key);
+            map[key] = i;
+        }
+
+        // Verify all finds work
+        for (int i = 0; i < 12; ++i) {
+            auto it = map.find(keys[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, i);
+        }
+
+        // Check non-existent keys
+        for (int i = 100; i < 120; ++i) {
+            auto it = map.find("probe_" + std::to_string(i));
             CHECK(it == map.end());
         }
     }
