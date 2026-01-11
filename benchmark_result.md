@@ -239,6 +239,74 @@ Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vec
 
 ---
 
+## dense_map Benchmark Results (ARM64)
+
+### Test Environment
+
+- **Platform**: AWS Graviton3 (ARM64)
+- **Compiler**: Clang with `-O3 -DNDEBUG -mcpu=native`
+- **C++ Standard**: C++20
+
+### Performance Comparison (dense_map = 1.0x baseline)
+
+> **Reading**: `1.0x` = same as dense_map, `2.0x` = 2x slower, `0.5x` = 2x faster
+
+#### Integer Keys (100K elements)
+
+| Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
+|-----------|-----------|--------|------------|------------|----------------|
+| Insert | **1.0x** | 1.04x | 0.94x | 0.86x | 5.10x |
+| Find (50%) | **1.0x** | 1.07x | 0.84x | 1.34x | 0.96x |
+| Find (100%) | **1.0x** | 1.04x | 0.73x | 3.42x | 2.46x |
+| Iterate | **1.0x** | 1.02x | 6.26x | 4.54x | 3.37x |
+| Erase | **1.0x** | 1.39x | 1.35x | 1.38x | 3.65x |
+
+#### Integer Keys (1M elements)
+
+| Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
+|-----------|-----------|--------|------------|------------|----------------|
+| Insert | **1.0x** | 0.94x | 1.04x | 1.22x | 3.45x |
+| Find (50%) | **1.0x** | 1.03x | 0.53x | - | - |
+| Find (100%) | **1.0x** | 1.20x | 0.75x | 1.97x | 1.85x |
+| Iterate | **1.0x** | 0.92x | 4.61x | 7.61x | 2.56x |
+| Erase | **1.0x** | 1.23x | 1.31x | 1.86x | 2.73x |
+
+#### String Keys 16B (100K elements)
+
+| Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
+|-----------|-----------|--------|------------|------------|----------------|
+| Insert | **1.0x** | 1.17x | 3.03x | 1.96x | 3.77x |
+| Find | **1.0x** | 1.61x | 2.54x | 1.91x | 2.53x |
+| Iterate | **1.0x** | 0.99x | 9.50x | 2.70x | 47.19x |
+
+### Summary
+
+| Metric | vs ankerl | vs tsl | vs absl | vs std |
+|--------|-----------|--------|---------|--------|
+| Insert (int) | ~1.0x | ~1.0x | 0.9-1.2x | 3-5x faster |
+| Find (int 100%) | ~1.0x | 0.7-0.8x slower | 2-3x faster | 1.9-2.5x faster |
+| Iterate | ~1.0x | 5-6x faster | 5-8x faster | 3-47x faster |
+| Erase | 1.2-1.4x faster | 1.3x faster | 1.4-1.9x faster | 2.7-3.7x faster |
+| String ops | 1.2-1.6x faster | 2.5-9x faster | 1.9-2.7x faster | 2.5-47x faster |
+
+### Memory Usage (100K int64 → int64)
+
+| Container | Memory | vs dense_map |
+|-----------|--------|--------------|
+| dense_map | 2,176 KB | **1.0x** |
+| ankerl | 2,074 KB | 0.95x |
+| tsl::robin | 4,352 KB | 2.0x |
+| std::unordered | 4,476 KB | 2.1x |
+
+### Key Optimizations
+
+- **NEON SIMD probing**: `vceqq_u8` for parallel h2 fingerprint matching (Swiss Table)
+- **Robin Hood flat storage**: For small trivial keys (≤8B), fingerprint+index buckets
+- **Contiguous values**: Fast iteration for both storage modes
+- **vaddv_u8 bitmask**: Fixed NEON bitmask (replaced magic multiply with horizontal sum)
+
+---
+
 ## Notes
 
 - Benchmarks were run with CPU frequency scaling enabled (powersave governor), which may introduce some variance
