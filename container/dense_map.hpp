@@ -365,15 +365,16 @@ struct Group {
     BitMask match(int8_t h) const {
         auto match_vec = vdupq_n_u8(static_cast<uint8_t>(h));
         auto cmp = vceqq_u8(match_vec, ctrl);
-        // Convert to bitmask
+        // Convert to bitmask using horizontal sum (correct for multiple matches)
         static const uint8_t shifts[] = {1, 2, 4, 8, 16, 32, 64, 128,
                                          1, 2, 4, 8, 16, 32, 64, 128};
         auto bits = vld1q_u8(shifts);
         auto masked = vandq_u8(cmp, bits);
-        auto paired = vpaddq_u8(masked, masked);
-        paired = vpaddq_u8(paired, paired);
-        paired = vpaddq_u8(paired, paired);
-        return BitMask(vgetq_lane_u16(vreinterpretq_u16_u8(paired), 0));
+        // Sum each 8-byte half separately to get 8-bit bitmasks
+        uint8_t lo = vaddv_u8(vget_low_u8(masked));
+        uint8_t hi = vaddv_u8(vget_high_u8(masked));
+        uint16_t result = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        return BitMask(result);
     }
 
     BitMask match_empty() const {
@@ -383,10 +384,11 @@ struct Group {
                                          1, 2, 4, 8, 16, 32, 64, 128};
         auto bits = vld1q_u8(shifts);
         auto masked = vandq_u8(msb, bits);
-        auto paired = vpaddq_u8(masked, masked);
-        paired = vpaddq_u8(paired, paired);
-        paired = vpaddq_u8(paired, paired);
-        return BitMask(vgetq_lane_u16(vreinterpretq_u16_u8(paired), 0));
+        // Sum each 8-byte half separately to get 8-bit bitmasks
+        uint8_t lo = vaddv_u8(vget_low_u8(masked));
+        uint8_t hi = vaddv_u8(vget_high_u8(masked));
+        uint16_t result = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        return BitMask(result);
     }
 
     BitMask match_empty_or_deleted() const {
@@ -395,11 +397,12 @@ struct Group {
         static const uint8_t shifts[] = {1, 2, 4, 8, 16, 32, 64, 128,
                                          1, 2, 4, 8, 16, 32, 64, 128};
         auto bits = vld1q_u8(shifts);
-        auto masked = vandq_u8(vreinterpretq_u8_s8(cmp), bits);
-        auto paired = vpaddq_u8(masked, masked);
-        paired = vpaddq_u8(paired, paired);
-        paired = vpaddq_u8(paired, paired);
-        return BitMask(vgetq_lane_u16(vreinterpretq_u16_u8(paired), 0));
+        auto masked = vandq_u8(cmp, bits);  // vcgtq_s8 returns uint8x16_t
+        // Sum each 8-byte half separately to get 8-bit bitmasks
+        uint8_t lo = vaddv_u8(vget_low_u8(masked));
+        uint8_t hi = vaddv_u8(vget_high_u8(masked));
+        uint16_t result = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        return BitMask(result);
     }
 
 #else
@@ -454,6 +457,14 @@ private:
 }  // namespace detail
 
 // ============================================================================
+// Set/Map type trait
+// ============================================================================
+namespace detail {
+template <typename T>
+constexpr bool is_map_v = !std::is_void_v<T>;
+}  // namespace detail
+
+// ============================================================================
 // Memory Policy - Selects storage layout based on type characteristics
 // ============================================================================
 
@@ -463,9 +474,11 @@ struct indirect_storage_tag {};  // Swiss Table + indirect values (for string ke
 struct flat_storage_tag {};      // ankerl-style: Robin Hood buckets + contiguous values
 
 // Default memory policy: select storage based on type characteristics
-template <typename Key, typename Value>
+// T can be void for set mode
+template <typename Key, typename T>
 struct default_memory_policy {
-    using value_type = std::pair<Key, Value>;
+    static constexpr bool is_map = detail::is_map_v<T>;
+    using value_type = std::conditional_t<is_map, std::pair<Key, T>, Key>;
 
     // For small trivially copyable keys (int, pointers, etc.), use flat storage (ankerl-style)
     // This gives better cache efficiency: fingerprint + index in same bucket
@@ -570,17 +583,19 @@ struct Bucket {
 }  // namespace detail
 
 // ============================================================================
-// dense_map - High-performance hash map with type-specialized storage
+// dense_map - High-performance hash map/set with type-specialized storage
+// When T=void, acts as a set. Otherwise acts as a map.
 // ============================================================================
-template <typename Key, typename Value, typename Hash = dense_hash<Key>,
+template <typename Key, typename T = void, typename Hash = dense_hash<Key>,
           typename KeyEqual = std::equal_to<Key>,
-          typename Allocator = std::allocator<std::pair<Key, Value>>,
-          typename MemoryPolicy = default_memory_policy<Key, Value>>
+          typename Allocator = std::allocator<std::conditional_t<detail::is_map_v<T>, std::pair<Key, T>, Key>>,
+          typename MemoryPolicy = default_memory_policy<Key, T>>
 class dense_map {
 public:
+    static constexpr bool is_map = detail::is_map_v<T>;
     using key_type = Key;
-    using mapped_type = Value;
-    using value_type = std::pair<Key, Value>;
+    using mapped_type = T;  // void for set
+    using value_type = std::conditional_t<is_map, std::pair<Key, T>, Key>;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
     using hasher = Hash;
@@ -611,6 +626,15 @@ private:
     static constexpr size_t kGroupWidth = detail::kGroupWidth;
     static constexpr float kMaxLoadFactor = 0.875f;
     static constexpr size_t kMinCapacity = kUseInline ? kGroupWidth : 8;
+
+    // Helper to extract key from value_type (for map: pair.first, for set: value itself)
+    static constexpr const Key& get_key(const value_type& v) {
+        if constexpr (is_map) {
+            return v.first;
+        } else {
+            return v;
+        }
+    }
 
     // ========== Inline storage (Swiss Table) ==========
     // Used when kUseInline == true
@@ -914,9 +938,7 @@ public:
             for (size_t i = 0; i < size_; ++i) {
                 AllocTraits::destroy(alloc_, values_ + i);
             }
-            for (size_t i = 0; i < capacity_; ++i) {
-                buckets_[i].set_empty();
-            }
+            std::memset(buckets_, 0, capacity_ * sizeof(detail::Bucket));
         } else {
             // Indirect storage: destroy values and reset control bytes
             for (size_t i = 0; i < size_; ++i) {
@@ -929,11 +951,11 @@ public:
     }
 
     std::pair<iterator, bool> insert(const value_type& value) {
-        return emplace(value.first, value.second);
+        return emplace_impl(get_key(value), value);
     }
 
     std::pair<iterator, bool> insert(value_type&& value) {
-        return emplace(std::move(value.first), std::move(value.second));
+        return emplace_impl(get_key(value), std::move(value));
     }
 
     template <typename P, typename = std::enable_if_t<
@@ -953,20 +975,20 @@ public:
         insert(ilist.begin(), ilist.end());
     }
 
-    template <typename M>
-    std::pair<iterator, bool> insert_or_assign(const Key& key, M&& obj) {
-        auto result = try_emplace(key, std::forward<M>(obj));
+    template <typename Mapped, typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    std::pair<iterator, bool> insert_or_assign(const Key& key, Mapped&& obj) {
+        auto result = try_emplace(key, std::forward<Mapped>(obj));
         if (!result.second) {
-            result.first->second = std::forward<M>(obj);
+            result.first->second = std::forward<Mapped>(obj);
         }
         return result;
     }
 
-    template <typename M>
-    std::pair<iterator, bool> insert_or_assign(Key&& key, M&& obj) {
-        auto result = try_emplace(std::move(key), std::forward<M>(obj));
+    template <typename Mapped, typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    std::pair<iterator, bool> insert_or_assign(Key&& key, Mapped&& obj) {
+        auto result = try_emplace(std::move(key), std::forward<Mapped>(obj));
         if (!result.second) {
-            result.first->second = std::forward<M>(obj);
+            result.first->second = std::forward<Mapped>(obj);
         }
         return result;
     }
@@ -978,19 +1000,20 @@ public:
         value_type* value = reinterpret_cast<value_type*>(storage);
         AllocTraits::construct(alloc_, value, std::forward<Args>(args)...);
 
-        auto result = emplace_impl(value->first, std::move(*value));
+        auto result = emplace_impl(get_key(*value), std::move(*value));
         if (!result.second) {
             AllocTraits::destroy(alloc_, value);
         }
         return result;
     }
 
-    template <typename... Args>
+    // try_emplace is map-only (takes key separately from mapped value args)
+    template <typename U = T, typename... Args, std::enable_if_t<!std::is_void_v<U>, int> = 0>
     std::pair<iterator, bool> try_emplace(const Key& key, Args&&... args) {
         return try_emplace_impl(key, std::forward<Args>(args)...);
     }
 
-    template <typename... Args>
+    template <typename U = T, typename... Args, std::enable_if_t<!std::is_void_v<U>, int> = 0>
     std::pair<iterator, bool> try_emplace(Key&& key, Args&&... args) {
         return try_emplace_impl(std::move(key), std::forward<Args>(args)...);
     }
@@ -1061,8 +1084,9 @@ public:
         }
     }
 
-    // Lookup
-    mapped_type& at(const Key& key) {
+    // Lookup (map-only methods - use deduced U to defer void& check)
+    template <typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    U& at(const Key& key) {
         auto it = find(key);
         if (it == end()) {
             throw std::out_of_range("dense_map::at: key not found");
@@ -1070,7 +1094,8 @@ public:
         return it->second;
     }
 
-    const mapped_type& at(const Key& key) const {
+    template <typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    const U& at(const Key& key) const {
         auto it = find(key);
         if (it == end()) {
             throw std::out_of_range("dense_map::at: key not found");
@@ -1078,12 +1103,14 @@ public:
         return it->second;
     }
 
-    mapped_type& operator[](const Key& key) {
+    template <typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    U& operator[](const Key& key) {
         auto result = try_emplace(key);
         return result.first->second;
     }
 
-    mapped_type& operator[](Key&& key) {
+    template <typename U = T, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    U& operator[](Key&& key) {
         auto result = try_emplace(std::move(key));
         return result.first->second;
     }
@@ -1219,13 +1246,11 @@ private:
             // Allocate buckets array (fingerprint + value_idx per bucket)
             BucketAlloc bucket_alloc(alloc_);
             buckets_ = std::allocator_traits<BucketAlloc>::allocate(bucket_alloc, cap);
-            // Initialize all buckets as empty
-            for (size_t i = 0; i < cap; ++i) {
-                buckets_[i].set_empty();
-            }
+            // Initialize all buckets as empty (Bucket is trivially copyable, set_empty() zeros both fields)
+            std::memset(buckets_, 0, cap * sizeof(detail::Bucket));
 
-            // Allocate values array
-            values_capacity_ = cap;
+            // Allocate values array - start smaller, let grow_values_array handle growth
+            values_capacity_ = std::min(cap, size_t(8));
             SlotAlloc slot_alloc(alloc_);
             values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
         } else {
@@ -1241,8 +1266,8 @@ private:
             IndexAlloc index_alloc(alloc_);
             value_indices_ = std::allocator_traits<IndexAlloc>::allocate(index_alloc, cap);
 
-            // Allocate initial values array
-            values_capacity_ = cap;
+            // Allocate initial values array - start smaller
+            values_capacity_ = std::min(cap, size_t(8));
             SlotAlloc slot_alloc(alloc_);
             values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
         }
@@ -1309,6 +1334,7 @@ private:
         const size_t mask = capacity_ - 1;
         detail::Bucket to_insert{dist_and_fp, value_idx};
 
+        // Robin Hood invariant: only steal from entries with smaller distance
         while (buckets_[bucket_idx].dist_and_fingerprint != 0) {
             if (to_insert.dist_and_fingerprint > buckets_[bucket_idx].dist_and_fingerprint) {
                 std::swap(to_insert, buckets_[bucket_idx]);
@@ -1332,7 +1358,7 @@ private:
                 const detail::Group g(ctrl_ + seq.offset());
                 for (auto match_mask = g.match(h2_val); match_mask; match_mask.remove_lowest_bit()) {
                     const size_t idx = seq.offset(match_mask.lowest_set_bit());
-                    if (DENSE_MAP_LIKELY(key_equal_(key, slots_[idx].first))) {
+                    if (DENSE_MAP_LIKELY(key_equal_(key, get_key(slots_[idx])))) {
                         return iterator(ctrl_ + idx, slots_ + idx, ctrl_ + capacity_);
                     }
                 }
@@ -1350,10 +1376,27 @@ private:
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
             const auto* bucket = buckets_ + bucket_idx;
 
-            // Main loop - Robin Hood invariant: if our distance > bucket's distance, key doesn't exist
+            // Unrolled first two iterations (ankerl-style) - most keys found in first 2 probes
+            if (dist_and_fp == bucket->dist_and_fingerprint &&
+                DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[bucket->value_idx])))) {
+                return values_ + bucket->value_idx;
+            }
+            dist_and_fp = detail::Bucket::inc_dist(dist_and_fp);
+            bucket_idx = (bucket_idx + 1) & mask;
+            bucket = buckets_ + bucket_idx;
+
+            if (dist_and_fp == bucket->dist_and_fingerprint &&
+                DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[bucket->value_idx])))) {
+                return values_ + bucket->value_idx;
+            }
+            dist_and_fp = detail::Bucket::inc_dist(dist_and_fp);
+            bucket_idx = (bucket_idx + 1) & mask;
+            bucket = buckets_ + bucket_idx;
+
+            // Main loop with early-out check
             while (dist_and_fp <= bucket->dist_and_fingerprint) {
                 if (dist_and_fp == bucket->dist_and_fingerprint &&
-                    DENSE_MAP_LIKELY(key_equal_(key, values_[bucket->value_idx].first))) {
+                    DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[bucket->value_idx])))) {
                     return values_ + bucket->value_idx;
                 }
                 dist_and_fp = detail::Bucket::inc_dist(dist_and_fp);
@@ -1373,7 +1416,7 @@ private:
                 for (auto match_mask = g.match(h2_val); match_mask; match_mask.remove_lowest_bit()) {
                     const size_t idx = seq.offset(match_mask.lowest_set_bit());
                     const uint32_t value_idx = value_indices_[idx];
-                    if (DENSE_MAP_LIKELY(key_equal_(key, values_[value_idx].first))) {
+                    if (DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[value_idx])))) {
                         return values_ + value_idx;
                     }
                 }
@@ -1397,7 +1440,7 @@ private:
         }
 
         // Check if first position has matching key
-        if (ctrl_[pos] == h2_val && key_equal_(key, slots_[pos].first)) {
+        if (ctrl_[pos] == h2_val && key_equal_(key, get_key(slots_[pos]))) {
             return pos;
         }
 
@@ -1411,7 +1454,7 @@ private:
             // Check for matching keys
             for (auto match_mask = g.match(h2_val); match_mask; match_mask.remove_lowest_bit()) {
                 const size_t idx = seq.offset(match_mask.lowest_set_bit());
-                if (key_equal_(key, slots_[idx].first)) {
+                if (key_equal_(key, get_key(slots_[idx]))) {
                     return idx;
                 }
             }
@@ -1433,9 +1476,9 @@ private:
 
     template <typename K, typename V>
     std::pair<iterator, bool> emplace_impl(const K& key, V&& value) {
-        if (capacity_ == 0) {
+        if (DENSE_MAP_UNLIKELY(capacity_ == 0)) {
             initialize(kMinCapacity);
-        } else if (growth_left_ == 0) {
+        } else if (DENSE_MAP_UNLIKELY(growth_left_ == 0)) {
             rehash_impl(capacity_ * 2);
         }
 
@@ -1471,15 +1514,20 @@ private:
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
             auto* bucket = buckets_ + bucket_idx;
 
-            // Find existing key or insertion point - cache bucket pointer
+            // Find existing key or insertion point
             while (dist_and_fp <= bucket->dist_and_fingerprint) {
                 if (dist_and_fp == bucket->dist_and_fingerprint &&
-                    DENSE_MAP_LIKELY(key_equal_(key, values_[bucket->value_idx].first))) {
+                    DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[bucket->value_idx])))) {
                     return {values_ + bucket->value_idx, false};  // Key exists
                 }
                 dist_and_fp = detail::Bucket::inc_dist(dist_and_fp);
                 bucket_idx = (bucket_idx + 1) & mask;
                 bucket = buckets_ + bucket_idx;
+            }
+
+            // Ensure values array has capacity
+            if (DENSE_MAP_UNLIKELY(size_ >= values_capacity_)) {
+                grow_values_array();
             }
 
             // Insert the value at end of values array
@@ -1489,53 +1537,72 @@ private:
             ++size_;
             --growth_left_;
 
-            // Robin Hood insertion: inline shift for better optimization
-            if (DENSE_MAP_LIKELY(bucket->dist_and_fingerprint == 0)) {
-                bucket->dist_and_fingerprint = dist_and_fp;
-                bucket->value_idx = new_value_idx;
-            } else {
-                detail::Bucket to_insert{dist_and_fp, new_value_idx};
-                do {
-                    std::swap(to_insert, *bucket);
-                    to_insert.dist_and_fingerprint = detail::Bucket::inc_dist(to_insert.dist_and_fingerprint);
-                    bucket_idx = (bucket_idx + 1) & mask;
-                    bucket = buckets_ + bucket_idx;
-                } while (bucket->dist_and_fingerprint != 0);
-                *bucket = to_insert;
-            }
+            // Robin Hood insertion (ankerl-style): shift up until empty slot
+            place_and_shift_up(bucket_idx, dist_and_fp, new_value_idx);
 
             return {result_ptr, true};
         } else {
-            // Indirect storage
-            size_t hash = hash_(key);
-            size_t idx = find_slot_for_insert(key, hash);
-
-            if (detail::is_full(ctrl_[idx])) {
-                return {values_ + slots_[idx], false};
-            }
-
-            const bool was_deleted = detail::is_deleted(ctrl_[idx]);
+            // Indirect storage (Swiss Table + values array)
+            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
-            ctrl_[idx] = h2_val;
-            if (idx < kGroupWidth) {
-                ctrl_[capacity_ + idx] = h2_val;
+            const size_t mask = capacity_ - 1;
+
+            // Find existing key or insertion slot
+            size_t insert_slot = ~size_t{0};
+            detail::ProbeSeq seq(hash, mask);
+            for (;;) {
+                const detail::Group g(ctrl_ + seq.offset());
+
+                // Check for matching keys
+                for (auto match_mask = g.match(h2_val); match_mask; match_mask.remove_lowest_bit()) {
+                    const size_t idx = seq.offset(match_mask.lowest_set_bit());
+                    const uint32_t vidx = value_indices_[idx];
+                    if (key_equal_(key, get_key(values_[vidx]))) {
+                        return {values_ + vidx, false};  // Key exists
+                    }
+                }
+
+                // Track first available slot
+                if (insert_slot == ~size_t{0}) {
+                    if (auto empty_mask = g.match_empty_or_deleted()) {
+                        insert_slot = seq.offset(empty_mask.lowest_set_bit());
+                    }
+                }
+
+                // If we found an empty slot, key doesn't exist
+                if (g.match_empty()) {
+                    break;
+                }
+                seq.next();
             }
 
-            slots_[idx] = static_cast<uint32_t>(size_);
+            // Ensure values array has capacity
+            if (DENSE_MAP_UNLIKELY(size_ >= values_capacity_)) {
+                grow_values_array();
+            }
+
+            // Insert new value
+            const bool was_deleted = detail::is_deleted(ctrl_[insert_slot]);
+            ctrl_[insert_slot] = h2_val;
+            if (insert_slot < kGroupWidth) {
+                ctrl_[capacity_ + insert_slot] = h2_val;
+            }
+
+            value_indices_[insert_slot] = static_cast<uint32_t>(size_);
             AllocTraits::construct(alloc_, values_ + size_, std::forward<V>(value));
 
             ++size_;
             growth_left_ -= !was_deleted;
 
-            return {values_ + slots_[idx], true};
+            return {values_ + value_indices_[insert_slot], true};
         }
     }
 
     template <typename K, typename... Args>
     std::pair<iterator, bool> try_emplace_impl(K&& key, Args&&... args) {
-        if (capacity_ == 0) {
+        if (DENSE_MAP_UNLIKELY(capacity_ == 0)) {
             initialize(kMinCapacity);
-        } else if (growth_left_ == 0) {
+        } else if (DENSE_MAP_UNLIKELY(growth_left_ == 0)) {
             rehash_impl(capacity_ * 2);
         }
 
@@ -1573,10 +1640,10 @@ private:
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
             auto* bucket = buckets_ + bucket_idx;
 
-            // Find existing key or insertion point - cache bucket pointer
+            // Find existing key or insertion point
             while (dist_and_fp <= bucket->dist_and_fingerprint) {
                 if (dist_and_fp == bucket->dist_and_fingerprint &&
-                    DENSE_MAP_LIKELY(key_equal_(key, values_[bucket->value_idx].first))) {
+                    DENSE_MAP_LIKELY(key_equal_(key, get_key(values_[bucket->value_idx])))) {
                     return {values_ + bucket->value_idx, false};  // Key exists
                 }
                 dist_and_fp = detail::Bucket::inc_dist(dist_and_fp);
@@ -1598,22 +1665,8 @@ private:
             ++size_;
             --growth_left_;
 
-            // Robin Hood insertion: inline shift for better optimization
-            // Most insertions don't need displacement (fast path)
-            if (DENSE_MAP_LIKELY(bucket->dist_and_fingerprint == 0)) {
-                bucket->dist_and_fingerprint = dist_and_fp;
-                bucket->value_idx = new_value_idx;
-            } else {
-                // Slow path: need to displace existing entries
-                detail::Bucket to_insert{dist_and_fp, new_value_idx};
-                do {
-                    std::swap(to_insert, *bucket);
-                    to_insert.dist_and_fingerprint = detail::Bucket::inc_dist(to_insert.dist_and_fingerprint);
-                    bucket_idx = (bucket_idx + 1) & mask;
-                    bucket = buckets_ + bucket_idx;
-                } while (bucket->dist_and_fingerprint != 0);
-                *bucket = to_insert;
-            }
+            // Robin Hood insertion (ankerl-style): shift up until empty slot
+            place_and_shift_up(bucket_idx, dist_and_fp, new_value_idx);
 
             return {values_ + new_value_idx, true};
         } else {
@@ -1632,7 +1685,7 @@ private:
                 for (auto match_mask = g.match(h2_val); match_mask; match_mask.remove_lowest_bit()) {
                     const size_t idx = seq.offset(match_mask.lowest_set_bit());
                     const uint32_t vidx = value_indices_[idx];
-                    if (key_equal_(key, values_[vidx].first)) {
+                    if (key_equal_(key, get_key(values_[vidx]))) {
                         return {values_ + vidx, false};  // Key exists
                     }
                 }
@@ -1684,10 +1737,14 @@ private:
         SlotAlloc slot_alloc(alloc_);
         value_type* new_values = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, new_capacity);
 
-        // Move existing values
-        for (size_t i = 0; i < size_; ++i) {
-            AllocTraits::construct(alloc_, new_values + i, std::move(values_[i]));
-            AllocTraits::destroy(alloc_, values_ + i);
+        // Move existing values - use memcpy for trivially copyable types
+        if constexpr (std::is_trivially_copyable_v<value_type>) {
+            std::memcpy(new_values, values_, size_ * sizeof(value_type));
+        } else {
+            for (size_t i = 0; i < size_; ++i) {
+                AllocTraits::construct(alloc_, new_values + i, std::move(values_[i]));
+                AllocTraits::destroy(alloc_, values_ + i);
+            }
         }
 
         if (values_) {
@@ -1728,7 +1785,7 @@ private:
         if constexpr (kUseFlat) {
             // Flat storage: Robin Hood backward shift deletion (ankerl-style)
             // Find the bucket that points to this value
-            const size_t hash = hash_(values_[value_idx].first);
+            const size_t hash = hash_(get_key(values_[value_idx]));
             size_t bucket_idx = hash >> shift_;  // HIGH bits for bucket index
 
             // Find the bucket containing this value
@@ -1752,7 +1809,7 @@ private:
             const size_t last_idx = size_ - 1;
             if (value_idx != last_idx) {
                 // Find and update bucket pointing to last value
-                const size_t last_hash = hash_(values_[last_idx].first);
+                const size_t last_hash = hash_(get_key(values_[last_idx]));
                 size_t last_pos = last_hash >> shift_;  // HIGH bits for bucket index
 
                 while (buckets_[last_pos].value_idx != static_cast<uint32_t>(last_idx)) {
@@ -1770,7 +1827,7 @@ private:
         } else {
             // Indirect storage (Swiss Table + Indirect)
             // Find the slot that points to this value
-            const size_t hash = hash_(values_[value_idx].first);
+            const size_t hash = hash_(get_key(values_[value_idx]));
             const int8_t h2_val = detail::h2(hash);
 
             size_t slot_idx = ~size_t{0};
@@ -1802,7 +1859,7 @@ private:
             const size_t last_idx = size_ - 1;
             if (value_idx != last_idx) {
                 // Find and update slot pointing to last value
-                const size_t last_hash = hash_(values_[last_idx].first);
+                const size_t last_hash = hash_(get_key(values_[last_idx]));
                 const int8_t last_h2 = detail::h2(last_hash);
 
                 detail::ProbeSeq last_seq(last_hash, mask);
@@ -1847,7 +1904,7 @@ private:
 
             for (size_t i = 0; i < old_capacity; ++i) {
                 if (detail::is_full(old_ctrl[i])) {
-                    size_t hash = hash_(old_slots[i].first);
+                    size_t hash = hash_(get_key(old_slots[i]));
                     size_t idx = find_first_empty(hash);
 
                     ctrl_[idx] = detail::h2(hash);
@@ -1882,9 +1939,7 @@ private:
             // Allocate new buckets
             BucketAlloc bucket_alloc(alloc_);
             buckets_ = std::allocator_traits<BucketAlloc>::allocate(bucket_alloc, new_capacity);
-            for (size_t i = 0; i < new_capacity; ++i) {
-                buckets_[i].set_empty();
-            }
+            std::memset(buckets_, 0, new_capacity * sizeof(detail::Bucket));
 
             // Allocate values array if not already allocated
             if (!values_) {
@@ -1901,7 +1956,7 @@ private:
             // Reinsert all values (values stay in place!) using ankerl-style
             const size_t mask = capacity_ - 1;
             for (size_t i = 0; i < old_size; ++i) {
-                const size_t hash = hash_(values_[i].first);
+                const size_t hash = hash_(get_key(values_[i]));
                 auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
                 size_t bucket_idx = hash >> shift_;  // HIGH bits for bucket index
 
@@ -1940,7 +1995,7 @@ private:
             // Reinsert all slots (values stay in place!)
             const size_t mask = capacity_ - 1;
             for (size_t i = 0; i < old_size; ++i) {
-                const size_t hash = hash_(values_[i].first);
+                const size_t hash = hash_(get_key(values_[i]));
                 const int8_t h2_val = detail::h2(hash);
                 size_t idx = find_first_empty(hash);
 
@@ -1975,26 +2030,34 @@ private:
 };
 
 // Non-member functions
-template <typename K, typename V, typename H, typename E, typename A>
-bool operator==(const dense_map<K, V, H, E, A>& lhs,
-                const dense_map<K, V, H, E, A>& rhs) {
+template <typename K, typename V, typename H, typename E, typename A, typename M>
+bool operator==(const dense_map<K, V, H, E, A, M>& lhs,
+                const dense_map<K, V, H, E, A, M>& rhs) {
     if (lhs.size() != rhs.size()) return false;
-    for (const auto& [key, value] : lhs) {
-        auto it = rhs.find(key);
-        if (it == rhs.end() || it->second != value) return false;
+    if constexpr (detail::is_map_v<V>) {
+        // Map mode: check key-value pairs
+        for (const auto& [key, value] : lhs) {
+            auto it = rhs.find(key);
+            if (it == rhs.end() || it->second != value) return false;
+        }
+    } else {
+        // Set mode: just check containment
+        for (const auto& key : lhs) {
+            if (!rhs.contains(key)) return false;
+        }
     }
     return true;
 }
 
-template <typename K, typename V, typename H, typename E, typename A>
-bool operator!=(const dense_map<K, V, H, E, A>& lhs,
-                const dense_map<K, V, H, E, A>& rhs) {
+template <typename K, typename V, typename H, typename E, typename A, typename M>
+bool operator!=(const dense_map<K, V, H, E, A, M>& lhs,
+                const dense_map<K, V, H, E, A, M>& rhs) {
     return !(lhs == rhs);
 }
 
-template <typename K, typename V, typename H, typename E, typename A>
-void swap(dense_map<K, V, H, E, A>& lhs,
-          dense_map<K, V, H, E, A>& rhs) noexcept {
+template <typename K, typename V, typename H, typename E, typename A, typename M>
+void swap(dense_map<K, V, H, E, A, M>& lhs,
+          dense_map<K, V, H, E, A, M>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
