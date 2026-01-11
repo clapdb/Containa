@@ -239,6 +239,64 @@ Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vec
 
 ---
 
+## dense_map Benchmark Results (x86-64 AVX-512)
+
+### Test Environment
+
+- **Platform**: AWS EC2 (Intel Xeon Platinum 8175M @ 2.50GHz)
+- **Compiler**: GCC with `-O3 -DNDEBUG -march=native`
+- **C++ Standard**: C++20
+- **SIMD**: AVX-512F + AVX-512BW (64-byte group width)
+
+### Performance Comparison (dense_map = 1.0x baseline)
+
+> **Reading**: `1.0x` = same as dense_map, `>1.0x` = slower than dense_map
+
+#### Integer Keys (100K elements)
+
+| Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
+|-----------|-----------|--------|------------|------------|----------------|
+| Insert | **1.0x** | 1.0x | 0.75x | 0.9x | 6.4x |
+| Find (100%) | **1.0x** | 0.9x | 0.6x | 0.7x | 3.1x |
+| Iterate | **1.0x** | 1.0x | 4.5x | 4.2x | 3.5x |
+| Erase | **1.0x** | 0.9x | 0.7x | 1.2x | 4.3x |
+
+#### String Keys 16B (100K elements)
+
+| Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
+|-----------|-----------|--------|------------|------------|----------------|
+| Insert | **1.0x** | 0.7x | 2.3x | 1.9x | 3.4x |
+| Find | **1.0x** | 0.6x | 2.4x | 1.6x | 3.0x |
+| Iterate | **1.0x** | 1.0x | 9.6x | 2.0x | 2.4x |
+
+#### 16-byte Trivial Key (100K elements)
+
+Key type: `struct { int64_t a, b; }` - uses Indirect storage with AVX-512 SIMD
+
+| Operation | dense_map | ankerl | tsl::robin |
+|-----------|-----------|--------|------------|
+| Insert | **1.0x** | 3.2x | 4.1x |
+| Find | **1.0x** | 4.0x | 2.2x |
+| Iterate | **1.0x** | 1.9x | 14x |
+
+### Memory Usage (100K int64 → int64)
+
+| Container | Memory | vs dense_map |
+|-----------|--------|--------------|
+| dense_map | 3,072 KB | **1.0x** |
+| ankerl | 3,072 KB | 1.0x |
+| tsl::robin | 6,144 KB | 2.0x |
+| std::unordered | 4,476 KB | 1.5x |
+
+### Key Optimizations (x86-64)
+
+- **AVX-512 SIMD probing**: 64-byte group width, processes 64 control bytes per iteration
+- **Native mask operations**: `_mm512_cmpeq_epi8_mask` returns 64-bit mask directly
+- **Erase optimization**: `memcpy` for trivially copyable types, prefetch hints
+- **h2 fingerprint**: 7-bit fingerprint in control byte for indirect storage
+
+---
+
 ## dense_map Benchmark Results (ARM64)
 
 ### Test Environment
