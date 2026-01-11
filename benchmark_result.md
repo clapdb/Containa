@@ -256,8 +256,8 @@ Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vec
 | Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
 |-----------|-----------|--------|------------|------------|----------------|
 | Insert | **1.0x** | 1.04x | 0.94x | 0.86x | 5.10x |
-| Find (50%) | **1.0x** | 1.00x | 0.80x | - | - |
-| Find (100%) | **1.0x** | 1.01x | 0.70x | - | - |
+| Find (50%) | **1.0x** | 1.07x | 0.84x | 1.34x | 0.96x |
+| Find (100%) | **1.0x** | 1.04x | 0.73x | 3.42x | 2.46x |
 | Iterate | **1.0x** | 1.02x | 6.26x | 4.54x | 3.37x |
 | Erase | **1.0x** | 1.39x | 1.35x | 1.38x | 3.65x |
 
@@ -266,7 +266,7 @@ Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vec
 | Operation | dense_map | ankerl | tsl::robin | absl::flat | std::unordered |
 |-----------|-----------|--------|------------|------------|----------------|
 | Insert | **1.0x** | 0.94x | 1.04x | 1.22x | 3.45x |
-| Find (50%) | **1.0x** | 1.04x | 0.56x | - | - |
+| Find (50%) | **1.0x** | 1.03x | 0.53x | - | - |
 | Find (100%) | **1.0x** | 1.20x | 0.75x | 1.97x | 1.85x |
 | Iterate | **1.0x** | 0.92x | 4.61x | 7.61x | 2.56x |
 | Erase | **1.0x** | 1.23x | 1.31x | 1.86x | 2.73x |
@@ -284,8 +284,8 @@ Note: int64_t/uint64_t tested but showed no improvement (only 2 elements per vec
 | Metric | vs ankerl | vs tsl | vs absl | vs std |
 |--------|-----------|--------|---------|--------|
 | Insert (int) | ~1.0x | ~1.0x | 0.9-1.2x | 3-5x faster |
-| Find (int) | ~1.0x | 0.6-0.8x slower | 1.9x faster | 1.9x faster |
-| Iterate | ~1.0x | 5-10x faster | 5-8x faster | 3-47x faster |
+| Find (int 100%) | ~1.0x | 0.7-0.8x slower | 2-3x faster | 1.9-2.5x faster |
+| Iterate | ~1.0x | 5-6x faster | 5-8x faster | 3-47x faster |
 | Erase | 1.2-1.4x faster | 1.3x faster | 1.4-1.9x faster | 2.7-3.7x faster |
 | String ops | 1.2-1.6x faster | 2.5-9x faster | 1.9-2.7x faster | 2.5-47x faster |
 
