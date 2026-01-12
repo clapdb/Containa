@@ -1462,4 +1462,206 @@ TEST_CASE("dense_map::simd_bitmask_correctness") {
     }
 }
 
+// ============================================================================
+// PMR (Polymorphic Memory Resource) Tests
+// ============================================================================
+
+TEST_CASE("dense_map::pmr") {
+    SUBCASE("basic operations with monotonic_buffer_resource") {
+        // Create a buffer and monotonic resource
+        std::array<std::byte, 4096> buffer;
+        std::pmr::monotonic_buffer_resource resource(buffer.data(), buffer.size(),
+                                                     std::pmr::null_memory_resource());
+
+        // Create a PMR dense_map
+        pmr::dense_map<int, std::string> map(&resource);
+
+        // Basic insert and find
+        map[1] = "one";
+        map[2] = "two";
+        map[3] = "three";
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map[1], "one");
+        CHECK_EQ(map[2], "two");
+        CHECK_EQ(map[3], "three");
+
+        // Erase
+        map.erase(2);
+        CHECK_EQ(map.size(), 2);
+        CHECK(map.find(2) == map.end());
+    }
+
+    SUBCASE("allocator-only constructor") {
+        std::pmr::monotonic_buffer_resource resource;
+        pmr::dense_map<int, int> map(&resource);
+
+        CHECK(map.empty());
+        CHECK_EQ(map.size(), 0);
+
+        map[42] = 100;
+        CHECK_EQ(map.size(), 1);
+        CHECK_EQ(map[42], 100);
+    }
+
+    SUBCASE("copy constructor uses select_on_container_copy_construction") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        pmr::dense_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        // Copy constructor - for PMR, uses default memory resource (not resource1)
+        pmr::dense_map<int, int> map2(map1);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+    }
+
+    SUBCASE("allocator-extended copy constructor") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        pmr::dense_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        // Copy with explicit allocator
+        pmr::dense_map<int, int> map2(map1, &resource2);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("allocator-extended move constructor - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        pmr::dense_map<int, int> map1(&resource);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        // Move with same allocator - should steal resources
+        pmr::dense_map<int, int> map2(std::move(map1), &resource);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK(map1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("allocator-extended move constructor - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        pmr::dense_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        // Move with different allocator - must copy elements
+        pmr::dense_map<int, int> map2(std::move(map1), &resource2);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("copy assignment - keeps allocator") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        pmr::dense_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        pmr::dense_map<int, int> map2(&resource2);
+        map2[3] = 30;
+
+        // Copy assignment - PMR does not propagate allocator
+        map2 = map1;
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("move assignment - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        pmr::dense_map<int, int> map1(&resource);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        pmr::dense_map<int, int> map2(&resource);
+        map2[3] = 30;
+
+        // Move assignment - same resource, should steal resources
+        map2 = std::move(map1);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK(map1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("move assignment - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        pmr::dense_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        pmr::dense_map<int, int> map2(&resource2);
+        map2[3] = 30;
+
+        // Move assignment - different resource, must move elements
+        map2 = std::move(map1);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("string keys with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        pmr::dense_map<std::string, int> map(&resource);
+
+        map["hello"] = 1;
+        map["world"] = 2;
+        map["test"] = 3;
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map["hello"], 1);
+        CHECK_EQ(map["world"], 2);
+        CHECK_EQ(map["test"], 3);
+
+        // Test iteration
+        int count = 0;
+        for (const auto& [key, value] : map) {
+            (void)key;
+            (void)value;
+            ++count;
+        }
+        CHECK_EQ(count, 3);
+    }
+
+    SUBCASE("pmr::fast_map alias") {
+        std::pmr::monotonic_buffer_resource resource;
+        pmr::fast_map<int, std::string> map(&resource);
+
+        map[1] = "one";
+        map[2] = "two";
+
+        CHECK_EQ(map.size(), 2);
+        CHECK_EQ(map[1], "one");
+    }
+}
+
 }  // namespace stdb::container
