@@ -19,6 +19,8 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <memory_resource>
 #include <optional>
 #include <thread>
 
@@ -35,15 +37,22 @@ namespace stdb::container {
  *   5. Simplified node structure
  */
 
-template <typename Key, typename Value, typename Compare = std::less<Key>, uint8_t MaxLevel = 12>
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Alloc = std::allocator<std::pair<const Key, Value>>, uint8_t MaxLevel = 12>
 class concurrent_skiplist {
    public:
     using key_type = Key;
     using mapped_type = Value;
     using value_type = std::pair<const Key, Value>;
     using size_type = std::size_t;
+    using allocator_type = Alloc;
 
    private:
+    using AllocTraits = std::allocator_traits<Alloc>;
+    // Rebind to byte allocator for variable-sized node allocation
+    using ByteAlloc = typename AllocTraits::template rebind_alloc<std::byte>;
+    using ByteAllocTraits = std::allocator_traits<ByteAlloc>;
+
     // Marked pointer: use low bit to indicate logical deletion
     template <typename T>
     struct MarkedPtr {
@@ -66,11 +75,26 @@ class concurrent_skiplist {
         uint8_t height;
         std::atomic<MarkedPtr<Node>> next[1];  // flexible array
 
-        static Node* create(const Key& k, const Value& v, uint8_t h) {
-            void* mem = ::operator new(sizeof(Node) + h * sizeof(std::atomic<MarkedPtr<Node>>));
+        static size_t alloc_size(uint8_t h) {
+            return sizeof(Node) + h * sizeof(std::atomic<MarkedPtr<Node>>);
+        }
+
+        static Node* create(const Key& k, const Value& v, uint8_t h, ByteAlloc& alloc) {
+            size_t size = alloc_size(h);
+            void* mem = ByteAllocTraits::allocate(alloc, size);
             Node* node = static_cast<Node*>(mem);
-            new (&node->key) Key(k);
-            new (&node->value) Value(v);
+            try {
+                new (&node->key) Key(k);
+                try {
+                    new (&node->value) Value(v);
+                } catch (...) {
+                    node->key.~Key();
+                    throw;
+                }
+            } catch (...) {
+                ByteAllocTraits::deallocate(alloc, static_cast<std::byte*>(mem), size);
+                throw;
+            }
             node->height = h;
             for (uint8_t i = 0; i <= h; ++i) {
                 new (&node->next[i]) std::atomic<MarkedPtr<Node>>(MarkedPtr<Node>());
@@ -78,11 +102,22 @@ class concurrent_skiplist {
             return node;
         }
 
-        static Node* create(Key&& k, Value&& v, uint8_t h) {
-            void* mem = ::operator new(sizeof(Node) + h * sizeof(std::atomic<MarkedPtr<Node>>));
+        static Node* create(Key&& k, Value&& v, uint8_t h, ByteAlloc& alloc) {
+            size_t size = alloc_size(h);
+            void* mem = ByteAllocTraits::allocate(alloc, size);
             Node* node = static_cast<Node*>(mem);
-            new (&node->key) Key(std::move(k));
-            new (&node->value) Value(std::move(v));
+            try {
+                new (&node->key) Key(std::move(k));
+                try {
+                    new (&node->value) Value(std::move(v));
+                } catch (...) {
+                    node->key.~Key();
+                    throw;
+                }
+            } catch (...) {
+                ByteAllocTraits::deallocate(alloc, static_cast<std::byte*>(mem), size);
+                throw;
+            }
             node->height = h;
             for (uint8_t i = 0; i <= h; ++i) {
                 new (&node->next[i]) std::atomic<MarkedPtr<Node>>(MarkedPtr<Node>());
@@ -90,10 +125,11 @@ class concurrent_skiplist {
             return node;
         }
 
-        void destroy() {
+        void destroy(ByteAlloc& alloc) {
+            size_t size = alloc_size(height);
             key.~Key();
             value.~Value();
-            ::operator delete(this);
+            ByteAllocTraits::deallocate(alloc, reinterpret_cast<std::byte*>(this), size);
         }
     };
 
@@ -124,13 +160,26 @@ class concurrent_skiplist {
     // Comparator on its own to avoid interference
     alignas(64) Compare _cmp;
 
+    // Allocator (mutable because allocation may happen in const-qualified contexts internally)
+    mutable ByteAlloc _alloc;
+
     // Simplified memory management:
     // - Don't free nodes during operation (leave in list, just marked)
     // - Only clean up in destructor
     // This is safe and simple, though it leaks memory during heavy delete workloads
+    //
+    // NOTE: For PMR usage, the underlying memory_resource must be thread-safe
+    // (e.g., std::pmr::synchronized_pool_resource). Using non-thread-safe resources
+    // with concurrent operations is undefined behavior.
 
    public:
-    concurrent_skiplist() {
+    concurrent_skiplist() : _alloc() {
+        for (uint8_t i = 0; i <= MaxLevel; ++i) {
+            _head[i].store(MarkedPtr<Node>(), std::memory_order_relaxed);
+        }
+    }
+
+    explicit concurrent_skiplist(const Alloc& alloc) : _alloc(alloc) {
         for (uint8_t i = 0; i <= MaxLevel; ++i) {
             _head[i].store(MarkedPtr<Node>(), std::memory_order_relaxed);
         }
@@ -141,13 +190,17 @@ class concurrent_skiplist {
         Node* curr = _head[0].load(std::memory_order_relaxed).ptr();
         while (curr) {
             Node* next = curr->next[0].load(std::memory_order_relaxed).ptr();
-            curr->destroy();
+            curr->destroy(_alloc);
             curr = next;
         }
     }
 
     concurrent_skiplist(const concurrent_skiplist&) = delete;
     concurrent_skiplist& operator=(const concurrent_skiplist&) = delete;
+
+    [[nodiscard]] auto get_allocator() const noexcept -> allocator_type {
+        return allocator_type(_alloc);
+    }
 
     // =========================================================================
     // Find - ultra-optimized for speed
@@ -223,7 +276,7 @@ class concurrent_skiplist {
     // =========================================================================
     bool insert(const Key& key, const Value& value) {
         uint8_t height = random_height();
-        Node* new_node = Node::create(key, value, height);
+        Node* new_node = Node::create(key, value, height, _alloc);
 
         // Update max height
         uint8_t old_h = _height.load(std::memory_order_relaxed);
@@ -238,7 +291,7 @@ class concurrent_skiplist {
             // Find insert position
             if (!find_insert_position(key, preds, succs)) {
                 // Key exists
-                new_node->destroy();
+                new_node->destroy(_alloc);
                 return false;
             }
 
@@ -296,7 +349,7 @@ class concurrent_skiplist {
 
     bool insert(Key&& key, Value&& value) {
         uint8_t height = random_height();
-        Node* new_node = Node::create(std::move(key), std::move(value), height);
+        Node* new_node = Node::create(std::move(key), std::move(value), height, _alloc);
 
         uint8_t old_h = _height.load(std::memory_order_relaxed);
         while (height > old_h) {
@@ -308,7 +361,7 @@ class concurrent_skiplist {
 
         while (true) {
             if (!find_insert_position(new_node->key, preds, succs)) {
-                new_node->destroy();
+                new_node->destroy(_alloc);
                 return false;
             }
 
@@ -532,7 +585,25 @@ class concurrent_skiplist {
     }
 };
 
-template <typename Key, typename Value, typename Compare = std::less<Key>>
-using concurrent_skiplist_map = concurrent_skiplist<Key, Value, Compare>;
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Alloc = std::allocator<std::pair<const Key, Value>>>
+using concurrent_skiplist_map = concurrent_skiplist<Key, Value, Compare, Alloc>;
 
 }  // namespace stdb::container
+
+// PMR type aliases
+// NOTE: When using PMR with concurrent_skiplist, the underlying memory_resource
+// MUST be thread-safe (e.g., std::pmr::synchronized_pool_resource).
+// Using non-thread-safe resources like monotonic_buffer_resource or
+// unsynchronized_pool_resource with concurrent operations is undefined behavior.
+namespace stdb::pmr {
+template <typename Key, typename Value, typename Compare = std::less<Key>, uint8_t MaxLevel = 12>
+using concurrent_skiplist =
+    container::concurrent_skiplist<Key, Value, Compare,
+                                   std::pmr::polymorphic_allocator<std::pair<const Key, Value>>, MaxLevel>;
+
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using concurrent_skiplist_map =
+    container::concurrent_skiplist<Key, Value, Compare,
+                                   std::pmr::polymorphic_allocator<std::pair<const Key, Value>>>;
+}  // namespace stdb::pmr
