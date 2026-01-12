@@ -16,6 +16,7 @@
 
 #pragma once
 #include <algorithm>
+#include <memory_resource>
 #include <stdexcept>
 
 #include "container_base.hpp"
@@ -56,12 +57,14 @@ class devectra
     using const_reference = const T&;
     using rvalue_reference = T&&;
     using allocator_type = Alloc;
+    using AllocTraits = std::allocator_traits<Alloc>;
 
    private:
     T* _buffer = nullptr;     // Start of allocated buffer
     size_type _offset = 0;    // Offset from buffer start to first element
     size_type _size = 0;      // Number of elements
     size_type _capacity = 0;  // Total buffer capacity
+    [[no_unique_address]] Alloc _alloc;
 
     static constexpr size_type kDefaultCapacity = 8;
     // Use 2x growth factor (matches libstdc++ std::vector for better performance)
@@ -82,17 +85,16 @@ class devectra
     [[nodiscard]] auto back_spare() const noexcept -> size_type { return _capacity - _offset - _size; }
 
     void allocate(size_type cap) {
-        _buffer = static_cast<T*>(std::malloc(cap * sizeof(T)));
-        if (_buffer == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        _buffer = AllocTraits::allocate(_alloc, cap);
         _capacity = cap;
     }
 
     void deallocate() noexcept {
-        std::free(_buffer);
-        _buffer = nullptr;
-        _capacity = 0;
+        if (_buffer != nullptr) {
+            AllocTraits::deallocate(_alloc, _buffer, _capacity);
+            _buffer = nullptr;
+            _capacity = 0;
+        }
     }
 
     // Grow the buffer, centering elements to leave space at both ends
@@ -102,10 +104,7 @@ class devectra
             new_cap = kDefaultCapacity;
         }
 
-        T* new_buffer = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
-        if (new_buffer == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        T* new_buffer = AllocTraits::allocate(_alloc, new_cap);
 
         // Center elements in new buffer
         size_type new_offset = (new_cap - _size) / 2;
@@ -171,10 +170,7 @@ class devectra
             new_cap = kDefaultCapacity;
         }
 
-        T* new_buffer = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
-        if (new_buffer == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        T* new_buffer = AllocTraits::allocate(_alloc, new_cap);
 
         // Center elements in new buffer
         size_type new_offset = (new_cap - _size) / 2;
@@ -240,10 +236,7 @@ class devectra
             new_cap = kDefaultCapacity;
         }
 
-        T* new_buffer = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
-        if (new_buffer == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        T* new_buffer = AllocTraits::allocate(_alloc, new_cap);
 
         // Center elements in new buffer
         size_type new_offset = (new_cap - _size) / 2;
@@ -268,8 +261,11 @@ class devectra
     // Default constructor
     constexpr devectra() noexcept = default;
 
+    // Allocator-only constructor
+    explicit devectra(const Alloc& alloc) noexcept : _alloc(alloc) {}
+
     // Constructor with size
-    explicit devectra(size_type count) {
+    explicit devectra(size_type count, const Alloc& alloc = Alloc()) : _alloc(alloc) {
         if (count > 0) {
             allocate(count);
             _offset = 0;
@@ -279,7 +275,7 @@ class devectra
     }
 
     // Constructor with size and value
-    devectra(size_type count, const T& value) {
+    devectra(size_type count, const T& value, const Alloc& alloc = Alloc()) : _alloc(alloc) {
         if (count > 0) {
             allocate(count);
             _offset = 0;
@@ -290,7 +286,7 @@ class devectra
 
     // Constructor from iterators
     template <std::forward_iterator InputIt>
-    devectra(InputIt first, InputIt last) {
+    devectra(InputIt first, InputIt last, const Alloc& alloc = Alloc()) : _alloc(alloc) {
         auto dist = std::distance(first, last);
         if (dist > 0) {
             size_type count = static_cast<size_type>(dist);
@@ -302,10 +298,22 @@ class devectra
     }
 
     // Constructor from initializer list
-    devectra(std::initializer_list<T> init) : devectra(init.begin(), init.end()) {}
+    devectra(std::initializer_list<T> init, const Alloc& alloc = Alloc())
+        : devectra(init.begin(), init.end(), alloc) {}
 
     // Copy constructor
-    devectra(const devectra& other) {
+    devectra(const devectra& other)
+        : _alloc(AllocTraits::select_on_container_copy_construction(other._alloc)) {
+        if (other._size > 0) {
+            allocate(other._size);
+            _offset = 0;
+            _size = other._size;
+            copy_range(data_start(), other.data_start(), other.data_end());
+        }
+    }
+
+    // Allocator-extended copy constructor
+    devectra(const devectra& other, const Alloc& alloc) : _alloc(alloc) {
         if (other._size > 0) {
             allocate(other._size);
             _offset = 0;
@@ -316,11 +324,48 @@ class devectra
 
     // Move constructor
     devectra(devectra&& other) noexcept
-        : _buffer(other._buffer), _offset(other._offset), _size(other._size), _capacity(other._capacity) {
+        : _buffer(other._buffer),
+          _offset(other._offset),
+          _size(other._size),
+          _capacity(other._capacity),
+          _alloc(std::move(other._alloc)) {
         other._buffer = nullptr;
         other._offset = 0;
         other._size = 0;
         other._capacity = 0;
+    }
+
+    // Allocator-extended move constructor
+    devectra(devectra&& other, const Alloc& alloc) : _alloc(alloc) {
+        if constexpr (AllocTraits::is_always_equal::value) {
+            // Allocators always equal - can steal resources
+            _buffer = other._buffer;
+            _offset = other._offset;
+            _size = other._size;
+            _capacity = other._capacity;
+            other._buffer = nullptr;
+            other._offset = 0;
+            other._size = 0;
+            other._capacity = 0;
+        } else if (_alloc == other._alloc) {
+            // Same allocator - can steal resources
+            _buffer = other._buffer;
+            _offset = other._offset;
+            _size = other._size;
+            _capacity = other._capacity;
+            other._buffer = nullptr;
+            other._offset = 0;
+            other._size = 0;
+            other._capacity = 0;
+        } else {
+            // Different allocators - must move elements
+            if (other._size > 0) {
+                allocate(other._size);
+                _offset = 0;
+                _size = other._size;
+                (void)move_range_without_overlap(data_start(), other.data_start(), other.data_end());
+            }
+        }
     }
 
     // Copy assignment
@@ -329,11 +374,28 @@ class devectra
             return *this;
         }
 
+        constexpr bool propagate = AllocTraits::propagate_on_container_copy_assignment::value;
+        const bool alloc_equal = _alloc == other._alloc;
+
         destroy_range(data_start(), data_end());
 
-        if (other._size > _capacity) {
-            deallocate();
-            allocate(other._size);
+        // If allocators differ and we're propagating, we must reallocate
+        if constexpr (propagate) {
+            if (!alloc_equal) {
+                deallocate();
+                _alloc = other._alloc;
+                if (other._size > 0) {
+                    allocate(other._size);
+                }
+            } else if (other._size > _capacity) {
+                deallocate();
+                allocate(other._size);
+            }
+        } else {
+            if (other._size > _capacity) {
+                deallocate();
+                allocate(other._size);
+            }
         }
 
         _offset = 0;
@@ -345,24 +407,58 @@ class devectra
     }
 
     // Move assignment
-    auto operator=(devectra&& other) noexcept -> devectra& {
+    auto operator=(devectra&& other) noexcept(
+        AllocTraits::propagate_on_container_move_assignment::value ||
+        AllocTraits::is_always_equal::value) -> devectra& {
         if (this == &other) [[unlikely]] {
             return *this;
         }
 
+        constexpr bool propagate = AllocTraits::propagate_on_container_move_assignment::value;
+        constexpr bool always_equal = AllocTraits::is_always_equal::value;
+
         destroy_range(data_start(), data_end());
-        deallocate();
 
-        _buffer = other._buffer;
-        _offset = other._offset;
-        _size = other._size;
-        _capacity = other._capacity;
-
-        other._buffer = nullptr;
-        other._offset = 0;
-        other._size = 0;
-        other._capacity = 0;
-
+        if constexpr (propagate || always_equal) {
+            // Can always steal resources
+            deallocate();
+            _buffer = other._buffer;
+            _offset = other._offset;
+            _size = other._size;
+            _capacity = other._capacity;
+            if constexpr (propagate) {
+                _alloc = std::move(other._alloc);
+            }
+            other._buffer = nullptr;
+            other._offset = 0;
+            other._size = 0;
+            other._capacity = 0;
+        } else {
+            // Must check allocator equality at runtime
+            if (_alloc == other._alloc) {
+                // Same allocator - steal resources
+                deallocate();
+                _buffer = other._buffer;
+                _offset = other._offset;
+                _size = other._size;
+                _capacity = other._capacity;
+                other._buffer = nullptr;
+                other._offset = 0;
+                other._size = 0;
+                other._capacity = 0;
+            } else {
+                // Different allocators - move elements
+                if (other._size > _capacity) {
+                    deallocate();
+                    allocate(other._size);
+                }
+                _offset = 0;
+                _size = other._size;
+                if (_size > 0) {
+                    (void)move_range_without_overlap(data_start(), other.data_start(), other.data_end());
+                }
+            }
+        }
         return *this;
     }
 
@@ -385,6 +481,8 @@ class devectra
     [[nodiscard]] auto front_capacity() const noexcept -> size_type { return front_spare(); }
 
     [[nodiscard]] auto back_capacity() const noexcept -> size_type { return back_spare(); }
+
+    [[nodiscard]] auto get_allocator() const noexcept -> allocator_type { return _alloc; }
 
     void reserve(size_type new_cap) {
         if (new_cap > _capacity) {
@@ -415,8 +513,10 @@ class devectra
             return;
         }
 
-        T* new_buffer = static_cast<T*>(std::malloc(_size * sizeof(T)));
-        if (new_buffer == nullptr) [[unlikely]] {
+        T* new_buffer = nullptr;
+        try {
+            new_buffer = AllocTraits::allocate(_alloc, _size);
+        } catch (...) {
             return;  // Don't throw, just keep current allocation
         }
 
@@ -767,7 +867,18 @@ class devectra
     }
 
     // Swap
-    void swap(devectra& other) noexcept {
+    void swap(devectra& other) noexcept(
+        AllocTraits::propagate_on_container_swap::value ||
+        AllocTraits::is_always_equal::value) {
+        // For PMR: only swap if allocators are equal or propagate_on_container_swap is true
+        // UB if neither condition is met and allocators differ (per standard)
+        if constexpr (AllocTraits::propagate_on_container_swap::value) {
+            std::swap(_alloc, other._alloc);
+        }
+        // Assert allocators are equal if not propagating (UB otherwise per standard)
+        Assert(AllocTraits::propagate_on_container_swap::value ||
+                   AllocTraits::is_always_equal::value || _alloc == other._alloc,
+               "swap with unequal allocators is undefined behavior");
         std::swap(_buffer, other._buffer);
         std::swap(_offset, other._offset);
         std::swap(_size, other._size);
@@ -878,8 +989,8 @@ class devectra
 };
 
 // Comparison operators
-template <typename T>
-auto operator==(const devectra<T>& lhs, const devectra<T>& rhs) -> bool {
+template <typename T, typename Alloc>
+auto operator==(const devectra<T, Alloc>& lhs, const devectra<T, Alloc>& rhs) -> bool {
     if (lhs.size() != rhs.size()) return false;
     if (lhs.size() == 0) return true;
     // Use memcmp only for types with unique object representations (no padding)
@@ -893,8 +1004,8 @@ auto operator==(const devectra<T>& lhs, const devectra<T>& rhs) -> bool {
     }
 }
 
-template <typename T>
-auto operator<=>(const devectra<T>& lhs, const devectra<T>& rhs) -> std::strong_ordering {
+template <typename T, typename Alloc>
+auto operator<=>(const devectra<T, Alloc>& lhs, const devectra<T, Alloc>& rhs) -> std::strong_ordering {
     for (std::size_t i = 0; i < std::min(lhs.size(), rhs.size()); ++i) {
         if (lhs[i] < rhs[i]) return std::strong_ordering::less;
         if (lhs[i] > rhs[i]) return std::strong_ordering::greater;
@@ -906,23 +1017,30 @@ auto operator<=>(const devectra<T>& lhs, const devectra<T>& rhs) -> std::strong_
 
 }  // namespace stdb::container
 
+// PMR type alias
+namespace stdb::pmr {
+template <typename T>
+using devectra = container::devectra<T, std::pmr::polymorphic_allocator<T>>;
+}  // namespace stdb::pmr
+
 namespace std {
 
-template <typename T>
-constexpr void swap(stdb::container::devectra<T>& lhs, stdb::container::devectra<T>& rhs) noexcept {
+template <typename T, typename Alloc>
+constexpr void swap(stdb::container::devectra<T, Alloc>& lhs,
+                    stdb::container::devectra<T, Alloc>& rhs) noexcept(noexcept(lhs.swap(rhs))) {
     lhs.swap(rhs);
 }
 
-template <typename T, typename U>
-constexpr auto erase(stdb::container::devectra<T>& vec, const U& value) -> std::size_t {
+template <typename T, typename Alloc, typename U>
+constexpr auto erase(stdb::container::devectra<T, Alloc>& vec, const U& value) -> std::size_t {
     auto it = std::remove(vec.begin(), vec.end(), value);
     auto count = vec.end() - it;
     vec.erase(it, vec.end());
     return count;
 }
 
-template <typename T, typename Pred>
-constexpr auto erase_if(stdb::container::devectra<T>& vec, Pred pred) -> std::size_t {
+template <typename T, typename Alloc, typename Pred>
+constexpr auto erase_if(stdb::container::devectra<T, Alloc>& vec, Pred pred) -> std::size_t {
     auto it = std::remove_if(vec.begin(), vec.end(), pred);
     auto count = vec.end() - it;
     vec.erase(it, vec.end());
