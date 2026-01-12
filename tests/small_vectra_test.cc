@@ -701,5 +701,212 @@ TEST_CASE("small_vectra::std_erase") {
     }
 }
 
+// ============================================================================
+// PMR (Polymorphic Memory Resource) Tests
+// ============================================================================
+
+TEST_CASE("small_vectra::pmr") {
+    SUBCASE("basic operations with monotonic_buffer_resource - inline storage") {
+        std::array<std::byte, 4096> buffer;
+        std::pmr::monotonic_buffer_resource resource(buffer.data(), buffer.size(),
+                                                     std::pmr::null_memory_resource());
+
+        stdb::pmr::small_vectra<int, 8> vec(&resource);
+
+        // Use inline storage (< 8 elements)
+        vec.push_back(1);
+        vec.push_back(2);
+        vec.push_back(3);
+
+        CHECK_EQ(vec.size(), 3);
+        CHECK(vec.is_small());  // Should be in inline storage
+        CHECK_EQ(vec[0], 1);
+        CHECK_EQ(vec[1], 2);
+        CHECK_EQ(vec[2], 3);
+    }
+
+    SUBCASE("basic operations with monotonic_buffer_resource - heap storage") {
+        std::array<std::byte, 4096> buffer;
+        std::pmr::monotonic_buffer_resource resource(buffer.data(), buffer.size(),
+                                                     std::pmr::null_memory_resource());
+
+        stdb::pmr::small_vectra<int, 4> vec(&resource);
+
+        // Force heap allocation (> 4 elements)
+        for (int i = 0; i < 10; ++i) {
+            vec.push_back(i);
+        }
+
+        CHECK_EQ(vec.size(), 10);
+        CHECK(!vec.is_small());  // Should be on heap
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec[i], i);
+        }
+    }
+
+    SUBCASE("allocator-only constructor") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::small_vectra<int, 8> vec(&resource);
+
+        CHECK(vec.empty());
+        CHECK_EQ(vec.size(), 0);
+        CHECK(vec.is_small());
+
+        vec.push_back(42);
+        CHECK_EQ(vec.size(), 1);
+        CHECK_EQ(vec[0], 42);
+    }
+
+    SUBCASE("allocator-extended copy constructor") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::small_vectra<int, 8> vec1(&resource1);
+        vec1.push_back(10);
+        vec1.push_back(20);
+        vec1.push_back(30);
+
+        stdb::pmr::small_vectra<int, 8> vec2(vec1, &resource2);
+
+        CHECK_EQ(vec2.size(), 3);
+        CHECK_EQ(vec2[0], 10);
+        CHECK_EQ(vec2[1], 20);
+        CHECK_EQ(vec2[2], 30);
+        CHECK_EQ(vec2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("allocator-extended move constructor - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        stdb::pmr::small_vectra<int, 4> vec1(&resource);
+        // Force heap allocation
+        for (int i = 0; i < 10; ++i) {
+            vec1.push_back(i);
+        }
+
+        stdb::pmr::small_vectra<int, 4> vec2(std::move(vec1), &resource);
+
+        CHECK_EQ(vec2.size(), 10);
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec2[i], i);
+        }
+        CHECK(vec1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("allocator-extended move constructor - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::small_vectra<int, 4> vec1(&resource1);
+        for (int i = 0; i < 10; ++i) {
+            vec1.push_back(i);
+        }
+
+        stdb::pmr::small_vectra<int, 4> vec2(std::move(vec1), &resource2);
+
+        CHECK_EQ(vec2.size(), 10);
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec2[i], i);
+        }
+        CHECK_EQ(vec2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("copy assignment - keeps allocator") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::small_vectra<int, 8> vec1(&resource1);
+        vec1.push_back(10);
+        vec1.push_back(20);
+
+        stdb::pmr::small_vectra<int, 8> vec2(&resource2);
+        vec2.push_back(30);
+
+        vec2 = vec1;
+
+        CHECK_EQ(vec2.size(), 2);
+        CHECK_EQ(vec2[0], 10);
+        CHECK_EQ(vec2[1], 20);
+        CHECK_EQ(vec2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("move assignment - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        stdb::pmr::small_vectra<int, 4> vec1(&resource);
+        for (int i = 0; i < 10; ++i) {
+            vec1.push_back(i);
+        }
+
+        stdb::pmr::small_vectra<int, 4> vec2(&resource);
+        vec2.push_back(100);
+
+        vec2 = std::move(vec1);
+
+        CHECK_EQ(vec2.size(), 10);
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec2[i], i);
+        }
+        CHECK(vec1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("move assignment - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::small_vectra<int, 4> vec1(&resource1);
+        for (int i = 0; i < 10; ++i) {
+            vec1.push_back(i);
+        }
+
+        stdb::pmr::small_vectra<int, 4> vec2(&resource2);
+        vec2.push_back(100);
+
+        vec2 = std::move(vec1);
+
+        CHECK_EQ(vec2.size(), 10);
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec2[i], i);
+        }
+        CHECK_EQ(vec2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("string elements with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::small_vectra<std::string, 4> vec(&resource);
+
+        vec.push_back("hello");
+        vec.push_back("world");
+        vec.push_back("test");
+
+        CHECK_EQ(vec.size(), 3);
+        CHECK_EQ(vec[0], "hello");
+        CHECK_EQ(vec[1], "world");
+        CHECK_EQ(vec[2], "test");
+    }
+
+    SUBCASE("transition from inline to heap with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::small_vectra<int, 4> vec(&resource);
+
+        // Start inline
+        vec.push_back(1);
+        vec.push_back(2);
+        CHECK(vec.is_small());
+
+        // Force transition to heap
+        for (int i = 3; i <= 10; ++i) {
+            vec.push_back(i);
+        }
+        CHECK(!vec.is_small());
+        CHECK_EQ(vec.size(), 10);
+
+        // Verify all elements
+        for (int i = 0; i < 10; ++i) {
+            CHECK_EQ(vec[i], i + 1);
+        }
+    }
+}
+
 // NOLINTEND
 }  // namespace stdb::container
