@@ -545,3 +545,17 @@ template <typename Key, typename Compare = std::less<Key>>
 using skiplist_set_default = skiplist_set<Key, Compare>;
 
 }  // namespace stdb::container
+
+// ============================================================================
+// PMR (Polymorphic Memory Resource) type aliases
+// ============================================================================
+namespace stdb::pmr {
+
+template <typename Key, typename Compare = std::less<Key>,
+          uint8_t MaxLevel = 32, uint8_t Probability = 4>
+using skiplist_set = container::skiplist_set<
+    Key, Compare,
+    std::pmr::polymorphic_allocator<Key>,
+    MaxLevel, Probability>;
+
+}  // namespace stdb::pmr

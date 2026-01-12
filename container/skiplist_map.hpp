@@ -24,6 +24,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -504,7 +505,11 @@ class skiplist_map
     // Copy assignment
     skiplist_map& operator=(const skiplist_map& other) {
         if (this != &other) {
+            using AllocTraits = std::allocator_traits<byte_allocator_type>;
             clear();
+            if constexpr (AllocTraits::propagate_on_container_copy_assignment::value) {
+                _alloc = other._alloc;
+            }
             _comp = other._comp;
             copy_from(other);
         }
@@ -512,19 +517,52 @@ class skiplist_map
     }
 
     // Move assignment
-    skiplist_map& operator=(skiplist_map&& other) noexcept {
+    skiplist_map& operator=(skiplist_map&& other) noexcept(
+        std::allocator_traits<byte_allocator_type>::propagate_on_container_move_assignment::value ||
+        std::allocator_traits<byte_allocator_type>::is_always_equal::value) {
         if (this != &other) {
-            clear();
-            _head = other._head;
-            _size = other._size;
+            using AllocTraits = std::allocator_traits<byte_allocator_type>;
             _comp = std::move(other._comp);
-            _alloc = std::move(other._alloc);
             _rng_state = other._rng_state;
-            other._head = head_node{};
-            other._size = 0;
+
+            if constexpr (AllocTraits::propagate_on_container_move_assignment::value) {
+                // Allocator propagates: clear with old allocator, steal resources, take allocator
+                clear();
+                _alloc = std::move(other._alloc);
+                move_resources_from(other);
+            } else if constexpr (AllocTraits::is_always_equal::value) {
+                // Allocators are always equal: can steal resources
+                clear();
+                move_resources_from(other);
+            } else {
+                // Allocators may differ (PMR case)
+                if (_alloc == other._alloc) {
+                    // Allocators are equal: can steal resources
+                    clear();
+                    move_resources_from(other);
+                } else {
+                    // Allocators differ: must move elements individually
+                    clear();
+                    for (auto&& [k, v] : other) {
+                        insert(std::move(const_cast<Key&>(k)), std::move(const_cast<Value&>(v)));
+                    }
+                    other.clear();
+                }
+            }
         }
         return *this;
     }
+
+private:
+    // Helper: steal resources from other (used when allocators are equal)
+    void move_resources_from(skiplist_map& other) noexcept {
+        _head = other._head;
+        _size = other._size;
+        other._head = head_node{};
+        other._size = 0;
+    }
+
+public:
 
     // Initializer list assignment
     skiplist_map& operator=(std::initializer_list<value_type> init) {
@@ -976,11 +1014,14 @@ class skiplist_map
 
     // Swap
     void swap(skiplist_map& other) noexcept {
-        std::swap(_head, other._head);
-        std::swap(_size, other._size);
-        std::swap(_comp, other._comp);
-        std::swap(_alloc, other._alloc);
-        std::swap(_rng_state, other._rng_state);
+        using std::swap;
+        swap(_head, other._head);
+        swap(_size, other._size);
+        swap(_comp, other._comp);
+        swap(_rng_state, other._rng_state);
+        if constexpr (std::allocator_traits<byte_allocator_type>::propagate_on_container_swap::value) {
+            swap(_alloc, other._alloc);
+        }
     }
 
     // Merge
@@ -1246,3 +1287,17 @@ template <typename Key, typename Value, typename Compare = std::less<Key>>
 using skiplist_map_default = skiplist_map<Key, Value, Compare>;
 
 }  // namespace stdb::container
+
+// ============================================================================
+// PMR (Polymorphic Memory Resource) type aliases
+// ============================================================================
+namespace stdb::pmr {
+
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          uint8_t MaxLevel = 16, uint8_t Probability = 4>
+using skiplist_map = container::skiplist_map<
+    Key, Value, Compare,
+    std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+    MaxLevel, Probability>;
+
+}  // namespace stdb::pmr
