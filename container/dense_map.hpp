@@ -28,6 +28,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -801,6 +802,10 @@ public:
     // Constructors
     dense_map() = default;
 
+    // Allocator-only constructor (required for PMR support)
+    explicit dense_map(const Allocator& alloc)
+        : alloc_(alloc) {}
+
     explicit dense_map(size_type bucket_count, const Hash& hash = Hash(),
                        const KeyEqual& equal = KeyEqual(),
                        const Allocator& alloc = Allocator())
@@ -844,6 +849,37 @@ public:
         }
     }
 
+    // Allocator-extended copy constructor (required for PMR support)
+    dense_map(const dense_map& other, const Allocator& alloc)
+        : hash_(other.hash_),
+          key_equal_(other.key_equal_),
+          alloc_(alloc) {
+        if (other.size_ > 0) {
+            initialize(other.capacity_);
+            if constexpr (kUseInline) {
+                for (size_t i = 0; i < other.capacity_; ++i) {
+                    if (detail::is_full(other.ctrl_[i])) {
+                        ctrl_[i] = other.ctrl_[i];
+                        AllocTraits::construct(alloc_, slots_ + i, other.slots_[i]);
+                    }
+                }
+            } else if constexpr (kUseFlat) {
+                std::memcpy(buckets_, other.buckets_, other.capacity_ * sizeof(detail::Bucket));
+                for (size_t i = 0; i < other.size_; ++i) {
+                    AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
+                }
+            } else {
+                std::memcpy(ctrl_, other.ctrl_, other.capacity_ + kGroupWidth + 1);
+                std::memcpy(value_indices_, other.value_indices_, other.capacity_ * sizeof(uint32_t));
+                for (size_t i = 0; i < other.size_; ++i) {
+                    AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
+                }
+            }
+            size_ = other.size_;
+            growth_left_ = other.growth_left_;
+        }
+    }
+
     dense_map(dense_map&& other) noexcept
         : slots_(other.slots_),
           buckets_(other.buckets_),
@@ -870,6 +906,28 @@ public:
         other.shift_ = 64;
     }
 
+    // Allocator-extended move constructor (required for PMR support)
+    dense_map(dense_map&& other, const Allocator& alloc)
+        : hash_(std::move(other.hash_)),
+          key_equal_(std::move(other.key_equal_)),
+          alloc_(alloc) {
+        if constexpr (AllocTraits::is_always_equal::value) {
+            // Allocators are always equal, can steal resources
+            move_resources_from(other);
+        } else {
+            if (alloc_ == other.alloc_) {
+                // Allocators are equal, can steal resources
+                move_resources_from(other);
+            } else {
+                // Allocators differ, must move elements individually
+                if (other.size_ > 0) {
+                    initialize(other.capacity_);
+                    move_elements_from(other);
+                }
+            }
+        }
+    }
+
     dense_map(std::initializer_list<value_type> init, size_type bucket_count = 0,
               const Hash& hash = Hash(), const KeyEqual& equal = KeyEqual(),
               const Allocator& alloc = Allocator())
@@ -886,40 +944,90 @@ public:
 
     dense_map& operator=(const dense_map& other) {
         if (this != &other) {
-            dense_map tmp(other);
-            swap(tmp);
+            if constexpr (AllocTraits::propagate_on_container_copy_assignment::value) {
+                // Allocator propagates: use allocator-extended copy constructor
+                dense_map tmp(other, other.alloc_);
+                swap(tmp);
+                alloc_ = other.alloc_;
+            } else {
+                // Allocator does not propagate (PMR): keep our allocator, copy elements
+                destroy();
+                hash_ = other.hash_;
+                key_equal_ = other.key_equal_;
+                if (other.size_ > 0) {
+                    initialize(other.capacity_);
+                    if constexpr (kUseInline) {
+                        for (size_t i = 0; i < other.capacity_; ++i) {
+                            if (detail::is_full(other.ctrl_[i])) {
+                                ctrl_[i] = other.ctrl_[i];
+                                AllocTraits::construct(alloc_, slots_ + i, other.slots_[i]);
+                            }
+                        }
+                    } else if constexpr (kUseFlat) {
+                        std::memcpy(buckets_, other.buckets_, other.capacity_ * sizeof(detail::Bucket));
+                        // Ensure values array is large enough
+                        if (other.size_ > values_capacity_) {
+                            SlotAlloc slot_alloc(alloc_);
+                            std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                            values_capacity_ = other.values_capacity_;
+                            values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                        }
+                        for (size_t i = 0; i < other.size_; ++i) {
+                            AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
+                        }
+                    } else {
+                        std::memcpy(ctrl_, other.ctrl_, other.capacity_ + kGroupWidth + 1);
+                        std::memcpy(value_indices_, other.value_indices_, other.capacity_ * sizeof(uint32_t));
+                        // Ensure values array is large enough
+                        if (other.size_ > values_capacity_) {
+                            SlotAlloc slot_alloc(alloc_);
+                            std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                            values_capacity_ = other.values_capacity_;
+                            values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                        }
+                        for (size_t i = 0; i < other.size_; ++i) {
+                            AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
+                        }
+                    }
+                    size_ = other.size_;
+                    growth_left_ = other.growth_left_;
+                }
+            }
         }
         return *this;
     }
 
-    dense_map& operator=(dense_map&& other) noexcept {
+    dense_map& operator=(dense_map&& other) noexcept(
+        AllocTraits::propagate_on_container_move_assignment::value ||
+        AllocTraits::is_always_equal::value) {
         if (this != &other) {
-            destroy();
-            slots_ = other.slots_;
-            buckets_ = other.buckets_;
-            value_indices_ = other.value_indices_;
-            values_ = other.values_;
-            values_capacity_ = other.values_capacity_;
-            ctrl_ = other.ctrl_;
-            size_ = other.size_;
-            capacity_ = other.capacity_;
-            growth_left_ = other.growth_left_;
-            shift_ = other.shift_;
             hash_ = std::move(other.hash_);
             key_equal_ = std::move(other.key_equal_);
+
             if constexpr (AllocTraits::propagate_on_container_move_assignment::value) {
+                // Allocator propagates: destroy our resources and steal other's
+                destroy();
                 alloc_ = std::move(other.alloc_);
+                move_resources_from(other);
+            } else if constexpr (AllocTraits::is_always_equal::value) {
+                // Allocators are always equal: can steal resources
+                destroy();
+                move_resources_from(other);
+            } else {
+                // Allocators may differ (PMR case)
+                if (alloc_ == other.alloc_) {
+                    // Allocators are equal: can steal resources
+                    destroy();
+                    move_resources_from(other);
+                } else {
+                    // Allocators differ: must move elements individually
+                    destroy();
+                    if (other.size_ > 0) {
+                        initialize(other.capacity_);
+                        move_elements_from(other);
+                    }
+                }
             }
-            other.slots_ = nullptr;
-            other.buckets_ = nullptr;
-            other.value_indices_ = nullptr;
-            other.values_ = nullptr;
-            other.values_capacity_ = 0;
-            other.ctrl_ = nullptr;
-            other.size_ = 0;
-            other.capacity_ = 0;
-            other.growth_left_ = 0;
-            other.shift_ = 64;
         }
         return *this;
     }
@@ -1327,6 +1435,70 @@ private:
         }
 
         reset_growth();
+    }
+
+    // Helper: steal resources from other (used when allocators are equal)
+    void move_resources_from(dense_map& other) noexcept {
+        slots_ = other.slots_;
+        buckets_ = other.buckets_;
+        value_indices_ = other.value_indices_;
+        values_ = other.values_;
+        values_capacity_ = other.values_capacity_;
+        ctrl_ = other.ctrl_;
+        size_ = other.size_;
+        capacity_ = other.capacity_;
+        growth_left_ = other.growth_left_;
+        shift_ = other.shift_;
+
+        other.slots_ = nullptr;
+        other.buckets_ = nullptr;
+        other.value_indices_ = nullptr;
+        other.values_ = nullptr;
+        other.values_capacity_ = 0;
+        other.ctrl_ = nullptr;
+        other.size_ = 0;
+        other.capacity_ = 0;
+        other.growth_left_ = 0;
+        other.shift_ = 64;
+    }
+
+    // Helper: move elements from other (used when allocators differ)
+    void move_elements_from(dense_map& other) {
+        if constexpr (kUseInline) {
+            for (size_t i = 0; i < other.capacity_; ++i) {
+                if (detail::is_full(other.ctrl_[i])) {
+                    ctrl_[i] = other.ctrl_[i];
+                    AllocTraits::construct(alloc_, slots_ + i, std::move(other.slots_[i]));
+                }
+            }
+        } else if constexpr (kUseFlat) {
+            std::memcpy(buckets_, other.buckets_, other.capacity_ * sizeof(detail::Bucket));
+            // Ensure values array is large enough
+            if (other.size_ > values_capacity_) {
+                SlotAlloc slot_alloc(alloc_);
+                std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                values_capacity_ = other.values_capacity_;
+                values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            }
+            for (size_t i = 0; i < other.size_; ++i) {
+                AllocTraits::construct(alloc_, values_ + i, std::move(other.values_[i]));
+            }
+        } else {
+            std::memcpy(ctrl_, other.ctrl_, other.capacity_ + kGroupWidth + 1);
+            std::memcpy(value_indices_, other.value_indices_, other.capacity_ * sizeof(uint32_t));
+            // Ensure values array is large enough
+            if (other.size_ > values_capacity_) {
+                SlotAlloc slot_alloc(alloc_);
+                std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                values_capacity_ = other.values_capacity_;
+                values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            }
+            for (size_t i = 0; i < other.size_; ++i) {
+                AllocTraits::construct(alloc_, values_ + i, std::move(other.values_[i]));
+            }
+        }
+        size_ = other.size_;
+        growth_left_ = other.growth_left_;
     }
 
     void destroy() {
@@ -2133,5 +2305,24 @@ void swap(dense_map<K, V, H, E, A, M>& lhs,
 // Type alias for convenience
 template <typename Key, typename Value>
 using fast_map = dense_map<Key, Value>;
+
+// ============================================================================
+// PMR (Polymorphic Memory Resource) type aliases
+// ============================================================================
+namespace pmr {
+
+template <typename Key, typename T = void, typename Hash = dense_hash<Key>,
+          typename KeyEqual = std::equal_to<Key>,
+          typename MemoryPolicy = default_memory_policy<Key, T>>
+using dense_map = stdb::container::dense_map<
+    Key, T, Hash, KeyEqual,
+    std::pmr::polymorphic_allocator<std::conditional_t<detail::is_map_v<T>, std::pair<Key, T>, Key>>,
+    MemoryPolicy>;
+
+// Convenience aliases
+template <typename Key, typename Value>
+using fast_map = dense_map<Key, Value>;
+
+}  // namespace pmr
 
 }  // namespace stdb::container

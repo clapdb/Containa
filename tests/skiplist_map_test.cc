@@ -2101,4 +2101,183 @@ TEST_CASE("skiplist_set::compare_with_std_set") {
     }
 }
 
+// ============================================================================
+// PMR (Polymorphic Memory Resource) Tests
+// ============================================================================
+
+TEST_CASE("skiplist_map::pmr") {
+    SUBCASE("basic operations with monotonic_buffer_resource") {
+        std::array<std::byte, 8192> buffer;
+        std::pmr::monotonic_buffer_resource resource(buffer.data(), buffer.size(),
+                                                     std::pmr::null_memory_resource());
+
+        stdb::pmr::skiplist_map<int, std::string> map(&resource);
+
+        map[1] = "one";
+        map[2] = "two";
+        map[3] = "three";
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map[1], "one");
+        CHECK_EQ(map[2], "two");
+        CHECK_EQ(map[3], "three");
+
+        map.erase(2);
+        CHECK_EQ(map.size(), 2);
+        CHECK(map.find(2) == map.end());
+    }
+
+    SUBCASE("allocator-only constructor") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::skiplist_map<int, int> map(&resource);
+
+        CHECK(map.empty());
+        CHECK_EQ(map.size(), 0);
+
+        map[42] = 100;
+        CHECK_EQ(map.size(), 1);
+        CHECK_EQ(map[42], 100);
+    }
+
+    SUBCASE("allocator-extended copy constructor") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(map1, &resource2);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("allocator-extended move constructor - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(std::move(map1), &resource);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK(map1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("allocator-extended move constructor - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(std::move(map1), &resource2);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);
+    }
+
+    SUBCASE("copy assignment - keeps allocator") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(&resource2);
+        map2[3] = 30;
+
+        map2 = map1;
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("move assignment - same resource") {
+        std::pmr::monotonic_buffer_resource resource;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(&resource);
+        map2[3] = 30;
+
+        map2 = std::move(map1);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK(map1.empty());  // Resources were stolen
+    }
+
+    SUBCASE("move assignment - different resource") {
+        std::pmr::monotonic_buffer_resource resource1;
+        std::pmr::monotonic_buffer_resource resource2;
+
+        stdb::pmr::skiplist_map<int, int> map1(&resource1);
+        map1[1] = 10;
+        map1[2] = 20;
+
+        stdb::pmr::skiplist_map<int, int> map2(&resource2);
+        map2[3] = 30;
+
+        map2 = std::move(map1);
+
+        CHECK_EQ(map2.size(), 2);
+        CHECK_EQ(map2[1], 10);
+        CHECK_EQ(map2[2], 20);
+        CHECK_EQ(map2.get_allocator().resource(), &resource2);  // Kept original allocator
+    }
+
+    SUBCASE("string keys with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::skiplist_map<std::string, int> map(&resource);
+
+        map["hello"] = 1;
+        map["world"] = 2;
+        map["test"] = 3;
+
+        CHECK_EQ(map.size(), 3);
+        CHECK_EQ(map["hello"], 1);
+        CHECK_EQ(map["world"], 2);
+        CHECK_EQ(map["test"], 3);
+
+        int count = 0;
+        for (const auto& [key, value] : map) {
+            (void)key;
+            (void)value;
+            ++count;
+        }
+        CHECK_EQ(count, 3);
+    }
+
+    SUBCASE("skiplist_set with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::skiplist_set<int> set(&resource);
+
+        set.insert(1);
+        set.insert(2);
+        set.insert(3);
+
+        CHECK_EQ(set.size(), 3);
+        CHECK(set.contains(1));
+        CHECK(set.contains(2));
+        CHECK(set.contains(3));
+        CHECK(!set.contains(4));
+    }
+}
+
 }  // namespace stdb::container

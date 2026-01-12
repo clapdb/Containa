@@ -16,6 +16,7 @@
 
 #pragma once
 #include <algorithm>
+#include <memory_resource>
 
 #include "container_base.hpp"
 
@@ -54,12 +55,15 @@ class small_vectra
     static constexpr size_type inline_capacity = N;
 
    private:
+    using AllocTraits = std::allocator_traits<Alloc>;
+
     // Inline storage - properly aligned for T
     alignas(T) std::byte _inline_storage[N * sizeof(T)];
 
     T* _start;   // buffer start
     T* _finish;  // valid end (one past last element)
     T* _edge;    // buffer end (capacity boundary)
+    [[no_unique_address]] Alloc _alloc;
 
     [[nodiscard, gnu::always_inline]] auto inline_ptr() noexcept -> T* { return reinterpret_cast<T*>(_inline_storage); }
 
@@ -73,16 +77,13 @@ class small_vectra
 
     void allocate_heap(size_type cap) {
         Assert(cap > N, "allocate_heap should only be called when cap > N");
-        _start = static_cast<T*>(std::malloc(cap * sizeof(T)));
-        if (_start == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        _start = AllocTraits::allocate(_alloc, cap);
         _edge = _start + cap;
     }
 
     void free_heap() noexcept {
         if (!is_inline()) {
-            std::free(_start);
+            AllocTraits::deallocate(_alloc, _start, capacity());
         }
     }
 
@@ -112,6 +113,7 @@ class small_vectra
         T* old_start = _start;
         T* old_finish = _finish;
         size_type old_size = size();
+        size_type old_cap = capacity();
 
         allocate_heap(new_cap);
         _finish = _start + old_size;
@@ -120,7 +122,7 @@ class small_vectra
             (void)move_range_without_overlap(_start, old_start, old_finish);
             destroy_range(old_start, old_finish);
         }
-        std::free(old_start);
+        AllocTraits::deallocate(_alloc, old_start, old_cap);
     }
 
     // Shrink heap storage to fit current size
@@ -132,12 +134,9 @@ class small_vectra
         T* old_start = _start;
         T* old_finish = _finish;
         size_type old_size = size();
+        size_type old_cap = capacity();
 
-        _start = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
-        if (_start == nullptr) [[unlikely]] {
-            _start = old_start;  // Restore on failure
-            throw std::bad_alloc();
-        }
+        _start = AllocTraits::allocate(_alloc, new_cap);
         _edge = _start + new_cap;
         _finish = _start + old_size;
 
@@ -145,7 +144,7 @@ class small_vectra
             (void)move_range_without_overlap(_start, old_start, old_finish);
             destroy_range(old_start, old_finish);
         }
-        std::free(old_start);
+        AllocTraits::deallocate(_alloc, old_start, old_cap);
     }
 
     // Reallocate (handles both inline->heap and heap->larger heap)
@@ -165,17 +164,15 @@ class small_vectra
         T* old_start = _start;
         T* old_finish = _finish;
         size_type old_size = static_cast<size_type>(old_finish - old_start);
+        size_type old_cap = capacity();
         bool was_inline = is_inline();
 
         // Allocate new buffer
-        T* new_start = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
-        if (new_start == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
+        T* new_start = AllocTraits::allocate(_alloc, new_cap);
 
         // Construct new element first (at the end position)
         T* new_finish = new_start + old_size;
-        new (new_finish) T(std::forward<Args>(args)...);
+        AllocTraits::construct(_alloc, new_finish, std::forward<Args>(args)...);
         ++new_finish;
 
         // Relocate old elements to new buffer
@@ -185,9 +182,9 @@ class small_vectra
             } else {
                 T* dst = new_start;
                 for (T* src = old_start; src != old_finish; ++src, ++dst) {
-                    new (dst) T(std::move(*src));
+                    AllocTraits::construct(_alloc, dst, std::move(*src));
                     if constexpr (NeedsCleanUp<T>) {
-                        src->~T();
+                        AllocTraits::destroy(_alloc, src);
                     }
                 }
             }
@@ -200,7 +197,7 @@ class small_vectra
 
         // Free old buffer if on heap
         if (!was_inline) {
-            std::free(old_start);
+            AllocTraits::deallocate(_alloc, old_start, old_cap);
         }
     }
 
@@ -220,9 +217,15 @@ class small_vectra
     constexpr small_vectra() noexcept
         : _start(reinterpret_cast<T*>(_inline_storage)),
           _finish(reinterpret_cast<T*>(_inline_storage)),
-          _edge(reinterpret_cast<T*>(_inline_storage) + N) {}
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc() {}
 
-    constexpr explicit small_vectra([[maybe_unused]] const Alloc& alloc) noexcept : small_vectra() {}
+    // Allocator-only constructor (required for PMR support)
+    constexpr explicit small_vectra(const Alloc& alloc) noexcept
+        : _start(reinterpret_cast<T*>(_inline_storage)),
+          _finish(reinterpret_cast<T*>(_inline_storage)),
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc(alloc) {}
 
     // Constructor with size
     explicit small_vectra(size_type count) : small_vectra() {
@@ -266,7 +269,27 @@ class small_vectra
     small_vectra(std::initializer_list<T> init) : small_vectra(init.begin(), init.end()) {}
 
     // Copy constructor
-    small_vectra(const small_vectra& other) : small_vectra() {
+    small_vectra(const small_vectra& other)
+        : _start(reinterpret_cast<T*>(_inline_storage)),
+          _finish(reinterpret_cast<T*>(_inline_storage)),
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc(AllocTraits::select_on_container_copy_construction(other._alloc)) {
+        size_type other_size = other.size();
+        if (other_size > N) {
+            allocate_heap(other_size);
+        }
+        if (other_size > 0) {
+            copy_range(_start, other._start, other._finish);
+            _finish = _start + other_size;
+        }
+    }
+
+    // Allocator-extended copy constructor (required for PMR support)
+    small_vectra(const small_vectra& other, const Alloc& alloc)
+        : _start(reinterpret_cast<T*>(_inline_storage)),
+          _finish(reinterpret_cast<T*>(_inline_storage)),
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc(alloc) {
         size_type other_size = other.size();
         if (other_size > N) {
             allocate_heap(other_size);
@@ -278,7 +301,11 @@ class small_vectra
     }
 
     // Move constructor
-    small_vectra(small_vectra&& other) noexcept : small_vectra() {
+    small_vectra(small_vectra&& other) noexcept
+        : _start(reinterpret_cast<T*>(_inline_storage)),
+          _finish(reinterpret_cast<T*>(_inline_storage)),
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc(std::move(other._alloc)) {
         if (other.is_inline()) {
             // Move elements from other's inline storage to our inline storage
             size_type other_size = other.size();
@@ -300,6 +327,58 @@ class small_vectra
         }
     }
 
+    // Allocator-extended move constructor (required for PMR support)
+    small_vectra(small_vectra&& other, const Alloc& alloc)
+        : _start(reinterpret_cast<T*>(_inline_storage)),
+          _finish(reinterpret_cast<T*>(_inline_storage)),
+          _edge(reinterpret_cast<T*>(_inline_storage) + N),
+          _alloc(alloc) {
+        if constexpr (AllocTraits::is_always_equal::value) {
+            // Allocators are always equal, can steal heap resources
+            move_from_other(other);
+        } else {
+            if (_alloc == other._alloc) {
+                // Allocators are equal, can steal heap resources
+                move_from_other(other);
+            } else {
+                // Allocators differ, must move elements individually
+                size_type other_size = other.size();
+                if (other_size > N) {
+                    allocate_heap(other_size);
+                }
+                if (other_size > 0) {
+                    (void)move_range_without_overlap(_start, other._start, other._finish);
+                    destroy_range(other._start, other._finish);
+                    _finish = _start + other_size;
+                }
+                other._finish = other._start;
+            }
+        }
+    }
+
+private:
+    // Helper for move constructor when allocators are equal
+    void move_from_other(small_vectra& other) noexcept {
+        if (other.is_inline()) {
+            size_type other_size = other.size();
+            if (other_size > 0) {
+                (void)move_range_without_overlap(_start, other._start, other._finish);
+                destroy_range(other._start, other._finish);
+                _finish = _start + other_size;
+            }
+            other._finish = other._start;
+        } else {
+            _start = other._start;
+            _finish = other._finish;
+            _edge = other._edge;
+            other._start = other.inline_ptr();
+            other._finish = other._start;
+            other._edge = other._start + N;
+        }
+    }
+
+public:
+
     // Copy assignment
     auto operator=(const small_vectra& other) -> small_vectra& {
         if (this == &other) [[unlikely]] {
@@ -310,6 +389,16 @@ class small_vectra
 
         // Destroy current elements
         destroy_range(_start, _finish);
+
+        if constexpr (AllocTraits::propagate_on_container_copy_assignment::value) {
+            // Allocator propagates: may need to reallocate with new allocator
+            if (_alloc != other._alloc) {
+                free_heap();
+                _alloc = other._alloc;
+                _start = inline_ptr();
+                _edge = _start + N;
+            }
+        }
 
         if (other_size > capacity()) {
             // Need more capacity
@@ -332,17 +421,59 @@ class small_vectra
     }
 
     // Move assignment
-    auto operator=(small_vectra&& other) noexcept -> small_vectra& {
+    auto operator=(small_vectra&& other) noexcept(
+        AllocTraits::propagate_on_container_move_assignment::value ||
+        AllocTraits::is_always_equal::value) -> small_vectra& {
         if (this == &other) [[unlikely]] {
             return *this;
         }
 
-        // Destroy current elements and free heap if needed
+        // Destroy current elements
         destroy_range(_start, _finish);
-        free_heap();
 
+        if constexpr (AllocTraits::propagate_on_container_move_assignment::value) {
+            // Allocator propagates: free with old allocator, take new allocator, steal resources
+            free_heap();
+            _alloc = std::move(other._alloc);
+            move_assign_from(other);
+        } else if constexpr (AllocTraits::is_always_equal::value) {
+            // Allocators are always equal: can steal heap resources
+            free_heap();
+            move_assign_from(other);
+        } else {
+            // Allocators may differ (PMR case)
+            if (_alloc == other._alloc) {
+                // Allocators are equal: can steal heap resources
+                free_heap();
+                move_assign_from(other);
+            } else {
+                // Allocators differ: must move elements individually
+                size_type other_size = other.size();
+                if (other_size > capacity()) {
+                    free_heap();
+                    if (other_size > N) {
+                        allocate_heap(other_size);
+                    } else {
+                        _start = inline_ptr();
+                        _edge = _start + N;
+                    }
+                }
+                if (other_size > 0) {
+                    (void)move_range_without_overlap(_start, other._start, other._finish);
+                    destroy_range(other._start, other._finish);
+                }
+                _finish = _start + other_size;
+                other._finish = other._start;
+            }
+        }
+
+        return *this;
+    }
+
+private:
+    // Helper for move assignment when we can steal resources
+    void move_assign_from(small_vectra& other) noexcept {
         if (other.is_inline()) {
-            // Move elements from other's inline storage
             _start = inline_ptr();
             _edge = _start + N;
             size_type other_size = other.size();
@@ -353,18 +484,16 @@ class small_vectra
             _finish = _start + other_size;
             other._finish = other._start;
         } else {
-            // Steal heap pointer
             _start = other._start;
             _finish = other._finish;
             _edge = other._edge;
-            // Reset other to inline
             other._start = other.inline_ptr();
             other._finish = other._start;
             other._edge = other._start + N;
         }
-
-        return *this;
     }
+
+public:
 
     ~small_vectra() {
         destroy_range(_start, _finish);
@@ -404,13 +533,14 @@ class small_vectra
             // Can move back to inline storage
             T* old_start = _start;
             T* old_finish = _finish;
+            size_type old_cap = capacity();
             _start = inline_ptr();
             _edge = _start + N;
             if (sz > 0) {
                 (void)move_range_without_overlap(_start, old_start, old_finish);
             }
             _finish = _start + sz;
-            std::free(old_start);
+            AllocTraits::deallocate(_alloc, old_start, old_cap);
         } else if (sz > N && sz < capacity()) {
             // Shrink heap allocation
             shrink_heap(sz);
@@ -853,7 +983,15 @@ class small_vectra
             *this = std::move(other);
             other = std::move(temp);
         }
+
+        // Swap allocators if propagate_on_container_swap is true
+        if constexpr (AllocTraits::propagate_on_container_swap::value) {
+            std::swap(_alloc, other._alloc);
+        }
     }
+
+    // Get allocator
+    [[nodiscard]] allocator_type get_allocator() const noexcept { return _alloc; }
 
    private:
     // Helper for backward move (handles overlap correctly)
@@ -918,6 +1056,16 @@ auto operator<=>(const small_vectra<T, N>& lhs, const small_vectra<T, N>& rhs) -
 }
 
 }  // namespace stdb::container
+
+// ============================================================================
+// PMR (Polymorphic Memory Resource) type aliases
+// ============================================================================
+namespace stdb::pmr {
+
+template <typename T, std::size_t N = (sizeof(T) >= 64 ? 1 : 64 / sizeof(T))>
+using small_vectra = container::small_vectra<T, N, std::pmr::polymorphic_allocator<T>>;
+
+}  // namespace stdb::pmr
 
 namespace std {
 

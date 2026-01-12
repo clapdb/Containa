@@ -619,5 +619,208 @@ TEST_CASE("devectra::deque_like_usage") {
     }
 }
 
+TEST_CASE("devectra::pmr") {
+    SUBCASE("pmr type alias exists") {
+        std::array<std::byte, 1024> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        stdb::pmr::devectra<int> dv(&mbr);
+        dv.push_back(1);
+        dv.push_back(2);
+        dv.push_front(0);
+        CHECK_EQ(dv.size(), 3);
+        CHECK_EQ(dv[0], 0);
+        CHECK_EQ(dv[1], 1);
+        CHECK_EQ(dv[2], 2);
+    }
+
+    SUBCASE("allocator-only constructor") {
+        std::array<std::byte, 1024> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv(alloc);
+        CHECK(dv.empty());
+        CHECK(dv.get_allocator() == alloc);
+    }
+
+    SUBCASE("constructor with size and allocator") {
+        std::array<std::byte, 1024> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv(5, alloc);
+        CHECK_EQ(dv.size(), 5);
+        CHECK(dv.get_allocator() == alloc);
+    }
+
+    SUBCASE("constructor with size, value and allocator") {
+        std::array<std::byte, 1024> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv(5, 42, alloc);
+        CHECK_EQ(dv.size(), 5);
+        for (int i = 0; i < 5; ++i) {
+            CHECK_EQ(dv[i], 42);
+        }
+        CHECK(dv.get_allocator() == alloc);
+    }
+
+    SUBCASE("copy constructor uses select_on_container_copy_construction") {
+        std::array<std::byte, 1024> buffer1;
+        std::pmr::monotonic_buffer_resource mbr1(buffer1.data(), buffer1.size());
+        std::pmr::polymorphic_allocator<int> alloc1(&mbr1);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc1);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        dv1.push_back(3);
+
+        // Copy constructor - PMR uses default resource for copies
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(dv1);
+        CHECK_EQ(dv2.size(), 3);
+        CHECK_EQ(dv2[0], 1);
+        // PMR polymorphic_allocator selects default resource for copies
+        CHECK(dv2.get_allocator().resource() == std::pmr::get_default_resource());
+    }
+
+    SUBCASE("allocator-extended copy constructor") {
+        std::array<std::byte, 1024> buffer1, buffer2;
+        std::pmr::monotonic_buffer_resource mbr1(buffer1.data(), buffer1.size());
+        std::pmr::monotonic_buffer_resource mbr2(buffer2.data(), buffer2.size());
+        std::pmr::polymorphic_allocator<int> alloc1(&mbr1);
+        std::pmr::polymorphic_allocator<int> alloc2(&mbr2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc1);
+        dv1.push_back(1);
+        dv1.push_back(2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(dv1, alloc2);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_EQ(dv2[0], 1);
+        CHECK_EQ(dv2[1], 2);
+        CHECK(dv2.get_allocator() == alloc2);
+    }
+
+    SUBCASE("allocator-extended move constructor with same allocator") {
+        std::array<std::byte, 2048> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        auto* old_data = dv1.data();
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(std::move(dv1), alloc);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_EQ(dv2.data(), old_data);  // Resources stolen
+        CHECK(dv1.empty());
+    }
+
+    SUBCASE("allocator-extended move constructor with different allocator") {
+        std::array<std::byte, 1024> buffer1, buffer2;
+        std::pmr::monotonic_buffer_resource mbr1(buffer1.data(), buffer1.size());
+        std::pmr::monotonic_buffer_resource mbr2(buffer2.data(), buffer2.size());
+        std::pmr::polymorphic_allocator<int> alloc1(&mbr1);
+        std::pmr::polymorphic_allocator<int> alloc2(&mbr2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc1);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        auto* old_data = dv1.data();
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(std::move(dv1), alloc2);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_NE(dv2.data(), old_data);  // Cannot steal, must copy
+        CHECK_EQ(dv2[0], 1);
+        CHECK_EQ(dv2[1], 2);
+        CHECK(dv2.get_allocator() == alloc2);
+    }
+
+    SUBCASE("copy assignment does not propagate allocator for PMR") {
+        std::array<std::byte, 1024> buffer1, buffer2;
+        std::pmr::monotonic_buffer_resource mbr1(buffer1.data(), buffer1.size());
+        std::pmr::monotonic_buffer_resource mbr2(buffer2.data(), buffer2.size());
+        std::pmr::polymorphic_allocator<int> alloc1(&mbr1);
+        std::pmr::polymorphic_allocator<int> alloc2(&mbr2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc1);
+        dv1.push_back(1);
+        dv1.push_back(2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(alloc2);
+        dv2.push_back(10);
+
+        dv2 = dv1;
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_EQ(dv2[0], 1);
+        // Allocator not propagated for PMR
+        CHECK(dv2.get_allocator() == alloc2);
+    }
+
+    SUBCASE("move assignment with same allocator steals resources") {
+        std::array<std::byte, 2048> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        auto* old_data = dv1.data();
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(alloc);
+        dv2.push_back(10);
+
+        dv2 = std::move(dv1);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_EQ(dv2.data(), old_data);  // Resources stolen
+        CHECK(dv1.empty());
+    }
+
+    SUBCASE("move assignment with different allocator moves elements") {
+        std::array<std::byte, 1024> buffer1, buffer2;
+        std::pmr::monotonic_buffer_resource mbr1(buffer1.data(), buffer1.size());
+        std::pmr::monotonic_buffer_resource mbr2(buffer2.data(), buffer2.size());
+        std::pmr::polymorphic_allocator<int> alloc1(&mbr1);
+        std::pmr::polymorphic_allocator<int> alloc2(&mbr2);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc1);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        auto* old_data = dv1.data();
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(alloc2);
+        dv2.push_back(10);
+
+        dv2 = std::move(dv1);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_NE(dv2.data(), old_data);  // Cannot steal, must move elements
+        CHECK_EQ(dv2[0], 1);
+        CHECK_EQ(dv2[1], 2);
+        CHECK(dv2.get_allocator() == alloc2);  // Allocator not propagated
+    }
+
+    SUBCASE("swap with same allocator") {
+        std::array<std::byte, 2048> buffer;
+        std::pmr::monotonic_buffer_resource mbr(buffer.data(), buffer.size());
+        std::pmr::polymorphic_allocator<int> alloc(&mbr);
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv1(alloc);
+        dv1.push_back(1);
+        dv1.push_back(2);
+        auto* data1 = dv1.data();
+
+        devectra<int, std::pmr::polymorphic_allocator<int>> dv2(alloc);
+        dv2.push_back(10);
+        dv2.push_back(20);
+        dv2.push_back(30);
+        auto* data2 = dv2.data();
+
+        dv1.swap(dv2);
+        CHECK_EQ(dv1.size(), 3);
+        CHECK_EQ(dv2.size(), 2);
+        CHECK_EQ(dv1.data(), data2);
+        CHECK_EQ(dv2.data(), data1);
+    }
+}
+
 // NOLINTEND
 }  // namespace stdb::container
