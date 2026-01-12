@@ -3978,7 +3978,16 @@ class btree_map
     // Copy assignment - O(n) deep copy of tree structure
     auto operator=(const btree_map& other) -> btree_map& {
         if (this != &other) {
-            destroy_node(_root);
+            using AllocTraits = std::allocator_traits<Allocator>;
+            if constexpr (AllocTraits::propagate_on_container_copy_assignment::value) {
+                // Allocator propagates: destroy with old allocator, then copy allocator
+                destroy_node(_root);
+                _leaf_alloc = other._leaf_alloc;
+                _internal_alloc = other._internal_alloc;
+            } else {
+                // Allocator does not propagate (PMR): keep our allocator
+                destroy_node(_root);
+            }
             _comp = other._comp;
             _size = other._size;
             _root = deep_copy_node(other._root, nullptr);
@@ -3988,19 +3997,58 @@ class btree_map
     }
 
     // Move assignment
-    auto operator=(btree_map&& other) noexcept -> btree_map& {
+    auto operator=(btree_map&& other) noexcept(
+        std::allocator_traits<Allocator>::propagate_on_container_move_assignment::value ||
+        std::allocator_traits<Allocator>::is_always_equal::value) -> btree_map& {
         if (this != &other) {
-            destroy_node(_root);
-            _root = other._root;
-            _rightmost_leaf = other._rightmost_leaf;
-            _size = other._size;
+            using AllocTraits = std::allocator_traits<Allocator>;
             _comp = std::move(other._comp);
-            other._root = nullptr;
-            other._rightmost_leaf = nullptr;
-            other._size = 0;
+
+            if constexpr (AllocTraits::propagate_on_container_move_assignment::value) {
+                // Allocator propagates: destroy with old allocator, steal resources, take allocator
+                destroy_node(_root);
+                _leaf_alloc = std::move(other._leaf_alloc);
+                _internal_alloc = std::move(other._internal_alloc);
+                move_resources_from(other);
+            } else if constexpr (AllocTraits::is_always_equal::value) {
+                // Allocators are always equal: can steal resources
+                destroy_node(_root);
+                move_resources_from(other);
+            } else {
+                // Allocators may differ (PMR case)
+                if (_leaf_alloc == other._leaf_alloc) {
+                    // Allocators are equal: can steal resources
+                    destroy_node(_root);
+                    move_resources_from(other);
+                } else {
+                    // Allocators differ: must move elements individually
+                    clear();
+                    for (auto&& [k, v] : other) {
+                        if constexpr (is_set_mode) {
+                            insert(std::move(const_cast<Key&>(k)));
+                        } else {
+                            insert(std::move(const_cast<Key&>(k)), std::move(const_cast<Value&>(v)));
+                        }
+                    }
+                    other.clear();
+                }
+            }
         }
         return *this;
     }
+
+private:
+    // Helper: steal resources from other (used when allocators are equal)
+    void move_resources_from(btree_map& other) noexcept {
+        _root = other._root;
+        _rightmost_leaf = other._rightmost_leaf;
+        _size = other._size;
+        other._root = nullptr;
+        other._rightmost_leaf = nullptr;
+        other._size = 0;
+    }
+
+public:
 
     // Capacity
     [[nodiscard]] auto empty() const noexcept -> bool { return _size == 0; }
