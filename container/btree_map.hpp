@@ -5635,12 +5635,65 @@ public:
     }
 
   private:
-    // Optimized count for multi mode - uses equal_range + O(1) iterator subtraction
+    // Optimized count for multi mode - single tree traversal when possible
     template <typename K>
     [[nodiscard]] auto count_multi_impl(const K& key) const -> size_type {
-        auto [lb, ub] = equal_range(key);
-        // Use iterator subtraction - O(1) when both iterators are in the same leaf node
-        return static_cast<size_type>(ub - lb);
+        if (_root == nullptr) return 0;
+
+        // Single traversal to find lower_bound leaf position
+        const node_base* node = _root;
+        while (!node->is_leaf_node()) {
+            auto* internal = static_cast<const internal_node*>(node);
+            size_type pos = lower_bound_in_internal(internal, key);
+            node = internal->children[pos];
+        }
+
+        auto* leaf = static_cast<const leaf_node*>(node);
+        size_type lb_pos = lower_bound_in_leaf(leaf, key);
+
+        // Check if key exists - only need one comparison since lower_bound
+        // guarantees leaf->key(lb_pos) >= key when lb_pos < leaf->count
+        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) {
+            return 0;
+        }
+
+        // Find upper_bound in same leaf (SIMD optimized)
+        size_type ub_pos = upper_bound_in_leaf(leaf, key);
+
+        // Fast path: all duplicates fit in this leaf
+        if (ub_pos < leaf->count) [[likely]] {
+            return ub_pos - lb_pos;
+        }
+
+        // Slow path: duplicates extend beyond this leaf
+        // Walk through leaves using SIMD upper_bound for batch counting
+        size_type count = leaf->count - lb_pos;
+
+        // Walk remaining elements
+        const_iterator it(leaf, leaf->count);
+        ++it;  // Move to first element in next node
+        while (it._node != nullptr) {
+            if (it._node->is_leaf_node()) {
+                auto* iter_leaf = static_cast<const leaf_node*>(it._node);
+                // Check first element to see if we're still on this key
+                if (_comp(key, iter_leaf->key(0))) {
+                    break;
+                }
+                // Use SIMD upper_bound in this leaf
+                size_type ub = upper_bound_in_leaf(iter_leaf, key);
+                count += ub;
+                if (ub < iter_leaf->count) {
+                    break;
+                }
+                it = const_iterator(iter_leaf, iter_leaf->count);
+                ++it;
+            } else {
+                // Internal node - increment to continue traversal
+                ++it;
+            }
+        }
+
+        return count;
     }
 
   public:
