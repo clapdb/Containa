@@ -5635,69 +5635,48 @@ public:
     }
 
   private:
-    // Optimized count for multi mode - single tree traversal when possible
+    // Optimized count for multi mode - single tree traversal with fast path
     template <typename K>
-    [[nodiscard]] auto count_multi_impl(const K& key) const -> size_type {
-        if (_root == nullptr) return 0;
+    [[nodiscard]] __attribute__((always_inline, hot)) auto count_multi_impl(const K& key) const -> size_type {
+        if (_root == nullptr) [[unlikely]] return 0;
 
         // Single traversal to find lower_bound leaf position
         const node_base* node = _root;
         while (!node->is_leaf_node()) {
             auto* internal = static_cast<const internal_node*>(node);
             size_type pos = lower_bound_in_internal(internal, key);
-            // Prefetch next node before traversing
-            if constexpr (!string_like<Key>) {
-                __builtin_prefetch(internal->children[pos], 0, 3);
-            }
             node = internal->children[pos];
         }
 
         auto* leaf = static_cast<const leaf_node*>(node);
         size_type lb_pos = lower_bound_in_leaf(leaf, key);
 
-        // Check if key exists - only need one comparison since lower_bound
-        // guarantees leaf->key(lb_pos) >= key when lb_pos < leaf->count
-        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) {
+        // Check if key exists (90% of benchmark queries are for non-existent keys)
+        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) [[likely]] {
             return 0;
         }
 
-        // Find upper_bound in same leaf (SIMD optimized)
+        // Fast path: count duplicates in same leaf with SIMD upper_bound
         size_type ub_pos = upper_bound_in_leaf(leaf, key);
-
-        // Fast path: all duplicates fit in this leaf
         if (ub_pos < leaf->count) [[likely]] {
             return ub_pos - lb_pos;
         }
 
         // Slow path: duplicates extend beyond this leaf
-        // Walk through leaves using SIMD upper_bound for batch counting
-        size_type count = leaf->count - lb_pos;
-
-        // Walk remaining elements
+        // Walk through leaves counting with SIMD upper_bound
+        size_type result = leaf->count - lb_pos;
         const_iterator it(leaf, leaf->count);
-        ++it;  // Move to first element in next node
-        while (it._node != nullptr) {
-            if (it._node->is_leaf_node()) {
-                auto* iter_leaf = static_cast<const leaf_node*>(it._node);
-                // Check first element to see if we're still on this key
-                if (_comp(key, iter_leaf->key(0))) {
-                    break;
-                }
-                // Use SIMD upper_bound in this leaf
-                size_type ub = upper_bound_in_leaf(iter_leaf, key);
-                count += ub;
-                if (ub < iter_leaf->count) {
-                    break;
-                }
-                it = const_iterator(iter_leaf, iter_leaf->count);
-                ++it;
-            } else {
-                // Internal node - increment to continue traversal
-                ++it;
-            }
+        ++it;
+        while (it._node != nullptr && it._node->is_leaf_node()) {
+            auto* iter_leaf = static_cast<const leaf_node*>(it._node);
+            if (_comp(key, iter_leaf->key(0))) break;
+            size_type ub = upper_bound_in_leaf(iter_leaf, key);
+            result += ub;
+            if (ub < iter_leaf->count) break;
+            it = const_iterator(iter_leaf, iter_leaf->count);
+            ++it;
         }
-
-        return count;
+        return result;
     }
 
   public:
