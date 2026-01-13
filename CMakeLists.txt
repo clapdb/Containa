@@ -101,10 +101,10 @@ target_compile_features(containa INTERFACE cxx_std_20)
 
 # Add compiler warnings
 if(MSVC)
-    target_compile_options(containa INTERFACE /W4)
+    target_compile_options(containa INTERFACE /W4 /WX)
 else()
     target_compile_options(containa INTERFACE
-        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
     )
 endif()
 
