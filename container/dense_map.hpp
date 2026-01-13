@@ -2195,7 +2195,6 @@ private:
             growth_left_ = capacity_to_growth(capacity_);
 
             // Reinsert all values (values stay in place!) using ankerl-style
-            const size_t mask = capacity_ - 1;
             for (size_t i = 0; i < old_size; ++i) {
                 const size_t hash = hash_(get_key(values_[i]));
                 auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
@@ -2234,7 +2233,6 @@ private:
             growth_left_ = capacity_to_growth(capacity_);
 
             // Reinsert all slots (values stay in place!)
-            const size_t mask = capacity_ - 1;
             for (size_t i = 0; i < old_size; ++i) {
                 const size_t hash = hash_(get_key(values_[i]));
                 const int8_t h2_val = detail::h2(hash);
