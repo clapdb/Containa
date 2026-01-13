@@ -5645,6 +5645,10 @@ public:
         while (!node->is_leaf_node()) {
             auto* internal = static_cast<const internal_node*>(node);
             size_type pos = lower_bound_in_internal(internal, key);
+            // Prefetch next node before traversing
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
             node = internal->children[pos];
         }
 
