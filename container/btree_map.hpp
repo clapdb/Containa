@@ -1764,6 +1764,443 @@ class btree_map
     }
 #endif
 
+    // ================================================================================
+    // SIMD upper_bound implementations
+    // upper_bound finds first position where slot > key (i.e., key < slot)
+    // ================================================================================
+
+#ifdef BTREE_HAS_SSE2
+    // SSE2 upper_bound for int32_t keys (signed) - finds first slot > target
+    template <typename T>
+    static auto simd_upper_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        __m128i target_vec = _mm_set1_epi32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                        keys[(i + 1) * stride], keys[i * stride]);
+            }
+            // upper_bound: find slot > target, i.e., key_vec > target_vec
+            __m128i gt = _mm_cmpgt_epi32(key_vec, target_vec);
+            int mask = _mm_movemask_ps(_mm_castsi128_ps(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE2 upper_bound for uint32_t keys (unsigned)
+    template <typename T>
+    static auto simd_upper_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m128i sign_bit = _mm_set1_epi32(static_cast<int32_t>(0x80000000));
+        __m128i target_vec = _mm_xor_si128(_mm_set1_epi32(static_cast<int32_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(static_cast<int32_t>(keys[(i + 3) * stride]),
+                                        static_cast<int32_t>(keys[(i + 2) * stride]),
+                                        static_cast<int32_t>(keys[(i + 1) * stride]),
+                                        static_cast<int32_t>(keys[i * stride]));
+            }
+            key_vec = _mm_xor_si128(key_vec, sign_bit);
+            __m128i gt = _mm_cmpgt_epi32(key_vec, target_vec);
+            int mask = _mm_movemask_ps(_mm_castsi128_ps(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE upper_bound for float keys
+    template <typename T>
+    static auto simd_upper_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        __m128 target_vec = _mm_set1_ps(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128 key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_ps(&keys[i]);
+            } else {
+                key_vec = _mm_set_ps(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m128 gt = _mm_cmpgt_ps(key_vec, target_vec);
+            int mask = _mm_movemask_ps(gt);
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE2 upper_bound for double keys
+    template <typename T>
+    static auto simd_upper_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        __m128d target_vec = _mm_set1_pd(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            __m128d key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_pd(&keys[i]);
+            } else {
+                key_vec = _mm_set_pd(keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m128d gt = _mm_cmpgt_pd(key_vec, target_vec);
+            int mask = _mm_movemask_pd(gt);
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+#endif
+
+#ifdef BTREE_HAS_AVX2
+    // AVX2 upper_bound for int64_t keys (signed)
+    template <typename T>
+    static auto simd_upper_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        __m256i target_vec = _mm256_set1_epi64x(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                            keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m256i gt = _mm256_cmpgt_epi64(key_vec, target_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // AVX2 upper_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto simd_upper_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m256i sign_bit = _mm256_set1_epi64x(static_cast<int64_t>(0x8000000000000000ULL));
+        __m256i target_vec = _mm256_xor_si256(_mm256_set1_epi64x(static_cast<int64_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(static_cast<int64_t>(keys[(i + 3) * stride]),
+                                            static_cast<int64_t>(keys[(i + 2) * stride]),
+                                            static_cast<int64_t>(keys[(i + 1) * stride]),
+                                            static_cast<int64_t>(keys[i * stride]));
+            }
+            key_vec = _mm256_xor_si256(key_vec, sign_bit);
+            __m256i gt = _mm256_cmpgt_epi64(key_vec, target_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+#endif
+
+#ifdef BTREE_HAS_NEON
+    // NEON upper_bound for int32_t keys (signed)
+    template <typename T>
+    static auto neon_upper_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        int32x4_t target_vec = vdupq_n_s32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            int32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                int32x4x2_t interleaved = vld2q_s32(&keys[i * 2]);
+                key_vec = interleaved.val[0];
+            } else {
+                key_vec = int32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                    keys[(i + 3) * stride]};
+            }
+            // upper_bound: find slot > target
+            uint32x4_t gt = vcgtq_s32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for uint32_t keys (unsigned)
+    template <typename T>
+    static auto neon_upper_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        uint32x4_t target_vec = vdupq_n_u32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            uint32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                uint32x4x2_t interleaved = vld2q_u32(&keys[i * 2]);
+                key_vec = interleaved.val[0];
+            } else {
+                key_vec = uint32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 3) * stride]};
+            }
+            uint32x4_t gt = vcgtq_u32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for int64_t keys (signed)
+    template <typename T>
+    static auto neon_upper_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        int64x2_t target_vec = vdupq_n_s64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            int64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s64(&keys[i]);
+            } else {
+                key_vec = int64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_s64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+
+    // NEON upper_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto neon_upper_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        uint64x2_t target_vec = vdupq_n_u64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            uint64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u64(&keys[i]);
+            } else {
+                key_vec = uint64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_u64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+
+    // NEON upper_bound for float keys
+    template <typename T>
+    static auto neon_upper_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        float32x4_t target_vec = vdupq_n_f32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            float32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f32(&keys[i]);
+            } else {
+                key_vec = float32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                      keys[(i + 3) * stride]};
+            }
+            uint32x4_t gt = vcgtq_f32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for double keys
+    template <typename T>
+    static auto neon_upper_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        float64x2_t target_vec = vdupq_n_f64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            float64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f64(&keys[i]);
+            } else {
+                key_vec = float64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_f64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+#endif
+
     // Linear search within a node - faster for small counts due to:
     // 1. Sequential memory access (better cache/prefetch behavior)
     // 2. Better branch prediction
@@ -2149,9 +2586,55 @@ class btree_map
     }
 
     // Upper bound search in leaf node - finds first slot > key
-    // For now using scalar search; SIMD optimization can be added later
+    // SIMD-optimized for common integer/float types with std::less comparator
     [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_leaf(
       const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths (SSE2/AVX2)
+#ifdef BTREE_HAS_SSE2
+#if defined(BTREE_HAS_AVX2)
+        // AVX2 paths for 64-bit types
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u64(leaf->slots, leaf->count, key);
+        }
+#endif
+        // SSE2 paths for 32-bit types
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_double(leaf->slots, leaf->count, key);
+        }
+#endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_double(leaf->slots, leaf->count, key);
+        }
+#endif
         // For string-like types, binary search reduces expensive comparisons
         if constexpr (string_like<Key>) {
             return binary_search_upper_bound_in_slots(leaf->slots, leaf->count, key);
@@ -2161,8 +2644,55 @@ class btree_map
     }
 
     // Upper bound search in internal node - finds first slot > key
+    // SIMD-optimized for common integer/float types with std::less comparator
     [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_internal(
       const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths (SSE2/AVX2)
+#ifdef BTREE_HAS_SSE2
+#if defined(BTREE_HAS_AVX2)
+        // AVX2 paths for 64-bit types
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u64(internal->slots, internal->count, key);
+        }
+#endif
+        // SSE2 paths for 32-bit types
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_double(internal->slots, internal->count, key);
+        }
+#endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_double(internal->slots, internal->count, key);
+        }
+#endif
         // For string-like types, binary search reduces expensive comparisons
         if constexpr (string_like<Key>) {
             return binary_search_upper_bound_in_slots(internal->slots, internal->count, key);
@@ -3501,6 +4031,95 @@ class btree_map
         }
 
         friend auto operator!=(const iterator& a, const iterator& b) -> bool { return !(a == b); }
+
+        // O(1) difference when iterators are in the same leaf node
+        // Falls back to optimized tree traversal otherwise
+        friend auto operator-(const iterator& a, const iterator& b) -> difference_type {
+            if (a._node == b._node && a._node != nullptr && a._node->is_leaf_node()) {
+                return static_cast<difference_type>(a._pos) - static_cast<difference_type>(b._pos);
+            }
+            return distance_slow(a, b);
+        }
+
+      private:
+        // Optimized distance calculation using tree structure
+        // Based on absl's btree_iterator::distance_slow algorithm
+        // Complexity: O(log n + number of leaf nodes traversed) instead of O(k)
+        static auto distance_slow(const iterator& end_it, const iterator& begin_it) -> difference_type {
+            const node_base* end_node = end_it._node;
+            size_type end_pos = end_it._pos;
+
+            const node_base* node = begin_it._node;
+            // Compensate for double counting if begin is in a leaf node
+            difference_type count = node->is_leaf_node()
+                                        ? -static_cast<difference_type>(begin_it._pos)
+                                        : 0;
+
+            // If begin is in internal node, count its key and go to next subtree
+            if (!node->is_leaf_node()) {
+                ++count;
+                node = static_cast<const internal_node*>(node)->children[begin_it._pos + 1];
+            }
+
+            // Navigate to leftmost leaf
+            while (!node->is_leaf_node()) {
+                node = static_cast<const internal_node*>(node)->children[0];
+            }
+
+            // Now traverse leaf nodes, counting elements
+            size_type pos = node->position;
+            const node_base* parent = node->parent;
+
+            for (;;) {
+                // Count leaf nodes going right within current parent
+                while (pos <= parent->count) {
+                    node = static_cast<const internal_node*>(parent)->children[pos];
+
+                    // Navigate to leftmost leaf if internal
+                    if (!node->is_leaf_node()) {
+                        while (!node->is_leaf_node()) {
+                            node = static_cast<const internal_node*>(node)->children[0];
+                        }
+                        pos = node->position;
+                        parent = node->parent;
+                    }
+
+                    // Check if we reached end
+                    if (node == end_node) {
+                        return count + static_cast<difference_type>(end_pos);
+                    }
+                    if (parent == end_node && pos == end_pos) {
+                        return count + static_cast<difference_type>(node->count);
+                    }
+
+                    // Add this leaf's count + 1 for parent's key
+                    count += node->count + 1;
+                    ++pos;
+                }
+
+                // Go up to find next sibling
+                while (parent->parent != nullptr) {
+                    node = parent;
+                    pos = node->position;
+                    parent = node->parent;
+
+                    // Check if end is at this internal position
+                    if (parent == end_node && pos == end_pos) {
+                        return count - 1;  // -1 because we over-counted
+                    }
+
+                    ++pos;
+                    if (pos <= parent->count) {
+                        break;  // Found next sibling
+                    }
+                }
+
+                // If we've exhausted the tree, we're done
+                if (parent->parent == nullptr && pos > parent->count) {
+                    return count;
+                }
+            }
+        }
     };
 
     class const_iterator
@@ -3647,6 +4266,83 @@ class btree_map
         }
 
         friend auto operator!=(const const_iterator& a, const const_iterator& b) -> bool { return !(a == b); }
+
+        // O(1) difference when iterators are in the same leaf node
+        // Falls back to optimized tree traversal otherwise
+        friend auto operator-(const const_iterator& a, const const_iterator& b) -> difference_type {
+            if (a._node == b._node && a._node != nullptr && a._node->is_leaf_node()) {
+                return static_cast<difference_type>(a._pos) - static_cast<difference_type>(b._pos);
+            }
+            return distance_slow(a, b);
+        }
+
+      private:
+        // Optimized distance calculation using tree structure
+        // Based on absl's btree_iterator::distance_slow algorithm
+        static auto distance_slow(const const_iterator& end_it, const const_iterator& begin_it) -> difference_type {
+            const node_base* end_node = end_it._node;
+            size_type end_pos = end_it._pos;
+
+            const node_base* node = begin_it._node;
+            difference_type count = node->is_leaf_node()
+                                        ? -static_cast<difference_type>(begin_it._pos)
+                                        : 0;
+
+            if (!node->is_leaf_node()) {
+                ++count;
+                node = static_cast<const internal_node*>(node)->children[begin_it._pos + 1];
+            }
+
+            while (!node->is_leaf_node()) {
+                node = static_cast<const internal_node*>(node)->children[0];
+            }
+
+            size_type pos = node->position;
+            const node_base* parent = node->parent;
+
+            for (;;) {
+                while (pos <= parent->count) {
+                    node = static_cast<const internal_node*>(parent)->children[pos];
+
+                    if (!node->is_leaf_node()) {
+                        while (!node->is_leaf_node()) {
+                            node = static_cast<const internal_node*>(node)->children[0];
+                        }
+                        pos = node->position;
+                        parent = node->parent;
+                    }
+
+                    if (node == end_node) {
+                        return count + static_cast<difference_type>(end_pos);
+                    }
+                    if (parent == end_node && pos == end_pos) {
+                        return count + static_cast<difference_type>(node->count);
+                    }
+
+                    count += node->count + 1;
+                    ++pos;
+                }
+
+                while (parent->parent != nullptr) {
+                    node = parent;
+                    pos = node->position;
+                    parent = node->parent;
+
+                    if (parent == end_node && pos == end_pos) {
+                        return count - 1;
+                    }
+
+                    ++pos;
+                    if (pos <= parent->count) {
+                        break;
+                    }
+                }
+
+                if (parent->parent == nullptr && pos > parent->count) {
+                    return count;
+                }
+            }
+        }
     };
 
     // Custom reverse iterator (std::reverse_iterator doesn't work with our end() iterator)
@@ -4918,11 +5614,10 @@ public:
 
     // count - returns number of elements with matching key
     // In unique mode: returns 0 or 1
-    // In multi mode: returns actual count using equal_range
+    // In multi mode: optimized counting - avoids iterator traversal when duplicates fit in one leaf
     [[nodiscard]] auto count(const Key& key) const -> size_type {
         if constexpr (is_multi_mode) {
-            auto [lb, ub] = equal_range(key);
-            return static_cast<size_type>(std::distance(lb, ub));
+            return count_multi_impl(key);
         } else {
             return contains(key) ? 1 : 0;
         }
@@ -4933,13 +5628,22 @@ public:
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto count(const K& key) const -> size_type {
         if constexpr (is_multi_mode) {
-            auto [lb, ub] = equal_range(key);
-            return static_cast<size_type>(std::distance(lb, ub));
+            return count_multi_impl(key);
         } else {
             return contains(key) ? 1 : 0;
         }
     }
 
+  private:
+    // Optimized count for multi mode - uses equal_range + O(1) iterator subtraction
+    template <typename K>
+    [[nodiscard]] auto count_multi_impl(const K& key) const -> size_type {
+        auto [lb, ub] = equal_range(key);
+        // Use iterator subtraction - O(1) when both iterators are in the same leaf node
+        return static_cast<size_type>(ub - lb);
+    }
+
+  public:
     // lower_bound
     [[nodiscard]] auto lower_bound(const Key& key) -> iterator {
         if (_root == nullptr) return end();
