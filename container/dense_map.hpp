@@ -940,6 +940,24 @@ public:
         }
     }
 
+    // Iterator range constructor
+    template <typename InputIt>
+    dense_map(InputIt first, InputIt last, size_type bucket_count = 0,
+              const Hash& hash = Hash(), const KeyEqual& equal = KeyEqual(),
+              const Allocator& alloc = Allocator())
+        : hash_(hash), key_equal_(equal), alloc_(alloc) {
+        if (bucket_count > 0) {
+            reserve(bucket_count);
+        }
+        for (; first != last; ++first) {
+            if constexpr (std::is_void_v<T>) {
+                insert(*first);
+            } else {
+                insert(*first);
+            }
+        }
+    }
+
     ~dense_map() { destroy(); }
 
     dense_map& operator=(const dense_map& other) {
