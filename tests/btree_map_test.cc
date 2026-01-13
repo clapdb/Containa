@@ -2520,4 +2520,285 @@ TEST_CASE("btree_map::pmr") {
 
 #endif  // BTREE_HAS_PMR
 
+// =============================================================================
+// btree_multimap tests
+// =============================================================================
+
+TEST_CASE("btree_multimap::basic") {
+    SUBCASE("default constructor") {
+        btree_multimap<int, int> mmap;
+        CHECK(mmap.empty());
+        CHECK_EQ(mmap.size(), 0);
+    }
+
+    SUBCASE("insert duplicate keys") {
+        btree_multimap<int, std::string> mmap;
+
+        auto [it1, ok1] = mmap.insert({1, "one"});
+        CHECK(ok1);
+        CHECK_EQ(it1->first, 1);
+        CHECK_EQ(it1->second, "one");
+
+        auto [it2, ok2] = mmap.insert({1, "uno"});
+        CHECK(ok2);  // Should always succeed in multimap
+        CHECK_EQ(it2->first, 1);
+        CHECK_EQ(it2->second, "uno");
+
+        auto [it3, ok3] = mmap.insert({1, "ein"});
+        CHECK(ok3);
+
+        CHECK_EQ(mmap.size(), 3);
+    }
+
+    SUBCASE("count with duplicates") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({1, 30});
+        mmap.insert({2, 100});
+        mmap.insert({2, 200});
+        mmap.insert({3, 1000});
+
+        CHECK_EQ(mmap.count(1), 3);
+        CHECK_EQ(mmap.count(2), 2);
+        CHECK_EQ(mmap.count(3), 1);
+        CHECK_EQ(mmap.count(4), 0);
+    }
+
+    SUBCASE("equal_range") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({1, 30});
+        mmap.insert({2, 100});
+        mmap.insert({3, 1000});
+
+        auto [lb, ub] = mmap.equal_range(1);
+        int count = 0;
+        for (auto it = lb; it != ub; ++it) {
+            CHECK_EQ(it->first, 1);
+            ++count;
+        }
+        CHECK_EQ(count, 3);
+
+        auto [lb2, ub2] = mmap.equal_range(2);
+        count = 0;
+        for (auto it = lb2; it != ub2; ++it) {
+            CHECK_EQ(it->first, 2);
+            ++count;
+        }
+        CHECK_EQ(count, 1);
+
+        auto [lb3, ub3] = mmap.equal_range(4);
+        CHECK(lb3 == ub3);  // Not found
+    }
+
+    SUBCASE("erase key removes all duplicates") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({1, 30});
+        mmap.insert({2, 100});
+
+        auto erased = mmap.erase(1);
+        CHECK_EQ(erased, 3);  // All 3 elements with key=1 erased
+        CHECK_EQ(mmap.size(), 1);
+        CHECK_EQ(mmap.count(1), 0);
+        CHECK_EQ(mmap.count(2), 1);
+    }
+
+    SUBCASE("iteration preserves order") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({3, 300});
+        mmap.insert({1, 100});
+        mmap.insert({1, 110});
+        mmap.insert({2, 200});
+        mmap.insert({1, 120});
+
+        std::vector<int> keys;
+        for (const auto& [k, v] : mmap) {
+            keys.push_back(k);
+        }
+
+        CHECK_EQ(keys.size(), 5);
+        // Keys should be in sorted order
+        CHECK_EQ(keys[0], 1);
+        CHECK_EQ(keys[1], 1);
+        CHECK_EQ(keys[2], 1);
+        CHECK_EQ(keys[3], 2);
+        CHECK_EQ(keys[4], 3);
+    }
+
+    SUBCASE("large scale duplicate insertion") {
+        btree_multimap<int, int> mmap;
+        const int num_keys = 100;
+        const int dups_per_key = 50;
+
+        for (int k = 0; k < num_keys; ++k) {
+            for (int d = 0; d < dups_per_key; ++d) {
+                mmap.insert({k, d});
+            }
+        }
+
+        CHECK_EQ(mmap.size(), num_keys * dups_per_key);
+
+        for (int k = 0; k < num_keys; ++k) {
+            CHECK_EQ(mmap.count(k), dups_per_key);
+        }
+    }
+}
+
+TEST_CASE("btree_multimap::string_keys") {
+    SUBCASE("string key duplicates") {
+        btree_multimap<std::string, int> mmap;
+        mmap.insert({"apple", 1});
+        mmap.insert({"apple", 2});
+        mmap.insert({"banana", 10});
+        mmap.insert({"apple", 3});
+
+        CHECK_EQ(mmap.count("apple"), 3);
+        CHECK_EQ(mmap.count("banana"), 1);
+        CHECK_EQ(mmap.size(), 4);
+    }
+}
+
+// =============================================================================
+// btree_multiset tests
+// =============================================================================
+
+TEST_CASE("btree_multiset::basic") {
+    SUBCASE("default constructor") {
+        btree_multiset<int> mset;
+        CHECK(mset.empty());
+        CHECK_EQ(mset.size(), 0);
+    }
+
+    SUBCASE("insert duplicate keys") {
+        btree_multiset<int> mset;
+
+        auto [it1, ok1] = mset.insert(1);
+        CHECK(ok1);
+        CHECK_EQ(*it1, 1);
+
+        auto [it2, ok2] = mset.insert(1);
+        CHECK(ok2);  // Should always succeed in multiset
+        CHECK_EQ(*it2, 1);
+
+        auto [it3, ok3] = mset.insert(1);
+        CHECK(ok3);
+
+        CHECK_EQ(mset.size(), 3);
+    }
+
+    SUBCASE("count with duplicates") {
+        btree_multiset<int> mset;
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(2);
+        mset.insert(2);
+        mset.insert(3);
+
+        CHECK_EQ(mset.count(1), 3);
+        CHECK_EQ(mset.count(2), 2);
+        CHECK_EQ(mset.count(3), 1);
+        CHECK_EQ(mset.count(4), 0);
+    }
+
+    SUBCASE("equal_range") {
+        btree_multiset<int> mset;
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(2);
+        mset.insert(3);
+
+        auto [lb, ub] = mset.equal_range(1);
+        int count = 0;
+        for (auto it = lb; it != ub; ++it) {
+            CHECK_EQ(*it, 1);
+            ++count;
+        }
+        CHECK_EQ(count, 3);
+    }
+
+    SUBCASE("erase removes all duplicates") {
+        btree_multiset<int> mset;
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(2);
+
+        auto erased = mset.erase(1);
+        CHECK_EQ(erased, 3);
+        CHECK_EQ(mset.size(), 1);
+        CHECK_EQ(mset.count(1), 0);
+    }
+
+    SUBCASE("iteration preserves order") {
+        btree_multiset<int> mset;
+        mset.insert(3);
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(2);
+        mset.insert(1);
+
+        std::vector<int> values;
+        for (const auto& v : mset) {
+            values.push_back(v);
+        }
+
+        CHECK_EQ(values.size(), 5);
+        CHECK_EQ(values[0], 1);
+        CHECK_EQ(values[1], 1);
+        CHECK_EQ(values[2], 1);
+        CHECK_EQ(values[3], 2);
+        CHECK_EQ(values[4], 3);
+    }
+
+    SUBCASE("string multiset") {
+        btree_multiset<std::string> mset;
+        mset.insert("apple");
+        mset.insert("apple");
+        mset.insert("banana");
+
+        CHECK_EQ(mset.count("apple"), 2);
+        CHECK_EQ(mset.count("banana"), 1);
+        CHECK_EQ(mset.size(), 3);
+    }
+}
+
+#ifdef BTREE_HAS_PMR
+
+TEST_CASE("btree_multimap/multiset PMR") {
+    SUBCASE("btree_multimap with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::btree_multimap<int, int> mmap(&resource);
+
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({1, 30});
+        mmap.insert({2, 100});
+
+        CHECK_EQ(mmap.size(), 4);
+        CHECK_EQ(mmap.count(1), 3);
+        CHECK_EQ(mmap.count(2), 1);
+    }
+
+    SUBCASE("btree_multiset with PMR") {
+        std::pmr::monotonic_buffer_resource resource;
+        stdb::pmr::btree_multiset<int> mset(&resource);
+
+        mset.insert(1);
+        mset.insert(1);
+        mset.insert(2);
+
+        CHECK_EQ(mset.size(), 3);
+        CHECK_EQ(mset.count(1), 2);
+        CHECK_EQ(mset.count(2), 1);
+    }
+}
+
+#endif  // BTREE_HAS_PMR
+
 }  // namespace stdb::container

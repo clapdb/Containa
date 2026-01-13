@@ -150,6 +150,22 @@ struct btree_set_empty_value
     constexpr auto operator<=>(const btree_set_empty_value&) const noexcept { return std::strong_ordering::equal; }
 };
 
+// =============================================================================
+// Duplicate key policies for btree containers
+// =============================================================================
+
+// Policy for unique keys (btree_map, btree_set) - rejects duplicate keys
+struct btree_unique_policy
+{
+    static constexpr bool allow_duplicates = false;
+};
+
+// Policy for multi keys (btree_multimap, btree_multiset) - allows duplicate keys
+struct btree_multi_policy
+{
+    static constexpr bool allow_duplicates = true;
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 // Note: For btree_set (Value = btree_set_empty_value), compressed_pair's
@@ -172,12 +188,15 @@ constexpr std::size_t optimal_node_size() {
 
 template <typename Key, typename Value, typename Compare = std::less<Key>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>,
-          std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
+          std::size_t TargetNodeSize = optimal_node_size<Key, Value>(),
+          typename DuplicatePolicy = btree_unique_policy>
 class btree_map
 {
    public:
     // Set mode detection: when Value is btree_set_empty_value, we operate as a set
     static constexpr bool is_set_mode = std::is_same_v<Value, btree_set_empty_value>;
+    // Multi mode detection: when policy allows duplicates (multimap/multiset)
+    static constexpr bool is_multi_mode = DuplicatePolicy::allow_duplicates;
 
     using key_type = Key;
     using mapped_type = Value;
@@ -4257,8 +4276,11 @@ public:
                 auto* internal = static_cast<internal_node*>(node);
                 auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
 
-                if (exact_match) [[unlikely]] {
-                    return {iterator(node, pos), false};  // Key already exists
+                // In unique mode, reject duplicates; in multi mode, allow them
+                if constexpr (!is_multi_mode) {
+                    if (exact_match) [[unlikely]] {
+                        return {iterator(node, pos), false};  // Key already exists
+                    }
                 }
 
                 node = internal->children[pos];
@@ -4268,8 +4290,11 @@ public:
             auto* leaf = static_cast<leaf_node*>(node);
             auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
 
-            if (exact_match) [[unlikely]] {
-                return {iterator(leaf, pos), false};  // Key already exists
+            // In unique mode, reject duplicates; in multi mode, allow them
+            if constexpr (!is_multi_mode) {
+                if (exact_match) [[unlikely]] {
+                    return {iterator(leaf, pos), false};  // Key already exists
+                }
             }
 
             // Insert and get the position where it was inserted
@@ -4283,9 +4308,12 @@ public:
                 auto* internal = static_cast<internal_node*>(node);
                 size_type pos = lower_bound_in_internal(internal, key);
 
-                // Check for exact match (single comparison optimization)
-                if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
-                    return {iterator(node, pos), false};  // Key already exists
+                // In unique mode, reject duplicates; in multi mode, allow them
+                if constexpr (!is_multi_mode) {
+                    // Check for exact match (single comparison optimization)
+                    if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                        return {iterator(node, pos), false};  // Key already exists
+                    }
                 }
 
                 // Prefetch next node before traversing
@@ -4297,9 +4325,12 @@ public:
             auto* leaf = static_cast<leaf_node*>(node);
             size_type pos = lower_bound_in_leaf(leaf, key);
 
-            // Check for exact match
-            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
-                return {iterator(leaf, pos), false};  // Key already exists
+            // In unique mode, reject duplicates; in multi mode, allow them
+            if constexpr (!is_multi_mode) {
+                // Check for exact match
+                if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+                    return {iterator(leaf, pos), false};  // Key already exists
+                }
             }
 
             // Insert and get the position where it was inserted
@@ -4773,14 +4804,28 @@ public:
         return const_cast<btree_map*>(this)->find_impl(key) != end();
     }
 
-    // count
-    [[nodiscard]] auto count(const Key& key) const -> size_type { return contains(key) ? 1 : 0; }
+    // count - returns number of elements with matching key
+    // In unique mode: returns 0 or 1
+    // In multi mode: returns actual count using equal_range
+    [[nodiscard]] auto count(const Key& key) const -> size_type {
+        if constexpr (is_multi_mode) {
+            auto [lb, ub] = equal_range(key);
+            return static_cast<size_type>(std::distance(lb, ub));
+        } else {
+            return contains(key) ? 1 : 0;
+        }
+    }
 
     // Heterogeneous count
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto count(const K& key) const -> size_type {
-        return contains(key) ? 1 : 0;
+        if constexpr (is_multi_mode) {
+            auto [lb, ub] = equal_range(key);
+            return static_cast<size_type>(std::distance(lb, ub));
+        } else {
+            return contains(key) ? 1 : 0;
+        }
     }
 
     // lower_bound
@@ -4819,11 +4864,13 @@ public:
         return const_iterator(const_cast<btree_map*>(this)->lower_bound(key));
     }
 
-    // upper_bound
+    // upper_bound - finds first element where key < element
+    // In multi mode, iterates through all duplicates to find the first element > key
     [[nodiscard]] auto upper_bound(const Key& key) -> iterator {
         auto it = lower_bound(key);
-        if (it != end()) {
-            // Get the key from iterator (in set mode, *it is the key; in map mode, it->first)
+        // In multi mode, iterate through all equal elements
+        // In unique mode, at most one element matches
+        while (it != end()) {
             const Key& iter_key = [&]() -> const Key& {
                 if constexpr (is_set_mode) {
                     return *it;
@@ -4831,9 +4878,11 @@ public:
                     return it->first;
                 }
             }();
-            if (!_comp(key, iter_key) && !_comp(iter_key, key)) {
-                ++it;
+            // If key < iter_key, we found the upper bound
+            if (_comp(key, iter_key)) {
+                break;
             }
+            ++it;
         }
         return it;
     }
@@ -4860,7 +4909,17 @@ public:
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto upper_bound(const K& key) -> iterator {
         auto it = lower_bound(key);
-        if (it != end() && !_comp(key, it->first) && !_comp(it->first, key)) {
+        while (it != end()) {
+            const Key& iter_key = [&]() -> const Key& {
+                if constexpr (is_set_mode) {
+                    return *it;
+                } else {
+                    return it->first;
+                }
+            }();
+            if (_comp(key, iter_key)) {
+                break;
+            }
             ++it;
         }
         return it;
@@ -4925,27 +4984,70 @@ public:
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return rend(); }
 
     // Erase by key - O(log n) with proper B-tree rebalancing
+    // In unique mode: erases at most 1 element
+    // In multi mode: erases all elements with matching key
     auto erase(const Key& key) -> size_type {
-        auto it = find(key);
-        if (it == end()) {
-            return 0;
+        if constexpr (is_multi_mode) {
+            // Multi mode: erase all elements with matching key
+            size_type erased = 0;
+            auto it = find(key);
+            while (it != end()) {
+                // Get the key from iterator
+                const Key& iter_key = [&]() -> const Key& {
+                    if constexpr (is_set_mode) {
+                        return *it;
+                    } else {
+                        return it->first;
+                    }
+                }();
+                // Check if still matching
+                if (_comp(key, iter_key) || _comp(iter_key, key)) {
+                    break;  // No longer matching
+                }
+                it = erase(it);  // erase(iterator) returns next iterator
+                ++erased;
+            }
+            return erased;
+        } else {
+            auto it = find(key);
+            if (it == end()) {
+                return 0;
+            }
+            erase_impl(it._node, it._pos);
+            return 1;
         }
-
-        erase_impl(it._node, it._pos);
-        return 1;
     }
 
     // Heterogeneous erase by key
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     auto erase(const K& key) -> size_type {
-        auto it = find_impl(key);
-        if (it == end()) {
-            return 0;
+        if constexpr (is_multi_mode) {
+            size_type erased = 0;
+            auto it = find_impl(key);
+            while (it != end()) {
+                const Key& iter_key = [&]() -> const Key& {
+                    if constexpr (is_set_mode) {
+                        return *it;
+                    } else {
+                        return it->first;
+                    }
+                }();
+                if (_comp(key, iter_key) || _comp(iter_key, key)) {
+                    break;
+                }
+                it = erase(it);
+                ++erased;
+            }
+            return erased;
+        } else {
+            auto it = find_impl(key);
+            if (it == end()) {
+                return 0;
+            }
+            erase_impl(it._node, it._pos);
+            return 1;
         }
-
-        erase_impl(it._node, it._pos);
-        return 1;
     }
 
     // Erase by iterator - returns iterator to next element
@@ -5127,27 +5229,53 @@ public:
     }
 
     // equal_range - returns pair of iterators (lower_bound, upper_bound)
-    // Optimized: single traversal since this is a unique-key map
+    // In unique mode: optimized single traversal
+    // In multi mode: uses upper_bound to find all matching keys
     [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
-            // Key not found: lower_bound == upper_bound
+        // Check if key matches (handle both set mode and map mode)
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        // Key found: upper_bound is next element
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            // Multi mode: use upper_bound to find all matching keys
+            return {lb, upper_bound(key)};
+        } else {
+            // Unique mode: upper_bound is next element
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     [[nodiscard]] auto equal_range(const Key& key) const -> std::pair<const_iterator, const_iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     // Heterogeneous equal_range
@@ -5155,24 +5283,48 @@ public:
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) -> std::pair<iterator, iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) const -> std::pair<const_iterator, const_iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     // swap
@@ -5526,16 +5678,16 @@ template <typename Key, typename Value, typename Compare = std::less<Key>,
 using btree_map_compact = btree_map<Key, Value, Compare, Allocator, 256>;
 
 // Non-member swap (C++17)
-template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N>
-void swap(btree_map<Key, Value, Compare, Allocator, N>& lhs,
-          btree_map<Key, Value, Compare, Allocator, N>& rhs) noexcept {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename DuplicatePolicy>
+void swap(btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& lhs,
+          btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
 // erase_if - erase all elements satisfying predicate (C++20)
-template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename Pred>
-typename btree_map<Key, Value, Compare, Allocator, N>::size_type
-erase_if(btree_map<Key, Value, Compare, Allocator, N>& c, Pred pred) {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename DuplicatePolicy, typename Pred>
+typename btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>::size_type
+erase_if(btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& c, Pred pred) {
     auto old_size = c.size();
     for (auto it = c.begin(); it != c.end();) {
         if (pred(*it)) {
@@ -5572,6 +5724,34 @@ template <typename Key, typename Compare = std::less<Key>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
 using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 
+// =============================================================================
+// btree_multimap - B-tree based ordered multimap (allows duplicate keys)
+// =============================================================================
+
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
+using btree_multimap = btree_map<Key, Value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
+
+// btree_multimap_compact with 256-byte node size
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>>
+using btree_multimap_compact = btree_multimap<Key, Value, Compare, Allocator, 256>;
+
+// =============================================================================
+// btree_multiset - B-tree based ordered multiset (allows duplicate keys)
+// =============================================================================
+
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, btree_set_empty_value>()>
+using btree_multiset = btree_map<Key, btree_set_empty_value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
+
+// btree_multiset_compact with 256-byte node size
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
+using btree_multiset_compact = btree_multiset<Key, Compare, Allocator, 256>;
+
 }  // namespace stdb::container
 
 // =============================================================================
@@ -5606,6 +5786,32 @@ template <typename Key, typename Compare = std::less<Key>>
 using btree_set_compact = container::btree_set<Key, Compare,
                                                std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                                256>;
+
+// btree_multimap with polymorphic allocator
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, Value>()>
+using btree_multimap = container::btree_multimap<Key, Value, Compare,
+                                                 std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                                 TargetNodeSize>;
+
+// btree_multimap_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using btree_multimap_compact = container::btree_multimap<Key, Value, Compare,
+                                                         std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                                         256>;
+
+// btree_multiset with polymorphic allocator
+template <typename Key, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, container::btree_set_empty_value>()>
+using btree_multiset = container::btree_multiset<Key, Compare,
+                                                 std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                                 TargetNodeSize>;
+
+// btree_multiset_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Compare = std::less<Key>>
+using btree_multiset_compact = container::btree_multiset<Key, Compare,
+                                                         std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                                         256>;
 
 }  // namespace stdb::pmr
 
