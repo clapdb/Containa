@@ -1802,6 +1802,40 @@ class btree_map
         return lo;
     }
 
+    // Linear search for upper_bound within a node
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_upper_bound_in_slots(
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        BTREE_ASSUME(count <= 32);
+        for (size_type i = 0; i < count; ++i) {
+            if (_comp(key, slots[i].first)) {  // key < slot
+                return i;
+            }
+        }
+        return count;
+    }
+
+    // Binary search for upper_bound within a node
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_upper_bound_in_slots(
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        BTREE_ASSUME(count <= 32);
+
+        size_type lo = 0;
+        size_type hi = count;
+        while (lo < hi) {
+            size_type mid = lo + ((hi - lo) >> 1);
+            if (_comp(key, slots[mid].first)) {  // key < slot[mid]
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return lo;
+    }
+
     // Three-way binary search for string-like types
     // Returns {position, exact_match} - avoids extra equality check after search
     // This is faster for strings because compare() gives <0/0/>0 in one call
@@ -2112,6 +2146,37 @@ class btree_map
             return lower_bound_in_leaf(static_cast<const leaf_node*>(node), key);
         }
         return lower_bound_in_internal(static_cast<const internal_node*>(node), key);
+    }
+
+    // Upper bound search in leaf node - finds first slot > key
+    // For now using scalar search; SIMD optimization can be added later
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_leaf(
+      const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_upper_bound_in_slots(leaf->slots, leaf->count, key);
+        }
+        // Linear search for small fixed-size types
+        return linear_search_upper_bound_in_slots(leaf->slots, leaf->count, key);
+    }
+
+    // Upper bound search in internal node - finds first slot > key
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_internal(
+      const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_upper_bound_in_slots(internal->slots, internal->count, key);
+        }
+        // Linear search for non-string types
+        return linear_search_upper_bound_in_slots(internal->slots, internal->count, key);
+    }
+
+    // Generic upper bound search - uses node type dispatch
+    [[nodiscard]] auto upper_bound_in_node(const node_base* node, const Key& key) const noexcept -> size_type {
+        if (node->is_leaf_node()) {
+            return upper_bound_in_leaf(static_cast<const leaf_node*>(node), key);
+        }
+        return upper_bound_in_internal(static_cast<const internal_node*>(node), key);
     }
 
     // Three-way search for leaf node (string-like types only)
@@ -4644,6 +4709,23 @@ public:
         return lo;
     }
 
+    // Generic upper_bound for heterogeneous lookup (no SIMD, uses comparator)
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename K, typename Node>
+    [[nodiscard]] auto upper_bound_generic(const Node* node, const K& key) const noexcept -> size_type {
+        size_type lo = 0;
+        size_type hi = node->count;
+        while (lo < hi) {
+            size_type mid = lo + (hi - lo) / 2;
+            if (_comp(key, node->key(mid))) {  // key < slot[mid]
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return lo;
+    }
+
     // Internal lower_bound implementation supporting heterogeneous lookup
     template <typename K>
     [[nodiscard]] auto lower_bound_impl(const K& key) -> iterator {
@@ -4666,6 +4748,36 @@ public:
             size_type pos = lower_bound_generic(internal, key);
             if (pos < internal->count) {
                 if (!_comp(internal->key(pos), key)) {
+                    result = iterator(internal, pos);
+                }
+            }
+            node = internal->children[pos];
+        }
+    }
+
+    // Internal upper_bound implementation supporting heterogeneous lookup
+    template <typename K>
+    [[nodiscard]] auto upper_bound_impl(const K& key) -> iterator {
+        if (_root == nullptr) return end();
+
+        node_base* node = _root;
+        iterator result = end();
+
+        while (true) {
+            if (node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(node);
+                size_type pos = upper_bound_generic(leaf, key);
+                if (pos < leaf->count) {
+                    return iterator(leaf, pos);
+                }
+                return result;
+            }
+
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = upper_bound_generic(internal, key);
+            if (pos < internal->count) {
+                // slot[pos] > key, so this is a candidate
+                if (_comp(key, internal->key(pos))) {
                     result = iterator(internal, pos);
                 }
             }
@@ -4865,26 +4977,37 @@ public:
     }
 
     // upper_bound - finds first element where key < element
-    // In multi mode, iterates through all duplicates to find the first element > key
+    // Uses O(log n) tree traversal instead of iterating through duplicates
     [[nodiscard]] auto upper_bound(const Key& key) -> iterator {
-        auto it = lower_bound(key);
-        // In multi mode, iterate through all equal elements
-        // In unique mode, at most one element matches
-        while (it != end()) {
-            const Key& iter_key = [&]() -> const Key& {
-                if constexpr (is_set_mode) {
-                    return *it;
-                } else {
-                    return it->first;
+        if (_root == nullptr) return end();
+
+        node_base* node = _root;
+        iterator result = end();
+
+        while (true) {
+            size_type pos = upper_bound_in_node(node, key);
+
+            if (node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(node);
+                if (pos < leaf->count) {
+                    return iterator(leaf, pos);
                 }
-            }();
-            // If key < iter_key, we found the upper bound
-            if (_comp(key, iter_key)) {
-                break;
+                return result;
             }
-            ++it;
+
+            auto* internal = static_cast<internal_node*>(node);
+            if (pos < internal->count) {
+                // slot[pos] > key, so this is a candidate
+                if (_comp(key, internal->key(pos))) {
+                    result = iterator(internal, pos);
+                }
+            }
+            // Prefetch next node before traversing
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
+            node = internal->children[pos];
         }
-        return it;
     }
 
     [[nodiscard]] auto upper_bound(const Key& key) const -> const_iterator {
@@ -4908,27 +5031,13 @@ public:
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto upper_bound(const K& key) -> iterator {
-        auto it = lower_bound(key);
-        while (it != end()) {
-            const Key& iter_key = [&]() -> const Key& {
-                if constexpr (is_set_mode) {
-                    return *it;
-                } else {
-                    return it->first;
-                }
-            }();
-            if (_comp(key, iter_key)) {
-                break;
-            }
-            ++it;
-        }
-        return it;
+        return upper_bound_impl(key);
     }
 
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto upper_bound(const K& key) const -> const_iterator {
-        return const_iterator(const_cast<btree_map*>(this)->upper_bound(key));
+        return const_iterator(const_cast<btree_map*>(this)->upper_bound_impl(key));
     }
 
     // Iterators
