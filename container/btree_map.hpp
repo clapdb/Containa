@@ -150,6 +150,22 @@ struct btree_set_empty_value
     constexpr auto operator<=>(const btree_set_empty_value&) const noexcept { return std::strong_ordering::equal; }
 };
 
+// =============================================================================
+// Duplicate key policies for btree containers
+// =============================================================================
+
+// Policy for unique keys (btree_map, btree_set) - rejects duplicate keys
+struct btree_unique_policy
+{
+    static constexpr bool allow_duplicates = false;
+};
+
+// Policy for multi keys (btree_multimap, btree_multiset) - allows duplicate keys
+struct btree_multi_policy
+{
+    static constexpr bool allow_duplicates = true;
+};
+
 // Helper to calculate optimal node size for a given key-value pair type
 // Aims for at least 15 slots per node for good cache utilization
 // Note: For btree_set (Value = btree_set_empty_value), compressed_pair's
@@ -172,12 +188,15 @@ constexpr std::size_t optimal_node_size() {
 
 template <typename Key, typename Value, typename Compare = std::less<Key>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>,
-          std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
+          std::size_t TargetNodeSize = optimal_node_size<Key, Value>(),
+          typename DuplicatePolicy = btree_unique_policy>
 class btree_map
 {
    public:
     // Set mode detection: when Value is btree_set_empty_value, we operate as a set
     static constexpr bool is_set_mode = std::is_same_v<Value, btree_set_empty_value>;
+    // Multi mode detection: when policy allows duplicates (multimap/multiset)
+    static constexpr bool is_multi_mode = DuplicatePolicy::allow_duplicates;
 
     using key_type = Key;
     using mapped_type = Value;
@@ -1745,6 +1764,443 @@ class btree_map
     }
 #endif
 
+    // ================================================================================
+    // SIMD upper_bound implementations
+    // upper_bound finds first position where slot > key (i.e., key < slot)
+    // ================================================================================
+
+#ifdef BTREE_HAS_SSE2
+    // SSE2 upper_bound for int32_t keys (signed) - finds first slot > target
+    template <typename T>
+    static auto simd_upper_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        __m128i target_vec = _mm_set1_epi32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                        keys[(i + 1) * stride], keys[i * stride]);
+            }
+            // upper_bound: find slot > target, i.e., key_vec > target_vec
+            __m128i gt = _mm_cmpgt_epi32(key_vec, target_vec);
+            int mask = _mm_movemask_ps(_mm_castsi128_ps(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE2 upper_bound for uint32_t keys (unsigned)
+    template <typename T>
+    static auto simd_upper_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m128i sign_bit = _mm_set1_epi32(static_cast<int32_t>(0x80000000));
+        __m128i target_vec = _mm_xor_si128(_mm_set1_epi32(static_cast<int32_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&keys[i]));
+            } else {
+                key_vec = _mm_set_epi32(static_cast<int32_t>(keys[(i + 3) * stride]),
+                                        static_cast<int32_t>(keys[(i + 2) * stride]),
+                                        static_cast<int32_t>(keys[(i + 1) * stride]),
+                                        static_cast<int32_t>(keys[i * stride]));
+            }
+            key_vec = _mm_xor_si128(key_vec, sign_bit);
+            __m128i gt = _mm_cmpgt_epi32(key_vec, target_vec);
+            int mask = _mm_movemask_ps(_mm_castsi128_ps(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE upper_bound for float keys
+    template <typename T>
+    static auto simd_upper_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        __m128 target_vec = _mm_set1_ps(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m128 key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_ps(&keys[i]);
+            } else {
+                key_vec = _mm_set_ps(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m128 gt = _mm_cmpgt_ps(key_vec, target_vec);
+            int mask = _mm_movemask_ps(gt);
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // SSE2 upper_bound for double keys
+    template <typename T>
+    static auto simd_upper_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        __m128d target_vec = _mm_set1_pd(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            __m128d key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm_loadu_pd(&keys[i]);
+            } else {
+                key_vec = _mm_set_pd(keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m128d gt = _mm_cmpgt_pd(key_vec, target_vec);
+            int mask = _mm_movemask_pd(gt);
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+#endif
+
+#ifdef BTREE_HAS_AVX2
+    // AVX2 upper_bound for int64_t keys (signed)
+    template <typename T>
+    static auto simd_upper_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        __m256i target_vec = _mm256_set1_epi64x(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(keys[(i + 3) * stride], keys[(i + 2) * stride],
+                                            keys[(i + 1) * stride], keys[i * stride]);
+            }
+            __m256i gt = _mm256_cmpgt_epi64(key_vec, target_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // AVX2 upper_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto simd_upper_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        // XOR with sign bit to convert unsigned to signed comparison
+        __m256i sign_bit = _mm256_set1_epi64x(static_cast<int64_t>(0x8000000000000000ULL));
+        __m256i target_vec = _mm256_xor_si256(_mm256_set1_epi64x(static_cast<int64_t>(target)), sign_bit);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            __m256i key_vec;
+            if constexpr (stride == 1) {
+                key_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&keys[i]));
+            } else {
+                key_vec = _mm256_set_epi64x(static_cast<int64_t>(keys[(i + 3) * stride]),
+                                            static_cast<int64_t>(keys[(i + 2) * stride]),
+                                            static_cast<int64_t>(keys[(i + 1) * stride]),
+                                            static_cast<int64_t>(keys[i * stride]));
+            }
+            key_vec = _mm256_xor_si256(key_vec, sign_bit);
+            __m256i gt = _mm256_cmpgt_epi64(key_vec, target_vec);
+            int mask = _mm256_movemask_pd(_mm256_castsi256_pd(gt));
+
+            if (mask != 0) {
+                return i + __builtin_ctz(mask);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+#endif
+
+#ifdef BTREE_HAS_NEON
+    // NEON upper_bound for int32_t keys (signed)
+    template <typename T>
+    static auto neon_upper_bound_s32(const T* slots, size_type count, int32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int32_t);
+        const auto* keys = reinterpret_cast<const int32_t*>(slots);
+
+        int32x4_t target_vec = vdupq_n_s32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            int32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                int32x4x2_t interleaved = vld2q_s32(&keys[i * 2]);
+                key_vec = interleaved.val[0];
+            } else {
+                key_vec = int32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                    keys[(i + 3) * stride]};
+            }
+            // upper_bound: find slot > target
+            uint32x4_t gt = vcgtq_s32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for uint32_t keys (unsigned)
+    template <typename T>
+    static auto neon_upper_bound_u32(const T* slots, size_type count, uint32_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint32_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint32_t);
+        const auto* keys = reinterpret_cast<const uint32_t*>(slots);
+
+        uint32x4_t target_vec = vdupq_n_u32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            uint32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u32(&keys[i]);
+            } else if constexpr (stride == 2) {
+                uint32x4x2_t interleaved = vld2q_u32(&keys[i * 2]);
+                key_vec = interleaved.val[0];
+            } else {
+                key_vec = uint32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                     keys[(i + 3) * stride]};
+            }
+            uint32x4_t gt = vcgtq_u32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for int64_t keys (signed)
+    template <typename T>
+    static auto neon_upper_bound_s64(const T* slots, size_type count, int64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(int64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(int64_t);
+        const auto* keys = reinterpret_cast<const int64_t*>(slots);
+
+        int64x2_t target_vec = vdupq_n_s64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            int64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_s64(&keys[i]);
+            } else {
+                key_vec = int64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_s64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+
+    // NEON upper_bound for uint64_t keys (unsigned)
+    template <typename T>
+    static auto neon_upper_bound_u64(const T* slots, size_type count, uint64_t target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(uint64_t))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(uint64_t);
+        const auto* keys = reinterpret_cast<const uint64_t*>(slots);
+
+        uint64x2_t target_vec = vdupq_n_u64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            uint64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_u64(&keys[i]);
+            } else {
+                key_vec = uint64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_u64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+
+    // NEON upper_bound for float keys
+    template <typename T>
+    static auto neon_upper_bound_float(const T* slots, size_type count, float target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(float))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(float);
+        const auto* keys = reinterpret_cast<const float*>(slots);
+
+        float32x4_t target_vec = vdupq_n_f32(target);
+        size_type i = 0;
+
+        while (i + 4 <= count) {
+            float32x4_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f32(&keys[i]);
+            } else {
+                key_vec = float32x4_t{keys[i * stride], keys[(i + 1) * stride], keys[(i + 2) * stride],
+                                      keys[(i + 3) * stride]};
+            }
+            uint32x4_t gt = vcgtq_f32(key_vec, target_vec);
+
+            uint16x4_t narrow = vmovn_u32(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 16);
+            }
+            i += 4;
+        }
+
+        for (; i < count; ++i) {
+            if (keys[i * stride] > target) return i;
+        }
+        return count;
+    }
+
+    // NEON upper_bound for double keys
+    template <typename T>
+    static auto neon_upper_bound_double(const T* slots, size_type count, double target) noexcept -> size_type
+    requires(sizeof(T) >= sizeof(double))
+    {
+        constexpr size_type stride = sizeof(T) / sizeof(double);
+        const auto* keys = reinterpret_cast<const double*>(slots);
+
+        float64x2_t target_vec = vdupq_n_f64(target);
+        size_type i = 0;
+
+        while (i + 2 <= count) {
+            float64x2_t key_vec;
+            if constexpr (stride == 1) {
+                key_vec = vld1q_f64(&keys[i]);
+            } else {
+                key_vec = float64x2_t{keys[i * stride], keys[(i + 1) * stride]};
+            }
+            uint64x2_t gt = vcgtq_f64(key_vec, target_vec);
+
+            uint32x2_t narrow = vmovn_u64(gt);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u32(narrow), 0);
+
+            if (mask != 0) {
+                return i + static_cast<size_type>(__builtin_ctzll(mask) / 32);
+            }
+            i += 2;
+        }
+
+        if (i < count && keys[i * stride] > target) return i;
+        return count;
+    }
+#endif
+
     // Linear search within a node - faster for small counts due to:
     // 1. Sequential memory access (better cache/prefetch behavior)
     // 2. Better branch prediction
@@ -1778,6 +2234,40 @@ class btree_map
                 lo = mid + 1;
             } else {
                 hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    // Linear search for upper_bound within a node
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_upper_bound_in_slots(
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        BTREE_ASSUME(count <= 32);
+        for (size_type i = 0; i < count; ++i) {
+            if (_comp(key, slots[i].first)) {  // key < slot
+                return i;
+            }
+        }
+        return count;
+    }
+
+    // Binary search for upper_bound within a node
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename Slots>
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_upper_bound_in_slots(
+      const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
+        BTREE_ASSUME(count <= 32);
+
+        size_type lo = 0;
+        size_type hi = count;
+        while (lo < hi) {
+            size_type mid = lo + ((hi - lo) >> 1);
+            if (_comp(key, slots[mid].first)) {  // key < slot[mid]
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
         }
         return lo;
@@ -2093,6 +2583,130 @@ class btree_map
             return lower_bound_in_leaf(static_cast<const leaf_node*>(node), key);
         }
         return lower_bound_in_internal(static_cast<const internal_node*>(node), key);
+    }
+
+    // Upper bound search in leaf node - finds first slot > key
+    // SIMD-optimized for common integer/float types with std::less comparator
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_leaf(
+      const leaf_node* __restrict__ leaf, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths (SSE2/AVX2)
+#ifdef BTREE_HAS_SSE2
+#if defined(BTREE_HAS_AVX2)
+        // AVX2 paths for 64-bit types
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u64(leaf->slots, leaf->count, key);
+        }
+#endif
+        // SSE2 paths for 32-bit types
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_double(leaf->slots, leaf->count, key);
+        }
+#endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u32(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u64(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_float(leaf->slots, leaf->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_double(leaf->slots, leaf->count, key);
+        }
+#endif
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_upper_bound_in_slots(leaf->slots, leaf->count, key);
+        }
+        // Linear search for small fixed-size types
+        return linear_search_upper_bound_in_slots(leaf->slots, leaf->count, key);
+    }
+
+    // Upper bound search in internal node - finds first slot > key
+    // SIMD-optimized for common integer/float types with std::less comparator
+    [[nodiscard]] __attribute__((always_inline, flatten)) auto upper_bound_in_internal(
+      const internal_node* __restrict__ internal, const Key& __restrict__ key) const noexcept -> size_type {
+        // x86 SIMD paths (SSE2/AVX2)
+#ifdef BTREE_HAS_SSE2
+#if defined(BTREE_HAS_AVX2)
+        // AVX2 paths for 64-bit types
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u64(internal->slots, internal->count, key);
+        }
+#endif
+        // SSE2 paths for 32-bit types
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return simd_upper_bound_double(internal->slots, internal->count, key);
+        }
+#endif
+        // ARM NEON paths
+#ifdef BTREE_HAS_NEON
+        if constexpr (std::is_same_v<Key, int32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint32_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u32(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, int64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_s64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, uint64_t> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_u64(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, float> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_float(internal->slots, internal->count, key);
+        }
+        if constexpr (std::is_same_v<Key, double> && std::is_same_v<Compare, std::less<Key>>) {
+            return neon_upper_bound_double(internal->slots, internal->count, key);
+        }
+#endif
+        // For string-like types, binary search reduces expensive comparisons
+        if constexpr (string_like<Key>) {
+            return binary_search_upper_bound_in_slots(internal->slots, internal->count, key);
+        }
+        // Linear search for non-string types
+        return linear_search_upper_bound_in_slots(internal->slots, internal->count, key);
+    }
+
+    // Generic upper bound search - uses node type dispatch
+    [[nodiscard]] auto upper_bound_in_node(const node_base* node, const Key& key) const noexcept -> size_type {
+        if (node->is_leaf_node()) {
+            return upper_bound_in_leaf(static_cast<const leaf_node*>(node), key);
+        }
+        return upper_bound_in_internal(static_cast<const internal_node*>(node), key);
     }
 
     // Three-way search for leaf node (string-like types only)
@@ -3417,6 +4031,95 @@ class btree_map
         }
 
         friend auto operator!=(const iterator& a, const iterator& b) -> bool { return !(a == b); }
+
+        // O(1) difference when iterators are in the same leaf node
+        // Falls back to optimized tree traversal otherwise
+        friend auto operator-(const iterator& a, const iterator& b) -> difference_type {
+            if (a._node == b._node && a._node != nullptr && a._node->is_leaf_node()) {
+                return static_cast<difference_type>(a._pos) - static_cast<difference_type>(b._pos);
+            }
+            return distance_slow(a, b);
+        }
+
+      private:
+        // Optimized distance calculation using tree structure
+        // Based on absl's btree_iterator::distance_slow algorithm
+        // Complexity: O(log n + number of leaf nodes traversed) instead of O(k)
+        static auto distance_slow(const iterator& end_it, const iterator& begin_it) -> difference_type {
+            const node_base* end_node = end_it._node;
+            size_type end_pos = end_it._pos;
+
+            const node_base* node = begin_it._node;
+            // Compensate for double counting if begin is in a leaf node
+            difference_type count = node->is_leaf_node()
+                                        ? -static_cast<difference_type>(begin_it._pos)
+                                        : 0;
+
+            // If begin is in internal node, count its key and go to next subtree
+            if (!node->is_leaf_node()) {
+                ++count;
+                node = static_cast<const internal_node*>(node)->children[begin_it._pos + 1];
+            }
+
+            // Navigate to leftmost leaf
+            while (!node->is_leaf_node()) {
+                node = static_cast<const internal_node*>(node)->children[0];
+            }
+
+            // Now traverse leaf nodes, counting elements
+            size_type pos = node->position;
+            const node_base* parent = node->parent;
+
+            for (;;) {
+                // Count leaf nodes going right within current parent
+                while (pos <= parent->count) {
+                    node = static_cast<const internal_node*>(parent)->children[pos];
+
+                    // Navigate to leftmost leaf if internal
+                    if (!node->is_leaf_node()) {
+                        while (!node->is_leaf_node()) {
+                            node = static_cast<const internal_node*>(node)->children[0];
+                        }
+                        pos = node->position;
+                        parent = node->parent;
+                    }
+
+                    // Check if we reached end
+                    if (node == end_node) {
+                        return count + static_cast<difference_type>(end_pos);
+                    }
+                    if (parent == end_node && pos == end_pos) {
+                        return count + static_cast<difference_type>(node->count);
+                    }
+
+                    // Add this leaf's count + 1 for parent's key
+                    count += node->count + 1;
+                    ++pos;
+                }
+
+                // Go up to find next sibling
+                while (parent->parent != nullptr) {
+                    node = parent;
+                    pos = node->position;
+                    parent = node->parent;
+
+                    // Check if end is at this internal position
+                    if (parent == end_node && pos == end_pos) {
+                        return count - 1;  // -1 because we over-counted
+                    }
+
+                    ++pos;
+                    if (pos <= parent->count) {
+                        break;  // Found next sibling
+                    }
+                }
+
+                // If we've exhausted the tree, we're done
+                if (parent->parent == nullptr && pos > parent->count) {
+                    return count;
+                }
+            }
+        }
     };
 
     class const_iterator
@@ -3563,6 +4266,83 @@ class btree_map
         }
 
         friend auto operator!=(const const_iterator& a, const const_iterator& b) -> bool { return !(a == b); }
+
+        // O(1) difference when iterators are in the same leaf node
+        // Falls back to optimized tree traversal otherwise
+        friend auto operator-(const const_iterator& a, const const_iterator& b) -> difference_type {
+            if (a._node == b._node && a._node != nullptr && a._node->is_leaf_node()) {
+                return static_cast<difference_type>(a._pos) - static_cast<difference_type>(b._pos);
+            }
+            return distance_slow(a, b);
+        }
+
+      private:
+        // Optimized distance calculation using tree structure
+        // Based on absl's btree_iterator::distance_slow algorithm
+        static auto distance_slow(const const_iterator& end_it, const const_iterator& begin_it) -> difference_type {
+            const node_base* end_node = end_it._node;
+            size_type end_pos = end_it._pos;
+
+            const node_base* node = begin_it._node;
+            difference_type count = node->is_leaf_node()
+                                        ? -static_cast<difference_type>(begin_it._pos)
+                                        : 0;
+
+            if (!node->is_leaf_node()) {
+                ++count;
+                node = static_cast<const internal_node*>(node)->children[begin_it._pos + 1];
+            }
+
+            while (!node->is_leaf_node()) {
+                node = static_cast<const internal_node*>(node)->children[0];
+            }
+
+            size_type pos = node->position;
+            const node_base* parent = node->parent;
+
+            for (;;) {
+                while (pos <= parent->count) {
+                    node = static_cast<const internal_node*>(parent)->children[pos];
+
+                    if (!node->is_leaf_node()) {
+                        while (!node->is_leaf_node()) {
+                            node = static_cast<const internal_node*>(node)->children[0];
+                        }
+                        pos = node->position;
+                        parent = node->parent;
+                    }
+
+                    if (node == end_node) {
+                        return count + static_cast<difference_type>(end_pos);
+                    }
+                    if (parent == end_node && pos == end_pos) {
+                        return count + static_cast<difference_type>(node->count);
+                    }
+
+                    count += node->count + 1;
+                    ++pos;
+                }
+
+                while (parent->parent != nullptr) {
+                    node = parent;
+                    pos = node->position;
+                    parent = node->parent;
+
+                    if (parent == end_node && pos == end_pos) {
+                        return count - 1;
+                    }
+
+                    ++pos;
+                    if (pos <= parent->count) {
+                        break;
+                    }
+                }
+
+                if (parent->parent == nullptr && pos > parent->count) {
+                    return count;
+                }
+            }
+        }
     };
 
     // Custom reverse iterator (std::reverse_iterator doesn't work with our end() iterator)
@@ -4257,8 +5037,11 @@ public:
                 auto* internal = static_cast<internal_node*>(node);
                 auto [pos, exact_match] = lower_bound_with_match_in_internal(internal, key);
 
-                if (exact_match) [[unlikely]] {
-                    return {iterator(node, pos), false};  // Key already exists
+                // In unique mode, reject duplicates; in multi mode, allow them
+                if constexpr (!is_multi_mode) {
+                    if (exact_match) [[unlikely]] {
+                        return {iterator(node, pos), false};  // Key already exists
+                    }
                 }
 
                 node = internal->children[pos];
@@ -4268,8 +5051,11 @@ public:
             auto* leaf = static_cast<leaf_node*>(node);
             auto [pos, exact_match] = lower_bound_with_match_in_leaf(leaf, key);
 
-            if (exact_match) [[unlikely]] {
-                return {iterator(leaf, pos), false};  // Key already exists
+            // In unique mode, reject duplicates; in multi mode, allow them
+            if constexpr (!is_multi_mode) {
+                if (exact_match) [[unlikely]] {
+                    return {iterator(leaf, pos), false};  // Key already exists
+                }
             }
 
             // Insert and get the position where it was inserted
@@ -4283,9 +5069,12 @@ public:
                 auto* internal = static_cast<internal_node*>(node);
                 size_type pos = lower_bound_in_internal(internal, key);
 
-                // Check for exact match (single comparison optimization)
-                if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
-                    return {iterator(node, pos), false};  // Key already exists
+                // In unique mode, reject duplicates; in multi mode, allow them
+                if constexpr (!is_multi_mode) {
+                    // Check for exact match (single comparison optimization)
+                    if (pos < internal->count && !_comp(key, internal->key(pos))) [[unlikely]] {
+                        return {iterator(node, pos), false};  // Key already exists
+                    }
                 }
 
                 // Prefetch next node before traversing
@@ -4297,9 +5086,12 @@ public:
             auto* leaf = static_cast<leaf_node*>(node);
             size_type pos = lower_bound_in_leaf(leaf, key);
 
-            // Check for exact match
-            if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
-                return {iterator(leaf, pos), false};  // Key already exists
+            // In unique mode, reject duplicates; in multi mode, allow them
+            if constexpr (!is_multi_mode) {
+                // Check for exact match
+                if (pos < leaf->count && !_comp(key, leaf->key(pos))) [[unlikely]] {
+                    return {iterator(leaf, pos), false};  // Key already exists
+                }
             }
 
             // Insert and get the position where it was inserted
@@ -4613,6 +5405,23 @@ public:
         return lo;
     }
 
+    // Generic upper_bound for heterogeneous lookup (no SIMD, uses comparator)
+    // Returns first position where slot > key (i.e., key < slot)
+    template <typename K, typename Node>
+    [[nodiscard]] auto upper_bound_generic(const Node* node, const K& key) const noexcept -> size_type {
+        size_type lo = 0;
+        size_type hi = node->count;
+        while (lo < hi) {
+            size_type mid = lo + (hi - lo) / 2;
+            if (_comp(key, node->key(mid))) {  // key < slot[mid]
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return lo;
+    }
+
     // Internal lower_bound implementation supporting heterogeneous lookup
     template <typename K>
     [[nodiscard]] auto lower_bound_impl(const K& key) -> iterator {
@@ -4635,6 +5444,36 @@ public:
             size_type pos = lower_bound_generic(internal, key);
             if (pos < internal->count) {
                 if (!_comp(internal->key(pos), key)) {
+                    result = iterator(internal, pos);
+                }
+            }
+            node = internal->children[pos];
+        }
+    }
+
+    // Internal upper_bound implementation supporting heterogeneous lookup
+    template <typename K>
+    [[nodiscard]] auto upper_bound_impl(const K& key) -> iterator {
+        if (_root == nullptr) return end();
+
+        node_base* node = _root;
+        iterator result = end();
+
+        while (true) {
+            if (node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(node);
+                size_type pos = upper_bound_generic(leaf, key);
+                if (pos < leaf->count) {
+                    return iterator(leaf, pos);
+                }
+                return result;
+            }
+
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = upper_bound_generic(internal, key);
+            if (pos < internal->count) {
+                // slot[pos] > key, so this is a candidate
+                if (_comp(key, internal->key(pos))) {
                     result = iterator(internal, pos);
                 }
             }
@@ -4773,16 +5612,74 @@ public:
         return const_cast<btree_map*>(this)->find_impl(key) != end();
     }
 
-    // count
-    [[nodiscard]] auto count(const Key& key) const -> size_type { return contains(key) ? 1 : 0; }
+    // count - returns number of elements with matching key
+    // In unique mode: returns 0 or 1
+    // In multi mode: optimized counting - avoids iterator traversal when duplicates fit in one leaf
+    [[nodiscard]] auto count(const Key& key) const -> size_type {
+        if constexpr (is_multi_mode) {
+            return count_multi_impl(key);
+        } else {
+            return contains(key) ? 1 : 0;
+        }
+    }
 
     // Heterogeneous count
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto count(const K& key) const -> size_type {
-        return contains(key) ? 1 : 0;
+        if constexpr (is_multi_mode) {
+            return count_multi_impl(key);
+        } else {
+            return contains(key) ? 1 : 0;
+        }
     }
 
+  private:
+    // Optimized count for multi mode - single tree traversal with fast path
+    template <typename K>
+    [[nodiscard]] __attribute__((always_inline, hot)) auto count_multi_impl(const K& key) const -> size_type {
+        if (_root == nullptr) [[unlikely]] return 0;
+
+        // Single traversal to find lower_bound leaf position
+        const node_base* node = _root;
+        while (!node->is_leaf_node()) {
+            auto* internal = static_cast<const internal_node*>(node);
+            size_type pos = lower_bound_in_internal(internal, key);
+            node = internal->children[pos];
+        }
+
+        auto* leaf = static_cast<const leaf_node*>(node);
+        size_type lb_pos = lower_bound_in_leaf(leaf, key);
+
+        // Check if key exists (90% of benchmark queries are for non-existent keys)
+        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) [[likely]] {
+            return 0;
+        }
+
+        // Fast path: count duplicates in same leaf with SIMD upper_bound
+        size_type ub_pos = upper_bound_in_leaf(leaf, key);
+        if (ub_pos < leaf->count) [[likely]] {
+            return ub_pos - lb_pos;
+        }
+
+        // Slow path: duplicates extend beyond this leaf
+        // Walk through leaves counting with SIMD upper_bound
+        size_type result = leaf->count - lb_pos;
+        const_iterator it(leaf, leaf->count);
+        ++it;
+        while (it._node != nullptr && it._node->is_leaf_node()) {
+            auto* iter_leaf = static_cast<const leaf_node*>(it._node);
+            if (_comp(key, iter_leaf->key(0))) break;
+            size_type ub = upper_bound_in_leaf(iter_leaf, key);
+            result += ub;
+            if (ub < iter_leaf->count) break;
+            it = const_iterator(iter_leaf, iter_leaf->count);
+            ++it;
+        }
+        return result;
+    }
+
+  public:
     // lower_bound
     [[nodiscard]] auto lower_bound(const Key& key) -> iterator {
         if (_root == nullptr) return end();
@@ -4819,23 +5716,38 @@ public:
         return const_iterator(const_cast<btree_map*>(this)->lower_bound(key));
     }
 
-    // upper_bound
+    // upper_bound - finds first element where key < element
+    // Uses O(log n) tree traversal instead of iterating through duplicates
     [[nodiscard]] auto upper_bound(const Key& key) -> iterator {
-        auto it = lower_bound(key);
-        if (it != end()) {
-            // Get the key from iterator (in set mode, *it is the key; in map mode, it->first)
-            const Key& iter_key = [&]() -> const Key& {
-                if constexpr (is_set_mode) {
-                    return *it;
-                } else {
-                    return it->first;
+        if (_root == nullptr) return end();
+
+        node_base* node = _root;
+        iterator result = end();
+
+        while (true) {
+            size_type pos = upper_bound_in_node(node, key);
+
+            if (node->is_leaf_node()) {
+                auto* leaf = static_cast<leaf_node*>(node);
+                if (pos < leaf->count) {
+                    return iterator(leaf, pos);
                 }
-            }();
-            if (!_comp(key, iter_key) && !_comp(iter_key, key)) {
-                ++it;
+                return result;
             }
+
+            auto* internal = static_cast<internal_node*>(node);
+            if (pos < internal->count) {
+                // slot[pos] > key, so this is a candidate
+                if (_comp(key, internal->key(pos))) {
+                    result = iterator(internal, pos);
+                }
+            }
+            // Prefetch next node before traversing
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
+            node = internal->children[pos];
         }
-        return it;
     }
 
     [[nodiscard]] auto upper_bound(const Key& key) const -> const_iterator {
@@ -4859,17 +5771,13 @@ public:
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto upper_bound(const K& key) -> iterator {
-        auto it = lower_bound(key);
-        if (it != end() && !_comp(key, it->first) && !_comp(it->first, key)) {
-            ++it;
-        }
-        return it;
+        return upper_bound_impl(key);
     }
 
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto upper_bound(const K& key) const -> const_iterator {
-        return const_iterator(const_cast<btree_map*>(this)->upper_bound(key));
+        return const_iterator(const_cast<btree_map*>(this)->upper_bound_impl(key));
     }
 
     // Iterators
@@ -4925,27 +5833,70 @@ public:
     [[nodiscard]] auto crend() const noexcept -> const_reverse_iterator { return rend(); }
 
     // Erase by key - O(log n) with proper B-tree rebalancing
+    // In unique mode: erases at most 1 element
+    // In multi mode: erases all elements with matching key
     auto erase(const Key& key) -> size_type {
-        auto it = find(key);
-        if (it == end()) {
-            return 0;
+        if constexpr (is_multi_mode) {
+            // Multi mode: erase all elements with matching key
+            size_type erased = 0;
+            auto it = find(key);
+            while (it != end()) {
+                // Get the key from iterator
+                const Key& iter_key = [&]() -> const Key& {
+                    if constexpr (is_set_mode) {
+                        return *it;
+                    } else {
+                        return it->first;
+                    }
+                }();
+                // Check if still matching
+                if (_comp(key, iter_key) || _comp(iter_key, key)) {
+                    break;  // No longer matching
+                }
+                it = erase(it);  // erase(iterator) returns next iterator
+                ++erased;
+            }
+            return erased;
+        } else {
+            auto it = find(key);
+            if (it == end()) {
+                return 0;
+            }
+            erase_impl(it._node, it._pos);
+            return 1;
         }
-
-        erase_impl(it._node, it._pos);
-        return 1;
     }
 
     // Heterogeneous erase by key
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     auto erase(const K& key) -> size_type {
-        auto it = find_impl(key);
-        if (it == end()) {
-            return 0;
+        if constexpr (is_multi_mode) {
+            size_type erased = 0;
+            auto it = find_impl(key);
+            while (it != end()) {
+                const Key& iter_key = [&]() -> const Key& {
+                    if constexpr (is_set_mode) {
+                        return *it;
+                    } else {
+                        return it->first;
+                    }
+                }();
+                if (_comp(key, iter_key) || _comp(iter_key, key)) {
+                    break;
+                }
+                it = erase(it);
+                ++erased;
+            }
+            return erased;
+        } else {
+            auto it = find_impl(key);
+            if (it == end()) {
+                return 0;
+            }
+            erase_impl(it._node, it._pos);
+            return 1;
         }
-
-        erase_impl(it._node, it._pos);
-        return 1;
     }
 
     // Erase by iterator - returns iterator to next element
@@ -5127,27 +6078,53 @@ public:
     }
 
     // equal_range - returns pair of iterators (lower_bound, upper_bound)
-    // Optimized: single traversal since this is a unique-key map
+    // In unique mode: optimized single traversal
+    // In multi mode: uses upper_bound to find all matching keys
     [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
-            // Key not found: lower_bound == upper_bound
+        // Check if key matches (handle both set mode and map mode)
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        // Key found: upper_bound is next element
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            // Multi mode: use upper_bound to find all matching keys
+            return {lb, upper_bound(key)};
+        } else {
+            // Unique mode: upper_bound is next element
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     [[nodiscard]] auto equal_range(const Key& key) const -> std::pair<const_iterator, const_iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     // Heterogeneous equal_range
@@ -5155,24 +6132,48 @@ public:
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) -> std::pair<iterator, iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) const -> std::pair<const_iterator, const_iterator> {
         auto lb = lower_bound(key);
-        if (lb == end() || _comp(key, lb->first)) {
+        auto key_matches = [&]() {
+            if (lb == end()) return false;
+            if constexpr (is_set_mode) {
+                return !_comp(key, *lb) && !_comp(*lb, key);
+            } else {
+                return !_comp(key, lb->first) && !_comp(lb->first, key);
+            }
+        };
+        if (!key_matches()) {
             return {lb, lb};
         }
-        auto ub = lb;
-        ++ub;
-        return {lb, ub};
+        if constexpr (is_multi_mode) {
+            return {lb, upper_bound(key)};
+        } else {
+            auto ub = lb;
+            ++ub;
+            return {lb, ub};
+        }
     }
 
     // swap
@@ -5526,16 +6527,16 @@ template <typename Key, typename Value, typename Compare = std::less<Key>,
 using btree_map_compact = btree_map<Key, Value, Compare, Allocator, 256>;
 
 // Non-member swap (C++17)
-template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N>
-void swap(btree_map<Key, Value, Compare, Allocator, N>& lhs,
-          btree_map<Key, Value, Compare, Allocator, N>& rhs) noexcept {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename DuplicatePolicy>
+void swap(btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& lhs,
+          btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
 // erase_if - erase all elements satisfying predicate (C++20)
-template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename Pred>
-typename btree_map<Key, Value, Compare, Allocator, N>::size_type
-erase_if(btree_map<Key, Value, Compare, Allocator, N>& c, Pred pred) {
+template <typename Key, typename Value, typename Compare, typename Allocator, std::size_t N, typename DuplicatePolicy, typename Pred>
+typename btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>::size_type
+erase_if(btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& c, Pred pred) {
     auto old_size = c.size();
     for (auto it = c.begin(); it != c.end();) {
         if (pred(*it)) {
@@ -5572,6 +6573,34 @@ template <typename Key, typename Compare = std::less<Key>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
 using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 
+// =============================================================================
+// btree_multimap - B-tree based ordered multimap (allows duplicate keys)
+// =============================================================================
+
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
+using btree_multimap = btree_map<Key, Value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
+
+// btree_multimap_compact with 256-byte node size
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, Value>>>
+using btree_multimap_compact = btree_multimap<Key, Value, Compare, Allocator, 256>;
+
+// =============================================================================
+// btree_multiset - B-tree based ordered multiset (allows duplicate keys)
+// =============================================================================
+
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>,
+          std::size_t TargetNodeSize = optimal_node_size<Key, btree_set_empty_value>()>
+using btree_multiset = btree_map<Key, btree_set_empty_value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
+
+// btree_multiset_compact with 256-byte node size
+template <typename Key, typename Compare = std::less<Key>,
+          typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
+using btree_multiset_compact = btree_multiset<Key, Compare, Allocator, 256>;
+
 }  // namespace stdb::container
 
 // =============================================================================
@@ -5606,6 +6635,32 @@ template <typename Key, typename Compare = std::less<Key>>
 using btree_set_compact = container::btree_set<Key, Compare,
                                                std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                                256>;
+
+// btree_multimap with polymorphic allocator
+template <typename Key, typename Value, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, Value>()>
+using btree_multimap = container::btree_multimap<Key, Value, Compare,
+                                                 std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                                 TargetNodeSize>;
+
+// btree_multimap_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Value, typename Compare = std::less<Key>>
+using btree_multimap_compact = container::btree_multimap<Key, Value, Compare,
+                                                         std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
+                                                         256>;
+
+// btree_multiset with polymorphic allocator
+template <typename Key, typename Compare = std::less<Key>,
+          std::size_t TargetNodeSize = container::optimal_node_size<Key, container::btree_set_empty_value>()>
+using btree_multiset = container::btree_multiset<Key, Compare,
+                                                 std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                                 TargetNodeSize>;
+
+// btree_multiset_compact with polymorphic allocator (256-byte node size)
+template <typename Key, typename Compare = std::less<Key>>
+using btree_multiset_compact = container::btree_multiset<Key, Compare,
+                                                         std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
+                                                         256>;
 
 }  // namespace stdb::pmr
 

@@ -375,6 +375,114 @@ void run_string_benchmarks(size_t n) {
     });
 }
 
+// =============================================================================
+// Multimap benchmarks
+// =============================================================================
+
+template <typename Multimap>
+void benchmark_multimap_insert_duplicates(ankerl::nanobench::Bench& bench, const std::string& name,
+                                          size_t num_keys, size_t dups_per_key) {
+    bench.run(name + " insert " + std::to_string(dups_per_key) + " dups/key", [&] {
+        Multimap mmap;
+        for (size_t k = 0; k < num_keys; ++k) {
+            for (size_t d = 0; d < dups_per_key; ++d) {
+                mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(mmap.size());
+    });
+}
+
+template <typename Multimap>
+void benchmark_multimap_count(ankerl::nanobench::Bench& bench, const std::string& name,
+                              size_t num_keys, size_t dups_per_key) {
+    Multimap mmap;
+    for (size_t k = 0; k < num_keys; ++k) {
+        for (size_t d = 0; d < dups_per_key; ++d) {
+            mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+        }
+    }
+
+    auto keys = generate_random_keys(num_keys, 99999);
+
+    bench.run(name + " count(" + std::to_string(dups_per_key) + " dups/key)", [&] {
+        size_t total = 0;
+        for (size_t i = 0; i < num_keys; ++i) {
+            total += mmap.count(keys[i % num_keys]);
+        }
+        ankerl::nanobench::doNotOptimizeAway(total);
+    });
+}
+
+template <typename Multimap>
+void benchmark_multimap_equal_range(ankerl::nanobench::Bench& bench, const std::string& name,
+                                    size_t num_keys, size_t dups_per_key) {
+    Multimap mmap;
+    for (size_t k = 0; k < num_keys; ++k) {
+        for (size_t d = 0; d < dups_per_key; ++d) {
+            mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+        }
+    }
+
+    bench.run(name + " equal_range(" + std::to_string(dups_per_key) + " dups/key)", [&] {
+        size_t total = 0;
+        for (size_t k = 0; k < num_keys; ++k) {
+            auto [lb, ub] = mmap.equal_range(static_cast<int64_t>(k));
+            while (lb != ub) {
+                ++total;
+                ++lb;
+            }
+        }
+        ankerl::nanobench::doNotOptimizeAway(total);
+    });
+}
+
+template <typename Multimap>
+void benchmark_multimap_erase(ankerl::nanobench::Bench& bench, const std::string& name,
+                              size_t num_keys, size_t dups_per_key) {
+    bench.run(name + " erase(" + std::to_string(dups_per_key) + " dups/key)", [&] {
+        Multimap mmap;
+        for (size_t k = 0; k < num_keys; ++k) {
+            for (size_t d = 0; d < dups_per_key; ++d) {
+                mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+            }
+        }
+        // Erase half the keys
+        for (size_t k = 0; k < num_keys; k += 2) {
+            mmap.erase(static_cast<int64_t>(k));
+        }
+        ankerl::nanobench::doNotOptimizeAway(mmap.size());
+    });
+}
+
+void run_multimap_benchmarks(size_t num_keys, size_t dups_per_key, const std::string& label) {
+    std::cout << "\n============================================================\n";
+    std::cout << "Multimap Benchmarks - " << label << " (" << num_keys << " keys, " << dups_per_key << " dups/key)\n";
+    std::cout << "============================================================\n";
+
+    ankerl::nanobench::Bench bench;
+    bench.title(label + " Multimap")
+         .warmup(3)
+         .minEpochIterations(5)
+         .relative(true);
+
+    // Insert benchmarks
+    benchmark_multimap_insert_duplicates<btree_multimap<int64_t, int64_t>>(bench, "Containa btree_multimap", num_keys, dups_per_key);
+    benchmark_multimap_insert_duplicates<absl::btree_multimap<int64_t, int64_t>>(bench, "absl btree_multimap", num_keys, dups_per_key);
+
+    // Count benchmarks
+    benchmark_multimap_count<btree_multimap<int64_t, int64_t>>(bench, "Containa btree_multimap", num_keys, dups_per_key);
+    benchmark_multimap_count<absl::btree_multimap<int64_t, int64_t>>(bench, "absl btree_multimap", num_keys, dups_per_key);
+
+    // Equal range benchmarks
+    benchmark_multimap_equal_range<btree_multimap<int64_t, int64_t>>(bench, "Containa btree_multimap", num_keys, dups_per_key);
+    benchmark_multimap_equal_range<absl::btree_multimap<int64_t, int64_t>>(bench, "absl btree_multimap", num_keys, dups_per_key);
+
+    // Erase benchmarks
+    benchmark_multimap_erase<btree_multimap<int64_t, int64_t>>(bench, "Containa btree_multimap", num_keys, dups_per_key);
+    benchmark_multimap_erase<absl::btree_multimap<int64_t, int64_t>>(bench, "absl btree_multimap", num_keys, dups_per_key);
+}
+
 int main(int argc, char** argv) {
     std::cout << "============================================================\n";
     std::cout << "Containa vs Abseil btree Performance Comparison\n";
@@ -410,6 +518,11 @@ int main(int argc, char** argv) {
 
     // String key benchmarks
     run_string_benchmarks(MEDIUM_SIZE);
+
+    // Multimap benchmarks
+    run_multimap_benchmarks(1000, 10, "Small multimap");
+    run_multimap_benchmarks(1000, 50, "Medium multimap");
+    run_multimap_benchmarks(1000, 100, "Large multimap");
 
     return 0;
 }
