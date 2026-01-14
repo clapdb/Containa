@@ -5663,20 +5663,94 @@ public:
         }
 
         // Slow path: duplicates extend beyond this leaf
-        // Walk through leaves counting with SIMD upper_bound
+        // Walk through leaves using iterator, but use SIMD per leaf for efficiency
         size_type result = leaf->count - lb_pos;
         const_iterator it(leaf, leaf->count);
         ++it;
-        while (it._node != nullptr && it._node->is_leaf_node()) {
-            auto* iter_leaf = static_cast<const leaf_node*>(it._node);
-            if (_comp(key, iter_leaf->key(0))) break;
-            size_type ub = upper_bound_in_leaf(iter_leaf, key);
-            result += ub;
-            if (ub < iter_leaf->count) break;
-            it = const_iterator(iter_leaf, iter_leaf->count);
-            ++it;
+        const node_base* current_leaf = leaf;
+
+        while (it != end()) {
+            // Check if we've moved to a new leaf
+            if (it._node != current_leaf && it._node->is_leaf_node()) {
+                current_leaf = it._node;
+                auto* iter_leaf = static_cast<const leaf_node*>(current_leaf);
+
+                // Check first element - if it's greater than key, we're done
+                if (_comp(key, iter_leaf->key(0))) break;
+
+                // Use SIMD to find upper_bound in this leaf
+                size_type ub = upper_bound_in_leaf(iter_leaf, key);
+                result += ub;
+
+                // If upper_bound is within leaf, we found all duplicates
+                if (ub < iter_leaf->count) break;
+
+                // Move iterator to end of this leaf
+                it = const_iterator(iter_leaf, iter_leaf->count);
+                ++it;
+            } else {
+                // Fallback: count one element at a time (handles edge cases)
+                const Key& iter_key = get_key_from_iterator(it);
+                if (_comp(key, iter_key)) break;
+                ++result;
+                ++it;
+            }
         }
         return result;
+    }
+
+    // Helper to get key from iterator position
+    template <typename IterT>
+    [[nodiscard]] auto get_key_from_iterator(const IterT& it) const -> const Key& {
+        if constexpr (is_set_mode) {
+            return *it;
+        } else {
+            return it->first;
+        }
+    }
+
+    // Optimized equal_range for multi mode - single tree traversal for common case
+    template <typename K>
+    [[nodiscard]] __attribute__((always_inline, hot)) auto equal_range_multi_impl(const K& key) -> std::pair<iterator, iterator> {
+        if (_root == nullptr) [[unlikely]] return {end(), end()};
+
+        // Single traversal to find lower_bound leaf position
+        node_base* node = _root;
+        while (!node->is_leaf_node()) {
+            auto* internal = static_cast<internal_node*>(node);
+            size_type pos = lower_bound_in_internal(internal, key);
+            if constexpr (!string_like<Key>) {
+                __builtin_prefetch(internal->children[pos], 0, 3);
+            }
+            node = internal->children[pos];
+        }
+
+        auto* leaf = static_cast<leaf_node*>(node);
+        size_type lb_pos = lower_bound_in_leaf(leaf, key);
+
+        // Check if key exists
+        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) [[likely]] {
+            iterator it(leaf, lb_pos < leaf->count ? lb_pos : leaf->count);
+            return {it, it};
+        }
+
+        iterator lb_iter(leaf, lb_pos);
+
+        // Fast path: find upper_bound in same leaf with SIMD
+        size_type ub_pos = upper_bound_in_leaf(leaf, key);
+        if (ub_pos < leaf->count) [[likely]] {
+            return {lb_iter, iterator(leaf, ub_pos)};
+        }
+
+        // Slow path: duplicates extend beyond this leaf - use regular upper_bound
+        // This requires a second tree traversal but handles edge cases correctly
+        return {lb_iter, upper_bound(key)};
+    }
+
+    template <typename K>
+    [[nodiscard]] __attribute__((always_inline, hot)) auto equal_range_multi_impl(const K& key) const -> std::pair<const_iterator, const_iterator> {
+        auto result = const_cast<btree_map*>(this)->equal_range_multi_impl(key);
+        return {const_iterator(result.first), const_iterator(result.second)};
     }
 
   public:
@@ -6079,25 +6153,25 @@ public:
 
     // equal_range - returns pair of iterators (lower_bound, upper_bound)
     // In unique mode: optimized single traversal
-    // In multi mode: uses upper_bound to find all matching keys
+    // In multi mode: optimized single tree traversal with SIMD upper_bound
     [[nodiscard]] auto equal_range(const Key& key) -> std::pair<iterator, iterator> {
-        auto lb = lower_bound(key);
-        // Check if key matches (handle both set mode and map mode)
-        auto key_matches = [&]() {
-            if (lb == end()) return false;
-            if constexpr (is_set_mode) {
-                return !_comp(key, *lb) && !_comp(*lb, key);
-            } else {
-                return !_comp(key, lb->first) && !_comp(lb->first, key);
-            }
-        };
-        if (!key_matches()) {
-            return {lb, lb};
-        }
         if constexpr (is_multi_mode) {
-            // Multi mode: use upper_bound to find all matching keys
-            return {lb, upper_bound(key)};
+            // Multi mode: use optimized single-traversal implementation
+            return equal_range_multi_impl(key);
         } else {
+            auto lb = lower_bound(key);
+            // Check if key matches (handle both set mode and map mode)
+            auto key_matches = [&]() {
+                if (lb == end()) return false;
+                if constexpr (is_set_mode) {
+                    return !_comp(key, *lb) && !_comp(*lb, key);
+                } else {
+                    return !_comp(key, lb->first) && !_comp(lb->first, key);
+                }
+            };
+            if (!key_matches()) {
+                return {lb, lb};
+            }
             // Unique mode: upper_bound is next element
             auto ub = lb;
             ++ub;
@@ -6106,21 +6180,21 @@ public:
     }
 
     [[nodiscard]] auto equal_range(const Key& key) const -> std::pair<const_iterator, const_iterator> {
-        auto lb = lower_bound(key);
-        auto key_matches = [&]() {
-            if (lb == end()) return false;
-            if constexpr (is_set_mode) {
-                return !_comp(key, *lb) && !_comp(*lb, key);
-            } else {
-                return !_comp(key, lb->first) && !_comp(lb->first, key);
-            }
-        };
-        if (!key_matches()) {
-            return {lb, lb};
-        }
         if constexpr (is_multi_mode) {
-            return {lb, upper_bound(key)};
+            return equal_range_multi_impl(key);
         } else {
+            auto lb = lower_bound(key);
+            auto key_matches = [&]() {
+                if (lb == end()) return false;
+                if constexpr (is_set_mode) {
+                    return !_comp(key, *lb) && !_comp(*lb, key);
+                } else {
+                    return !_comp(key, lb->first) && !_comp(lb->first, key);
+                }
+            };
+            if (!key_matches()) {
+                return {lb, lb};
+            }
             auto ub = lb;
             ++ub;
             return {lb, ub};
@@ -6131,21 +6205,21 @@ public:
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) -> std::pair<iterator, iterator> {
-        auto lb = lower_bound(key);
-        auto key_matches = [&]() {
-            if (lb == end()) return false;
-            if constexpr (is_set_mode) {
-                return !_comp(key, *lb) && !_comp(*lb, key);
-            } else {
-                return !_comp(key, lb->first) && !_comp(lb->first, key);
-            }
-        };
-        if (!key_matches()) {
-            return {lb, lb};
-        }
         if constexpr (is_multi_mode) {
-            return {lb, upper_bound(key)};
+            return equal_range_multi_impl(key);
         } else {
+            auto lb = lower_bound(key);
+            auto key_matches = [&]() {
+                if (lb == end()) return false;
+                if constexpr (is_set_mode) {
+                    return !_comp(key, *lb) && !_comp(*lb, key);
+                } else {
+                    return !_comp(key, lb->first) && !_comp(lb->first, key);
+                }
+            };
+            if (!key_matches()) {
+                return {lb, lb};
+            }
             auto ub = lb;
             ++ub;
             return {lb, ub};
@@ -6155,21 +6229,21 @@ public:
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     [[nodiscard]] auto equal_range(const K& key) const -> std::pair<const_iterator, const_iterator> {
-        auto lb = lower_bound(key);
-        auto key_matches = [&]() {
-            if (lb == end()) return false;
-            if constexpr (is_set_mode) {
-                return !_comp(key, *lb) && !_comp(*lb, key);
-            } else {
-                return !_comp(key, lb->first) && !_comp(lb->first, key);
-            }
-        };
-        if (!key_matches()) {
-            return {lb, lb};
-        }
         if constexpr (is_multi_mode) {
-            return {lb, upper_bound(key)};
+            return equal_range_multi_impl(key);
         } else {
+            auto lb = lower_bound(key);
+            auto key_matches = [&]() {
+                if (lb == end()) return false;
+                if constexpr (is_set_mode) {
+                    return !_comp(key, *lb) && !_comp(*lb, key);
+                } else {
+                    return !_comp(key, lb->first) && !_comp(lb->first, key);
+                }
+            };
+            if (!key_matches()) {
+                return {lb, lb};
+            }
             auto ub = lb;
             ++ub;
             return {lb, ub};

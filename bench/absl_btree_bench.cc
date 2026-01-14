@@ -386,7 +386,7 @@ void benchmark_multimap_insert_duplicates(ankerl::nanobench::Bench& bench, const
         Multimap mmap;
         for (size_t k = 0; k < num_keys; ++k) {
             for (size_t d = 0; d < dups_per_key; ++d) {
-                mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+                mmap.insert(std::make_pair(static_cast<int64_t>(k), static_cast<int64_t>(d)));
             }
         }
         ankerl::nanobench::doNotOptimizeAway(mmap.size());
@@ -399,7 +399,7 @@ void benchmark_multimap_count(ankerl::nanobench::Bench& bench, const std::string
     Multimap mmap;
     for (size_t k = 0; k < num_keys; ++k) {
         for (size_t d = 0; d < dups_per_key; ++d) {
-            mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+            mmap.insert(std::make_pair(static_cast<int64_t>(k), static_cast<int64_t>(d)));
         }
     }
 
@@ -420,7 +420,7 @@ void benchmark_multimap_equal_range(ankerl::nanobench::Bench& bench, const std::
     Multimap mmap;
     for (size_t k = 0; k < num_keys; ++k) {
         for (size_t d = 0; d < dups_per_key; ++d) {
-            mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+            mmap.insert(std::make_pair(static_cast<int64_t>(k), static_cast<int64_t>(d)));
         }
     }
 
@@ -444,7 +444,7 @@ void benchmark_multimap_erase(ankerl::nanobench::Bench& bench, const std::string
         Multimap mmap;
         for (size_t k = 0; k < num_keys; ++k) {
             for (size_t d = 0; d < dups_per_key; ++d) {
-                mmap.insert({static_cast<int64_t>(k), static_cast<int64_t>(d)});
+                mmap.insert(std::make_pair(static_cast<int64_t>(k), static_cast<int64_t>(d)));
             }
         }
         // Erase half the keys
