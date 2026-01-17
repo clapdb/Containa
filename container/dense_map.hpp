@@ -831,6 +831,13 @@ public:
             } else if constexpr (kUseFlat) {
                 // Copy buckets
                 std::memcpy(buckets_, other.buckets_, other.capacity_ * sizeof(detail::Bucket));
+                // Ensure values_ has enough capacity (initialize() may have allocated less)
+                if (values_capacity_ < other.size_) {
+                    SlotAlloc slot_alloc(alloc_);
+                    std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                    values_capacity_ = other.values_capacity_;
+                    values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                }
                 // Copy values
                 for (size_t i = 0; i < other.size_; ++i) {
                     AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
@@ -839,6 +846,13 @@ public:
                 // Copy ctrl and value_indices
                 std::memcpy(ctrl_, other.ctrl_, other.capacity_ + kGroupWidth + 1);
                 std::memcpy(value_indices_, other.value_indices_, other.capacity_ * sizeof(uint32_t));
+                // Ensure values_ has enough capacity (initialize() may have allocated less)
+                if (values_capacity_ < other.size_) {
+                    SlotAlloc slot_alloc(alloc_);
+                    std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                    values_capacity_ = other.values_capacity_;
+                    values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                }
                 // Copy values
                 for (size_t i = 0; i < other.size_; ++i) {
                     AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
@@ -865,12 +879,26 @@ public:
                 }
             } else if constexpr (kUseFlat) {
                 std::memcpy(buckets_, other.buckets_, other.capacity_ * sizeof(detail::Bucket));
+                // Ensure values_ has enough capacity (initialize() may have allocated less)
+                if (values_capacity_ < other.size_) {
+                    SlotAlloc slot_alloc(alloc_);
+                    std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                    values_capacity_ = other.values_capacity_;
+                    values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                }
                 for (size_t i = 0; i < other.size_; ++i) {
                     AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
                 }
             } else {
                 std::memcpy(ctrl_, other.ctrl_, other.capacity_ + kGroupWidth + 1);
                 std::memcpy(value_indices_, other.value_indices_, other.capacity_ * sizeof(uint32_t));
+                // Ensure values_ has enough capacity (initialize() may have allocated less)
+                if (values_capacity_ < other.size_) {
+                    SlotAlloc slot_alloc(alloc_);
+                    std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
+                    values_capacity_ = other.values_capacity_;
+                    values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+                }
                 for (size_t i = 0; i < other.size_; ++i) {
                     AllocTraits::construct(alloc_, values_ + i, other.values_[i]);
                 }
