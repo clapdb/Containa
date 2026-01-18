@@ -2127,6 +2127,12 @@ private:
                     }
                 }
                 if (slot_idx != ~size_t{0}) break;
+                // Safety check: if we hit an empty slot, the element doesn't exist
+                // This should never happen in a valid map state
+                if (DENSE_MAP_UNLIKELY(g.match_empty())) {
+                    assert(false && "dense_map::erase_value_at: slot not found for value_idx");
+                    std::abort();
+                }
                 seq.next();
             }
 
@@ -2156,6 +2162,12 @@ private:
                             value_indices_[idx] = static_cast<uint32_t>(value_idx);
                             goto found_last;
                         }
+                    }
+                    // Safety check: if we hit an empty slot, the element doesn't exist
+                    // This should never happen in a valid map state
+                    if (DENSE_MAP_UNLIKELY(g.match_empty())) {
+                        assert(false && "dense_map::erase_value_at: slot not found for last_idx");
+                        std::abort();
                     }
                     last_seq.next();
                 }
