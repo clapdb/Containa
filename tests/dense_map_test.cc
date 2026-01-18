@@ -1877,4 +1877,265 @@ TEST_CASE("dense_map::string_view_keys") {
     }
 }
 
+// ============================================================================
+// Regression tests for specific bugs
+// ============================================================================
+
+TEST_CASE("dense_map::regression::growth_left_on_erase") {
+    // Regression test for bug: growth_left_ was incorrectly incremented when
+    // marking a slot as kDeleted during erase. This allowed size_ to exceed
+    // capacity_ after repeated insert/erase cycles.
+    //
+    // The bug manifested as: after many insert/erase cycles, the map would
+    // have size_ > capacity_, causing erase_value_at() to fail to find the
+    // slot for the last element (assertion "slot not found for last_idx").
+
+    SUBCASE("repeated insert-erase cycles maintain size <= capacity") {
+        dense_map<int, int> map;
+
+        // Perform many insert-erase cycles
+        for (int cycle = 0; cycle < 100; ++cycle) {
+            // Insert elements
+            for (int i = 0; i < 20; ++i) {
+                map[cycle * 100 + i] = i;
+            }
+
+            // Erase half of them
+            for (int i = 0; i < 10; ++i) {
+                map.erase(cycle * 100 + i);
+            }
+
+            // Verify size is reasonable
+            CHECK_LE(map.size(), map.capacity());
+        }
+    }
+
+    SUBCASE("insert-erase-insert pattern with same keys") {
+        dense_map<int, int> map;
+
+        for (int round = 0; round < 50; ++round) {
+            // Insert 10 elements
+            for (int i = 0; i < 10; ++i) {
+                map[i] = round * 10 + i;
+            }
+            CHECK_EQ(map.size(), 10);
+
+            // Erase all elements
+            for (int i = 0; i < 10; ++i) {
+                map.erase(i);
+            }
+            CHECK_EQ(map.size(), 0);
+        }
+
+        // Map should still be usable
+        map[999] = 999;
+        CHECK_EQ(map.at(999), 999);
+    }
+
+    SUBCASE("high churn with string keys") {
+        // String keys use indirect storage mode where the bug was present
+        dense_map<std::string, int> map;
+        std::vector<std::string> keys;
+
+        // Create keys
+        for (int i = 0; i < 100; ++i) {
+            keys.push_back("key_" + std::to_string(i));
+        }
+
+        // High churn: repeatedly insert and erase
+        for (int cycle = 0; cycle < 20; ++cycle) {
+            // Insert all keys
+            for (int i = 0; i < 100; ++i) {
+                map[keys[i]] = cycle * 100 + i;
+            }
+            CHECK_EQ(map.size(), 100);
+
+            // Erase all keys
+            for (int i = 0; i < 100; ++i) {
+                map.erase(keys[i]);
+            }
+            CHECK_EQ(map.size(), 0);
+            CHECK_LE(map.size(), map.capacity());
+        }
+    }
+
+    SUBCASE("alternating insert-erase on same key") {
+        dense_map<std::string, int> map;
+        std::string key = "alternating_key";
+
+        for (int i = 0; i < 1000; ++i) {
+            map[key] = i;
+            CHECK_EQ(map.size(), 1);
+            map.erase(key);
+            CHECK_EQ(map.size(), 0);
+        }
+
+        // Map should still work
+        map["final_key"] = 42;
+        CHECK_EQ(map.at("final_key"), 42);
+    }
+}
+
+TEST_CASE("dense_map::regression::match_empty_vs_deleted") {
+    // Regression test for bug: match_empty() SIMD function was matching both
+    // kEmpty (0x80) and kDeleted (0xFE) because it only checked for the high
+    // bit being set (< 0 in signed comparison).
+    //
+    // The fix changed match_empty() to use exact comparison with kEmpty.
+    //
+    // This bug caused erase_value_at() to incorrectly detect "empty" slots
+    // when they were actually deleted, breaking the probe chain search.
+
+    SUBCASE("find after erase with probe chain") {
+        // Use a bad hash to force collisions and long probe chains
+        struct BadHash {
+            size_t operator()(int key) const noexcept {
+                return static_cast<size_t>(key % 4);  // Only 4 hash buckets
+            }
+        };
+
+        dense_map<int, int, BadHash> map;
+
+        // Insert keys that will all collide
+        for (int i = 0; i < 20; ++i) {
+            map[i] = i * 10;
+        }
+
+        // Erase some keys (creates deleted slots)
+        for (int i = 0; i < 10; ++i) {
+            map.erase(i);
+        }
+
+        // Verify remaining keys are still findable
+        // This would fail if match_empty() matched deleted slots
+        for (int i = 10; i < 20; ++i) {
+            auto it = map.find(i);
+            REQUIRE_MESSAGE(it != map.end(), "Key " << i << " not found after erasing earlier keys");
+            CHECK_EQ(it->second, i * 10);
+        }
+    }
+
+    SUBCASE("find traverses deleted slots correctly") {
+        dense_map<std::string, int> map;
+
+        // Insert keys that may have overlapping probe sequences
+        std::vector<std::string> keys;
+        for (int i = 0; i < 100; ++i) {
+            keys.push_back("probe_chain_key_" + std::to_string(i));
+            map[keys.back()] = i;
+        }
+
+        // Erase every other key to create deleted slots in probe chains
+        for (int i = 0; i < 100; i += 2) {
+            map.erase(keys[i]);
+        }
+
+        // Verify remaining keys are still findable
+        for (int i = 1; i < 100; i += 2) {
+            auto it = map.find(keys[i]);
+            REQUIRE_MESSAGE(it != map.end(), "Key at index " << i << " not found");
+            CHECK_EQ(it->second, i);
+        }
+    }
+
+    SUBCASE("insert into deleted slots works correctly") {
+        dense_map<int, int> map;
+
+        // Insert and erase to create deleted slots
+        for (int i = 0; i < 50; ++i) {
+            map[i] = i;
+        }
+        for (int i = 0; i < 50; ++i) {
+            map.erase(i);
+        }
+
+        // Insert new keys - should reuse deleted slots
+        for (int i = 100; i < 150; ++i) {
+            map[i] = i;
+        }
+
+        CHECK_EQ(map.size(), 50);
+
+        // Verify all new keys are findable
+        for (int i = 100; i < 150; ++i) {
+            CHECK_EQ(map.at(i), i);
+        }
+    }
+}
+
+TEST_CASE("dense_map::regression::erase_swap_and_pop") {
+    // Test the swap-and-pop erase strategy used in indirect storage mode.
+    // When erasing an element that is not the last in the values array,
+    // we swap it with the last element and update the slot mapping.
+
+    SUBCASE("erase middle element updates slot correctly") {
+        dense_map<std::string, int> map;
+
+        // Insert several elements
+        map["first"] = 1;
+        map["middle"] = 2;
+        map["last"] = 3;
+
+        // Erase middle element
+        map.erase("middle");
+
+        // Both remaining elements should be findable
+        CHECK_EQ(map.at("first"), 1);
+        CHECK_EQ(map.at("last"), 3);
+        CHECK_FALSE(map.contains("middle"));
+    }
+
+    SUBCASE("erase in reverse order") {
+        dense_map<std::string, int> map;
+
+        for (int i = 0; i < 100; ++i) {
+            map["key_" + std::to_string(i)] = i;
+        }
+
+        // Erase in reverse order
+        for (int i = 99; i >= 0; --i) {
+            map.erase("key_" + std::to_string(i));
+            CHECK_EQ(map.size(), static_cast<size_t>(i));
+
+            // Verify remaining keys
+            for (int j = 0; j < i; ++j) {
+                CHECK_MESSAGE(map.contains("key_" + std::to_string(j)),
+                              "Key " << j << " missing after erasing " << i);
+            }
+        }
+    }
+
+    SUBCASE("erase random order with verification") {
+        std::mt19937 gen(42);
+        dense_map<int, int> map;
+        std::vector<int> keys;
+
+        // Insert 100 elements
+        for (int i = 0; i < 100; ++i) {
+            keys.push_back(i);
+            map[i] = i * 10;
+        }
+
+        // Shuffle keys
+        std::shuffle(keys.begin(), keys.end(), gen);
+
+        // Erase one by one in random order
+        for (size_t i = 0; i < keys.size(); ++i) {
+            int key_to_erase = keys[i];
+            map.erase(key_to_erase);
+
+            // Verify all remaining keys
+            for (size_t j = i + 1; j < keys.size(); ++j) {
+                int remaining_key = keys[j];
+                auto it = map.find(remaining_key);
+                REQUIRE_MESSAGE(it != map.end(),
+                                "Key " << remaining_key << " not found after erasing " << key_to_erase);
+                CHECK_EQ(it->second, remaining_key * 10);
+            }
+        }
+
+        CHECK(map.empty());
+    }
+}
+
 }  // namespace stdb::container

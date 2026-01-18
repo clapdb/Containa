@@ -348,10 +348,10 @@ struct Group {
     }
 
     BitMask match_empty() const {
-        // Empty is 0b10000000, check for high bit set (negative in signed)
-        // Use mask comparison: ctrl < 0 means high bit is set
-        auto zero = _mm512_setzero_si512();
-        return BitMask(_mm512_cmplt_epi8_mask(ctrl, zero));
+        // Empty is exactly 0x80 (-128). Must use exact comparison, not high-bit check.
+        // kDeleted (0xFE = -2) also has high bit set, so movemask alone would match both.
+        auto empty = _mm512_set1_epi8(static_cast<int8_t>(kEmpty));
+        return BitMask(_mm512_cmpeq_epi8_mask(ctrl, empty));
     }
 
     BitMask match_empty_or_deleted() const {
@@ -375,9 +375,11 @@ struct Group {
     }
 
     BitMask match_empty() const {
-        // Empty is 0b10000000, check for high bit set
+        // Empty is exactly 0x80 (-128). Must use exact comparison, not high-bit check.
+        // kDeleted (0xFE = -2) also has high bit set, so movemask alone would match both.
+        auto empty = _mm256_set1_epi8(static_cast<int8_t>(kEmpty));
         return BitMask(static_cast<uint32_t>(
-            _mm256_movemask_epi8(ctrl)));
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(ctrl, empty))));
     }
 
     BitMask match_empty_or_deleted() const {
@@ -401,7 +403,11 @@ struct Group {
     }
 
     BitMask match_empty() const {
-        return BitMask(static_cast<uint32_t>(_mm_movemask_epi8(ctrl)));
+        // Empty is exactly 0x80 (-128). Must use exact comparison, not high-bit check.
+        // kDeleted (0xFE = -2) also has high bit set, so movemask alone would match both.
+        auto empty = _mm_set1_epi8(static_cast<int8_t>(kEmpty));
+        return BitMask(static_cast<uint32_t>(
+            _mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, empty))));
     }
 
     BitMask match_empty_or_deleted() const {
@@ -433,12 +439,15 @@ struct Group {
     }
 
     BitMask match_empty() const {
-        // Check for 0x80 (empty) - high bit set
-        auto msb = vreinterpretq_u8_s8(vshrq_n_s8(vreinterpretq_s8_u8(ctrl), 7));
+        // Empty is exactly 0x80 (-128). Must use exact comparison, not high-bit check.
+        // kDeleted (0xFE = -2) also has high bit set, so msb check alone would match both.
+        auto empty = vdupq_n_s8(static_cast<int8_t>(kEmpty));
+        auto eq = vceqq_s8(vreinterpretq_s8_u8(ctrl), empty);
+        auto matches = vreinterpretq_u8_s8(eq);
         static const uint8_t shifts[] = {1, 2, 4, 8, 16, 32, 64, 128,
                                          1, 2, 4, 8, 16, 32, 64, 128};
         auto bits = vld1q_u8(shifts);
-        auto masked = vandq_u8(msb, bits);
+        auto masked = vandq_u8(matches, bits);
         // Sum each 8-byte half separately to get 8-bit bitmasks
         uint8_t lo = vaddv_u8(vget_low_u8(masked));
         uint8_t hi = vaddv_u8(vget_high_u8(masked));
@@ -2136,17 +2145,9 @@ private:
                 seq.next();
             }
 
-            // Mark slot as deleted
-            size_t next_idx = (slot_idx + 1) & mask;
-            bool should_delete = detail::is_full(ctrl_[next_idx]) ||
-                                 detail::is_deleted(ctrl_[next_idx]);
-
-            ctrl_[slot_idx] = should_delete ? detail::kDeleted : detail::kEmpty;
-            if (slot_idx < kGroupWidth) {
-                ctrl_[capacity_ + slot_idx] = ctrl_[slot_idx];
-            }
-
-            // Swap-and-pop: move last value to deleted position
+            // IMPORTANT: Do swap-and-pop BEFORE marking slot as deleted/empty.
+            // If we mark slot_idx as kEmpty first, it can break probe sequences
+            // for other keys (like last_idx) whose probe path passes through slot_idx.
             const size_t last_idx = size_ - 1;
             if (value_idx != last_idx) {
                 // Find and update slot pointing to last value
@@ -2181,8 +2182,24 @@ private:
             }
             AllocTraits::destroy(alloc_, values_ + last_idx);
 
+            // Now mark slot as deleted AFTER swap-and-pop is complete
+            // IMPORTANT: Always use kDeleted, never kEmpty, in indirect storage mode.
+            // Using kEmpty can break probe chains for other elements whose probe path
+            // passes through this slot. The should_delete heuristic (checking next slot)
+            // only works for single-probe-chain scenarios but not for open addressing
+            // where multiple keys can have overlapping probe sequences.
+            ctrl_[slot_idx] = detail::kDeleted;
+            if (slot_idx < kGroupWidth) {
+                ctrl_[capacity_ + slot_idx] = ctrl_[slot_idx];
+            }
+
             --size_;
-            ++growth_left_;
+            // NOTE: Do NOT increment growth_left_ here! When we mark a slot as kDeleted:
+            // - The slot is still "occupied" for probe chain purposes
+            // - It can be reused by insert (was_deleted=true means growth_left_ not decremented)
+            // - But it doesn't give us more "growth budget" because deleted slots still
+            //   count toward the load factor (they consume probe sequence length)
+            // Incrementing growth_left_ here would allow size_ to exceed capacity_!
         }
     }
 
