@@ -2220,7 +2220,12 @@ private:
             }
 
             --size_;
-            ++growth_left_;
+            // NOTE: Do NOT increment growth_left_ here! When we mark a slot as kDeleted:
+            // - The slot is still "occupied" for probe chain purposes
+            // - It can be reused by insert (was_deleted=true means growth_left_ not decremented)
+            // - But it doesn't give us more "growth budget" because deleted slots still
+            //   count toward the load factor (they consume probe sequence length)
+            // Incrementing growth_left_ here would allow size_ to exceed capacity_!
         }
     }
 
