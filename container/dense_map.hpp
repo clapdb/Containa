@@ -2155,6 +2155,7 @@ private:
                 const int8_t last_h2 = detail::h2(last_hash);
 
                 detail::ProbeSeq last_seq(last_hash, mask);
+                size_t probe_count = 0;
                 for (;;) {
                     const detail::Group g(ctrl_ + last_seq.offset());
                     for (auto match_mask = g.match(last_h2); match_mask; match_mask.remove_lowest_bit()) {
@@ -2167,10 +2168,35 @@ private:
                     // Safety check: if we hit an empty slot, the element doesn't exist
                     // This should never happen in a valid map state
                     if (DENSE_MAP_UNLIKELY(g.match_empty())) {
+                        // Debug output before abort
+                        fprintf(stderr, "DEBUG: erase_value_at failed for last_idx\n");
+                        fprintf(stderr, "  value_idx=%zu, last_idx=%zu, size_=%zu, capacity_=%zu\n",
+                                value_idx, last_idx, size_, capacity_);
+                        fprintf(stderr, "  last_hash=0x%lx, last_h2=%d, mask=0x%lx\n",
+                                static_cast<unsigned long>(last_hash),
+                                static_cast<int>(last_h2),
+                                static_cast<unsigned long>(mask));
+                        fprintf(stderr, "  probe_count=%zu, offset=%zu\n", probe_count, last_seq.offset());
+                        fprintf(stderr, "  ctrl bytes at offset: ");
+                        for (size_t i = 0; i < kGroupWidth && last_seq.offset() + i < capacity_; ++i) {
+                            fprintf(stderr, "%02x ", static_cast<unsigned char>(ctrl_[last_seq.offset() + i]));
+                        }
+                        fprintf(stderr, "\n");
+                        fprintf(stderr, "  Searching for slot where value_indices_[slot]==%zu\n", last_idx);
+                        // Dump all slots with matching h2
+                        fprintf(stderr, "  All slots with h2=%d: ", static_cast<int>(last_h2));
+                        for (size_t i = 0; i < capacity_; ++i) {
+                            if (ctrl_[i] == last_h2) {
+                                fprintf(stderr, "[slot=%zu, vidx=%u] ", i, value_indices_[i]);
+                            }
+                        }
+                        fprintf(stderr, "\n");
+                        fflush(stderr);
                         assert(false && "dense_map::erase_value_at: slot not found for last_idx");
                         std::abort();
                     }
                     last_seq.next();
+                    ++probe_count;
                 }
                 found_last:
                 // Move last value to deleted position - use memcpy for trivial types
