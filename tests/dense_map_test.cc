@@ -15,10 +15,12 @@
  */
 
 #include "container/dense_map.hpp"
+#include "container/dense_set.hpp"
 
 #include <array>
 #include <random>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -1661,6 +1663,217 @@ TEST_CASE("dense_map::pmr") {
 
         CHECK_EQ(map.size(), 2);
         CHECK_EQ(map[1], "one");
+    }
+}
+
+// ============================================================================
+// Tests for string_view keys
+// This tests the scenario that crashes in CI with -O1 optimization without -march=native
+// The crash occurs in dense_map<string_view>::find() during aggregation operations
+// ============================================================================
+
+TEST_CASE("dense_map::string_view_keys") {
+    SUBCASE("basic insert and find") {
+        // Create stable storage for strings
+        std::vector<std::string> strings = {"hello", "world", "test", "foo", "bar"};
+        dense_map<std::string_view, int> map;
+
+        for (size_t i = 0; i < strings.size(); ++i) {
+            map[strings[i]] = static_cast<int>(i);
+        }
+
+        CHECK_EQ(map.size(), 5);
+
+        for (size_t i = 0; i < strings.size(); ++i) {
+            auto it = map.find(strings[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, static_cast<int>(i));
+        }
+    }
+
+    SUBCASE("heterogeneous lookup with string_view") {
+        std::vector<std::string> strings;
+        dense_map<std::string_view, int> map;
+
+        // Insert many strings to trigger rehashing
+        for (int i = 0; i < 1000; ++i) {
+            strings.push_back("key_" + std::to_string(i));
+            map[strings.back()] = i;
+        }
+
+        CHECK_EQ(map.size(), 1000);
+
+        // Lookup using const char*
+        for (int i = 0; i < 1000; ++i) {
+            std::string key = "key_" + std::to_string(i);
+            auto it = map.find(std::string_view(key));
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, i);
+        }
+    }
+
+    SUBCASE("insert from span of string_view") {
+        // This mimics the pattern in aggregate_on_datum.cc Parallel<>::distinct()
+        std::vector<std::string> source_strings = {"alpha", "beta", "gamma", "delta", "epsilon"};
+        std::vector<std::string_view> views;
+        for (const auto& s : source_strings) {
+            views.push_back(s);
+        }
+
+        dense_set<std::string_view> set;
+        for (const auto& v : views) {
+            set.insert(v);
+        }
+
+        CHECK_EQ(set.size(), 5);
+
+        // Verify all elements are findable
+        for (const auto& v : views) {
+            CHECK(set.contains(v));
+        }
+    }
+
+    SUBCASE("rehash with string_view keys") {
+        std::vector<std::string> strings;
+        dense_map<std::string_view, int> map;
+
+        // Small initial capacity to force rehashing
+        map.reserve(4);
+
+        for (int i = 0; i < 100; ++i) {
+            strings.push_back("rehash_test_key_" + std::to_string(i));
+            map[strings.back()] = i;
+
+            // Verify all previous insertions are still accessible after potential rehash
+            for (int j = 0; j <= i; ++j) {
+                auto it = map.find(strings[j]);
+                REQUIRE_MESSAGE(it != map.end(), "Key not found after rehash: " << strings[j]);
+                CHECK_EQ(it->second, j);
+            }
+        }
+    }
+
+    SUBCASE("erase and find with string_view") {
+        std::vector<std::string> strings;
+        dense_map<std::string_view, int> map;
+
+        for (int i = 0; i < 50; ++i) {
+            strings.push_back("erase_key_" + std::to_string(i));
+            map[strings.back()] = i;
+        }
+
+        // Erase even-indexed keys
+        for (int i = 0; i < 50; i += 2) {
+            map.erase(strings[i]);
+        }
+
+        CHECK_EQ(map.size(), 25);
+
+        // Verify odd-indexed keys are still accessible
+        for (int i = 1; i < 50; i += 2) {
+            auto it = map.find(strings[i]);
+            REQUIRE(it != map.end());
+            CHECK_EQ(it->second, i);
+        }
+
+        // Verify even-indexed keys are gone
+        for (int i = 0; i < 50; i += 2) {
+            CHECK_FALSE(map.contains(strings[i]));
+        }
+    }
+
+    SUBCASE("constructor from range of string_view") {
+        std::vector<std::string> source = {"a", "b", "c", "d", "e"};
+        std::vector<std::string_view> views;
+        for (const auto& s : source) {
+            views.push_back(s);
+        }
+
+        // Construct set directly from range - this is the pattern used in aggregation
+        dense_set<std::string_view> set(views.begin(), views.end());
+
+        CHECK_EQ(set.size(), 5);
+        for (const auto& v : views) {
+            CHECK(set.contains(v));
+        }
+    }
+
+    SUBCASE("stress test with many string_view keys") {
+        std::vector<std::string> strings;
+        dense_map<std::string_view, int> map;
+        std::mt19937 gen(12345);
+
+        auto random_string = [&gen](int len) {
+            static const char chars[] = "abcdefghijklmnopqrstuvwxyz";
+            std::string s;
+            for (int i = 0; i < len; i++) s += chars[gen() % 26];
+            return s;
+        };
+
+        // Insert many random strings
+        for (int i = 0; i < 5000; ++i) {
+            strings.push_back(random_string(16));
+            map[strings.back()] = i;
+        }
+
+        // Note: duplicates may reduce actual size
+        REQUIRE(map.size() <= 5000);
+
+        // Verify all inserted strings can be found
+        for (size_t i = 0; i < strings.size(); ++i) {
+            CHECK(map.contains(strings[i]));
+        }
+
+        // Mixed find and erase operations
+        for (int i = 0; i < 1000; ++i) {
+            int idx = gen() % strings.size();
+            if (map.contains(strings[idx])) {
+                map.erase(strings[idx]);
+            }
+        }
+
+        // Verify consistency
+        for (const auto& s : strings) {
+            auto it = map.find(s);
+            if (it != map.end()) {
+                // If found, value should be valid
+                CHECK_GE(it->second, 0);
+            }
+        }
+    }
+
+    SUBCASE("concurrent-like access pattern with string_view") {
+        // Simulates the pattern in Parallel<>::distinct() where multiple "threads"
+        // access the same data structure (single-threaded simulation)
+        std::vector<std::string> source_strings;
+        for (int i = 0; i < 1000; ++i) {
+            source_strings.push_back("concurrent_key_" + std::to_string(i));
+        }
+
+        std::vector<std::string_view> views;
+        for (const auto& s : source_strings) {
+            views.push_back(s);
+        }
+
+        // Simulate multiple "producers" inserting into the same set
+        dense_set<std::string_view> set;
+        size_t chunk_size = views.size() / 4;
+
+        for (size_t producer = 0; producer < 4; ++producer) {
+            size_t start = producer * chunk_size;
+            size_t end = (producer == 3) ? views.size() : start + chunk_size;
+
+            for (size_t i = start; i < end; ++i) {
+                set.insert(views[i]);
+            }
+
+            // Verify all inserted elements are findable
+            for (size_t i = 0; i <= end - 1 && i < views.size(); ++i) {
+                CHECK_MESSAGE(set.contains(views[i]), "Missing key at index " << i);
+            }
+        }
+
+        CHECK_EQ(set.size(), views.size());
     }
 }
 

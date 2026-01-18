@@ -1473,6 +1473,8 @@ private:
             // Allocate value indices array (maps slot -> value index)
             IndexAlloc index_alloc(alloc_);
             value_indices_ = std::allocator_traits<IndexAlloc>::allocate(index_alloc, cap);
+            // Initialize to avoid undefined behavior when ctrl_ has stale "full" markers
+            std::memset(value_indices_, 0, cap * sizeof(uint32_t));
 
             // Allocate initial values array - start smaller
             values_capacity_ = std::min(cap, size_t(8));
@@ -2273,6 +2275,8 @@ private:
 
             IndexAlloc index_alloc(alloc_);
             value_indices_ = std::allocator_traits<IndexAlloc>::allocate(index_alloc, new_capacity);
+            // Initialize to avoid undefined behavior when ctrl_ has stale "full" markers
+            std::memset(value_indices_, 0, new_capacity * sizeof(uint32_t));
 
             capacity_ = new_capacity;
             size_ = 0;
