@@ -24,6 +24,9 @@ add_bench_target(boolean_vector_bench boolean_vector_bench.cc)
 # Container benchmarks (small_vectra, devectra, ring_buffer)
 add_bench_target(container_bench container_bench.cc)
 
+# immutable_ordered_multimap vs containa btree_multimap
+add_bench_target(immutable_ordered_multimap_bench immutable_ordered_multimap_bench.cc)
+
 # Dense map benchmarks
 add_executable(dense_map_bench dense_map_bench.cc)
 target_compile_definitions(dense_map_bench PRIVATE NDEBUG)
