@@ -62,6 +62,19 @@ class immutable_ordered_multimap
         return m;
     }
 
+    /// Reconstruct directly from already-built CSR parts (e.g. after deserialization),
+    /// in O(1) -- the caller guarantees `keys` is ascending & distinct, `offsets` has
+    /// keys.size()+1 entries with offsets.front()==0 and offsets.back()==values.size(),
+    /// and `values` is grouped by key. No sorting or validation is performed in release.
+    static auto from_parts(std::vector<K> keys, std::vector<uint32_t> offsets, std::vector<V> values)
+      -> immutable_ordered_multimap {
+        immutable_ordered_multimap m;
+        m.keys_ = std::move(keys);
+        m.offsets_ = std::move(offsets);
+        m.values_ = std::move(values);
+        return m;
+    }
+
     /// All values for `key`, as a contiguous span (empty if absent).
     [[nodiscard]] auto equal_range(const K& key) const -> std::span<const V> {
         const auto it = std::lower_bound(keys_.begin(), keys_.end(), key);

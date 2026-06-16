@@ -60,6 +60,25 @@ TEST_CASE("immutable_ordered_multimap basic") {
     }
 }
 
+TEST_CASE("immutable_ordered_multimap from_parts round-trips build") {
+    std::vector<std::pair<int64_t, uint32_t>> pairs{{50, 0}, {7, 1}, {50, 2}, {99, 3}, {7, 4}};
+    auto built = immutable_ordered_multimap<int64_t, uint32_t>::build(pairs);
+
+    // Reconstruct from the exposed CSR parts; must answer queries identically.
+    std::vector<int64_t> keys(built.keys().begin(), built.keys().end());
+    std::vector<uint32_t> offsets(built.offsets().begin(), built.offsets().end());
+    std::vector<uint32_t> values(built.values().begin(), built.values().end());
+    auto rebuilt = immutable_ordered_multimap<int64_t, uint32_t>::from_parts(std::move(keys), std::move(offsets),
+                                                                            std::move(values));
+
+    CHECK(rebuilt.key_count() == built.key_count());
+    CHECK(rebuilt.value_count() == built.value_count());
+    CHECK(to_vec(rebuilt.equal_range(50)) == std::vector<uint32_t>{0, 2});
+    CHECK(to_vec(rebuilt.equal_range(7)) == std::vector<uint32_t>{1, 4});
+    CHECK(to_vec(rebuilt.range(7, true, 50, true)) == std::vector<uint32_t>{0, 1, 2, 4});
+    CHECK(rebuilt.equal_range(123).empty());
+}
+
 TEST_CASE("immutable_ordered_multimap matches std::multimap (randomized)") {
     std::mt19937_64 rng(2026);
     std::uniform_int_distribution<int64_t> dist(0, 500);
