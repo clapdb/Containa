@@ -705,7 +705,11 @@ class art_map
     }
     art_map& operator=(const art_map& other) {
         if (this != &other) {
-            clear();
+            clear();  // free existing nodes with the current allocator
+            if constexpr (std::allocator_traits<
+                              Allocator>::propagate_on_container_copy_assignment::value) {
+                _alloc = other._alloc;  // adopt before cloning so slabs use the right allocator
+            }
             if (other._root) _root = clone(other._root);
             _size = other._size;
         }

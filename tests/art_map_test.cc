@@ -376,6 +376,38 @@ TEST_CASE("art_map::move_assign_allocator_aware") {
     }
 }
 
+// Regression (review P2): a propagating (POCCA) allocator must be adopted on
+// copy assignment before cloning.
+namespace pocca_test {
+template <typename T>
+struct IdAlloc {
+    using value_type = T;
+    using propagate_on_container_copy_assignment = std::true_type;
+    using propagate_on_container_move_assignment = std::true_type;
+    int id = 0;
+    IdAlloc() = default;
+    explicit IdAlloc(int i) : id(i) {}
+    template <typename U>
+    IdAlloc(const IdAlloc<U>& o) : id(o.id) {}
+    T* allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+    bool operator==(const IdAlloc& o) const { return id == o.id; }
+    bool operator!=(const IdAlloc& o) const { return id != o.id; }
+};
+}  // namespace pocca_test
+
+TEST_CASE("art_map::copy_assign_propagates_allocator") {
+    using A = pocca_test::IdAlloc<std::pair<const int, int>>;
+    art_map<int, int, A> a(A{1});
+    for (int i = 0; i < 1000; ++i) a[i] = i;
+    art_map<int, int, A> b(A{2});
+    b[9] = 9;
+    b = a;  // POCCA -> b adopts allocator id 1
+    CHECK_EQ(b.get_allocator().id, 1);
+    CHECK_EQ(b.size(), 1000);
+    for (int i = 0; i < 1000; ++i) CHECK_EQ(b.at(i), i);
+}
+
 // Differential test against std::map as oracle.
 TEST_CASE("art_map::differential_vs_std_map") {
     SUBCASE("int keys, insert/erase churn") {
