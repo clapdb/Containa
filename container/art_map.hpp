@@ -343,7 +343,15 @@ class art_map
     template <typename... Args>
     leaf_node* make_leaf(Args&&... args) {
         auto* p = pool_new(_poolL);
-        ::new (static_cast<void*>(p)) leaf_node(std::forward<Args>(args)...);
+        // If the key/value construction throws, return the raw slot to the free list (the
+        // leaf_node was never constructed, so no destructor runs). Otherwise repeated
+        // failed inserts would consume leaf-pool slots and keep growing the slab list.
+        try {
+            ::new (static_cast<void*>(p)) leaf_node(std::forward<Args>(args)...);
+        } catch (...) {
+            _poolL.deallocate(p);
+            throw;
+        }
         p->kind = nkind::leaf;
         return p;
     }

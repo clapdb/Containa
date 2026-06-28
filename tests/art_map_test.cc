@@ -520,12 +520,27 @@ TEST_CASE("art_map::differential_vs_std_map") {
 namespace {
 struct throw_ctl
 {
-    long remaining = -1;  // -1 = disabled
+    long remaining = -1;   // -1 = disabled
+    long allocations = 0;  // total slab allocations observed (for leak/reuse assertions)
 };
 inline throw_ctl& g_throw_ctl() {
     static throw_ctl ctl;
     return ctl;
 }
+// A value type whose default construction throws on demand, to exercise make_leaf's slot
+// cleanup when key/value construction fails.
+inline bool& g_value_throws() {
+    static bool b = false;
+    return b;
+}
+struct ThrowingValue
+{
+    int v = 0;
+    ThrowingValue() {
+        if (g_value_throws()) throw std::runtime_error("ThrowingValue");
+    }
+    explicit ThrowingValue(int x) : v(x) {}
+};
 template <typename T>
 struct throwing_alloc
 {
@@ -535,6 +550,7 @@ struct throwing_alloc
     throwing_alloc(const throwing_alloc<U>&) noexcept {}
     T* allocate(std::size_t n) {
         auto& ctl = g_throw_ctl();
+        ++ctl.allocations;
         if (ctl.remaining == 0) {
             ctl.remaining = -1;
             throw std::bad_alloc();
@@ -711,6 +727,31 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
 
         // the returned iterator is positioned: it can walk forward over the siblings
         CHECK_EQ(std::next(res.first) != m.end(), true);
+    }
+
+    SUBCASE("a leaf whose value construction throws returns its pool slot") {
+        using TMap = art_map<int, ThrowingValue, throwing_alloc<std::pair<const int, ThrowingValue>>>;
+        TMap m;
+        g_throw_ctl().remaining = -1;  // allocator counts but never throws here
+        g_value_throws() = false;
+        m[-1];  // warm up: allocate the first leaf slab, size 1
+        const long allocs0 = g_throw_ctl().allocations;
+
+        // Every one of these inserts fails inside make_leaf (default-constructing the
+        // value throws). The slot must be returned to the free list and reused, so the
+        // leaf pool must NOT keep allocating fresh 512-slot slabs.
+        for (int i = 0; i < 4000; ++i) {
+            g_value_throws() = true;
+            CHECK_THROWS_AS(m[i], std::runtime_error);
+        }
+        g_value_throws() = false;
+        const long new_slabs = g_throw_ctl().allocations - allocs0;
+        CHECK(new_slabs <= 1);  // without slot reuse this would be ~4000/512 slabs
+
+        CHECK_EQ(m.size(), 1);  // nothing was actually inserted
+        m[42] = ThrowingValue(42);
+        CHECK_EQ(m.size(), 2);
+        CHECK_EQ(m.at(42).v, 42);
     }
 }
 
