@@ -1278,7 +1278,8 @@ class art_map
             return;
         }
         inner* in = as_inner(n);
-        if (in->end_leaf) fn(static_cast<leaf_node*>(in->end_leaf)->kv);
+        if (in->end_leaf)
+            fn(const_cast<const value_type&>(static_cast<leaf_node*>(in->end_leaf)->kv));
         switch (in->kind) {
             case nkind::n4: {
                 auto* p = static_cast<node4*>(in);

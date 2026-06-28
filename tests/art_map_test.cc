@@ -224,6 +224,25 @@ TEST_CASE("art_map::for_each_ordered") {
     CHECK_EQ(count, 0);
 }
 
+// Regression (review): for_each on a const map must pass const refs for ALL
+// entries, including the end_leaf (e.g. empty-string key). A generic callback
+// would otherwise be instantiated with a mutable ref for that entry — caught
+// here at compile time by the static_assert inside the lambda.
+TEST_CASE("art_map::for_each_const_end_leaf") {
+    art_map<std::string, int> m;
+    m[""] = 1;  // stored as end_leaf at the root
+    m["a"] = 2;
+    m["bb"] = 3;
+    const auto& cm = m;
+    int n = 0;
+    cm.for_each([&](auto& kv) {
+        static_assert(std::is_const_v<std::remove_reference_t<decltype(kv)>>,
+                      "for_each must hand const refs on a const map");
+        ++n;
+    });
+    CHECK_EQ(n, 3);
+}
+
 TEST_CASE("art_map::copy_move") {
     art_map<int, int> m;
     for (int i = 0; i < 50; ++i) m[i] = i;
