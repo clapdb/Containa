@@ -515,4 +515,105 @@ TEST_CASE("art_map::differential_vs_std_map") {
     }
 }
 
+// Allocator that throws std::bad_alloc on the Nth allocation once armed, to exercise the
+// exception-safety of clone() (copy) and the insert split paths.
+namespace {
+struct throw_ctl
+{
+    long remaining = -1;  // -1 = disabled
+};
+inline throw_ctl& g_throw_ctl() {
+    static throw_ctl ctl;
+    return ctl;
+}
+template <typename T>
+struct throwing_alloc
+{
+    using value_type = T;
+    throwing_alloc() = default;
+    template <typename U>
+    throwing_alloc(const throwing_alloc<U>&) noexcept {}
+    T* allocate(std::size_t n) {
+        auto& ctl = g_throw_ctl();
+        if (ctl.remaining == 0) {
+            ctl.remaining = -1;
+            throw std::bad_alloc();
+        }
+        if (ctl.remaining > 0) --ctl.remaining;
+        return static_cast<T*>(::operator new(n * sizeof(T)));
+    }
+    void deallocate(T* p, std::size_t) noexcept { ::operator delete(p); }
+    template <typename U>
+    bool operator==(const throwing_alloc<U>&) const noexcept {
+        return true;
+    }
+    template <typename U>
+    bool operator!=(const throwing_alloc<U>&) const noexcept {
+        return false;
+    }
+};
+}  // namespace
+
+TEST_CASE("art_map::exception_safety_on_copy_and_split") {
+    using Map = art_map<std::string, int, throwing_alloc<std::pair<const std::string, int>>>;
+
+    SUBCASE("copy construction that throws mid-clone leaves the source intact") {
+        Map m;
+        g_throw_ctl().remaining = -1;
+        for (int i = 0; i < 2000; ++i) {
+            m[std::string("prefix/path/") + std::to_string(i)] = i;
+            m[std::string(1, char('a' + (i % 26))) + std::to_string(i)] = i;
+        }
+        const std::size_t expect = m.size();
+
+        // Sweep the throw point across every allocation the copy makes. Each failed copy
+        // must leave the source unchanged (and, under ASAN, must not leak/UAF).
+        bool saw_throw = false;
+        for (long k = 0;; ++k) {
+            g_throw_ctl().remaining = k;
+            try {
+                Map c = m;
+                g_throw_ctl().remaining = -1;
+                CHECK_EQ(c.size(), m.size());
+                CHECK_EQ(c.at("prefix/path/0"), 0);
+                break;  // k exceeded the copy's allocation count
+            } catch (const std::bad_alloc&) {
+                saw_throw = true;
+            }
+            g_throw_ctl().remaining = -1;
+            CHECK_EQ(m.size(), expect);
+            CHECK_EQ(m.at("prefix/path/1234"), 1234);
+        }
+        CHECK(saw_throw);
+    }
+
+    SUBCASE("a split insert that throws leaves the existing entry reachable") {
+        const std::string k1 = std::string(80, 'x') + "AAA";  // share a prefix >> kCap
+        const std::string k2 = std::string(80, 'x') + "BBB";
+        bool saw_throw = false;
+        for (long k = 0;; ++k) {
+            Map mm;
+            g_throw_ctl().remaining = -1;
+            mm[k1] = 1;
+            g_throw_ctl().remaining = k;
+            try {
+                mm.insert({k2, 2});
+                g_throw_ctl().remaining = -1;
+                CHECK_EQ(mm.size(), 2);
+                CHECK_EQ(mm.at(k1), 1);
+                CHECK_EQ(mm.at(k2), 2);
+                break;
+            } catch (const std::bad_alloc&) {
+                saw_throw = true;
+            }
+            g_throw_ctl().remaining = -1;
+            CHECK_EQ(mm.size(), 1);
+            CHECK(mm.contains(k1));
+            CHECK_EQ(mm.at(k1), 1);
+            CHECK_FALSE(mm.contains(k2));
+        }
+        CHECK(saw_throw);
+    }
+}
+
 }  // namespace stdb::container

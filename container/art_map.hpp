@@ -694,8 +694,16 @@ class art_map
     art_map(const art_map& other)
         : _alloc(std::allocator_traits<Allocator>::select_on_container_copy_construction(
               other._alloc)) {
-        if (other._root) _root = clone(other._root);
-        _size = other._size;
+        // If clone() throws, this constructor fails and ~art_map() will NOT run, so the
+        // bump-allocator slabs (node_pool has no destructor of its own) would leak. Release
+        // them explicitly. clone() is exception-safe, so no constructed T outlives this.
+        try {
+            if (other._root) _root = clone(other._root);
+            _size = other._size;
+        } catch (...) {
+            release_pools();
+            throw;
+        }
     }
     art_map(art_map&& other) noexcept
         : _root(other._root),
@@ -1143,7 +1151,10 @@ class art_map
         }
     }
 
-    // Recursively clone a subtree.
+    // Recursively clone a subtree. Strongly exception-safe: if any leaf copy (T's copy
+    // constructor) or node allocation throws partway, every node and leaf already cloned
+    // for this subtree is destroyed before the exception propagates, so no half-built node
+    // is leaked and no constructed T is left without a matching destructor.
     node* clone(node* n) {
         if (is_leaf(n)) return make_leaf(as_leaf(n)->kv);
         inner* in = as_inner(n);
@@ -1152,22 +1163,34 @@ class art_map
             case nkind::n4: {
                 auto* p = static_cast<node4*>(in);
                 auto* g = make4();
-                for (uint8_t i = 0; i < p->nchild; ++i) {
-                    g->keys[i] = p->keys[i];
-                    g->child[i] = clone(p->child[i]);
+                try {
+                    for (uint8_t i = 0; i < p->nchild; ++i) {
+                        g->keys[i] = p->keys[i];
+                        g->child[i] = clone(p->child[i]);
+                        g->nchild = static_cast<uint8_t>(i + 1);  // keep destroyable on throw
+                    }
+                } catch (...) {
+                    for (uint8_t i = 0; i < g->nchild; ++i) destroy(g->child[i]);
+                    free_shell(g);
+                    throw;
                 }
-                g->nchild = p->nchild;
                 out = g;
                 break;
             }
             case nkind::n16: {
                 auto* p = static_cast<node16*>(in);
                 auto* g = make16();
-                for (uint8_t i = 0; i < p->nchild; ++i) {
-                    g->keys[i] = p->keys[i];
-                    g->child[i] = clone(p->child[i]);
+                try {
+                    for (uint8_t i = 0; i < p->nchild; ++i) {
+                        g->keys[i] = p->keys[i];
+                        g->child[i] = clone(p->child[i]);
+                        g->nchild = static_cast<uint8_t>(i + 1);
+                    }
+                } catch (...) {
+                    for (uint8_t i = 0; i < g->nchild; ++i) destroy(g->child[i]);
+                    free_shell(g);
+                    throw;
                 }
-                g->nchild = p->nchild;
                 out = g;
                 break;
             }
@@ -1175,16 +1198,33 @@ class art_map
                 auto* p = static_cast<node48*>(in);
                 auto* g = make48();
                 std::memcpy(g->cindex, p->cindex, sizeof(p->cindex));
-                for (uint8_t i = 0; i < p->nchild; ++i) g->child[i] = clone(p->child[i]);
-                g->nchild = p->nchild;
+                try {
+                    // child[] is dense; clean up by index (not cindex, which still maps to
+                    // not-yet-cloned source slots until the loop completes).
+                    for (uint8_t i = 0; i < p->nchild; ++i) {
+                        g->child[i] = clone(p->child[i]);
+                        g->nchild = static_cast<uint8_t>(i + 1);
+                    }
+                } catch (...) {
+                    for (uint8_t i = 0; i < g->nchild; ++i) destroy(g->child[i]);
+                    free_shell(g);
+                    throw;
+                }
                 out = g;
                 break;
             }
             case nkind::n256: {
                 auto* p = static_cast<node256*>(in);
-                auto* g = make256();
-                for (int b = 0; b < 256; ++b)
-                    if (p->child[b]) g->child[b] = clone(p->child[b]);
+                auto* g = make256();  // child[] is zero-initialized
+                try {
+                    for (int b = 0; b < 256; ++b)
+                        if (p->child[b]) g->child[b] = clone(p->child[b]);
+                } catch (...) {
+                    for (int b = 0; b < 256; ++b)
+                        if (g->child[b]) destroy(g->child[b]);
+                    free_shell(g);
+                    throw;
+                }
                 g->nchild = p->nchild;
                 out = g;
                 break;
@@ -1194,7 +1234,15 @@ class art_map
         }
         out->plen = in->plen;
         std::memcpy(out->prefix, in->prefix, kCap);
-        out->end_leaf = in->end_leaf ? make_leaf(as_leaf(in->end_leaf)->kv) : nullptr;
+        // out is now a fully consistent node; if the end-leaf copy throws, destroy() can
+        // unwind the whole subtree.
+        try {
+            out->end_leaf = in->end_leaf ? make_leaf(as_leaf(in->end_leaf)->kv) : nullptr;
+        } catch (...) {
+            out->end_leaf = nullptr;
+            destroy(out);
+            throw;
+        }
         return out;
     }
 
@@ -1392,7 +1440,14 @@ class art_map
                     return old;
                 }
                 leaf_node* nl = mk();
-                split_leaf(ref, old, lv, kv, depth, nl, path);
+                // If the structural step throws (node allocation), free the freshly made
+                // leaf so it does not leak; `old` is left reachable at *ref by split_leaf.
+                try {
+                    split_leaf(ref, old, lv, kv, depth, nl, path);
+                } catch (...) {
+                    free_leaf(nl);
+                    throw;
+                }
                 ++_size;
                 inserted = true;
                 return nl;
@@ -1402,7 +1457,12 @@ class art_map
                 uint8_t common = prefix_match(in, kv, depth);
                 if (common < in->plen) {
                     leaf_node* nl = mk();
-                    split_prefix(ref, in, common, kv, depth, nl, path);
+                    try {
+                        split_prefix(ref, in, common, kv, depth, nl, path);
+                    } catch (...) {
+                        free_leaf(nl);  // node alloc failed before *ref changed; drop new leaf
+                        throw;
+                    }
                     ++_size;
                     inserted = true;
                     return nl;
@@ -1432,8 +1492,16 @@ class art_map
             node** cref = find_child_ref(in, b);
             if (!cref) {
                 leaf_node* nl = mk();
-                if (is_full(in)) in = grow(ref, in);
-                add_child(in, b, nl);
+                // grow() is exception-safe (it allocates the larger node before touching
+                // the tree), so on a throw *ref still holds the original node; just free
+                // the new leaf.
+                try {
+                    if (is_full(in)) in = grow(ref, in);
+                    add_child(in, b, nl);
+                } catch (...) {
+                    free_leaf(nl);
+                    throw;
+                }
                 ++_size;
                 inserted = true;
                 if (path) {
@@ -1453,7 +1521,13 @@ class art_map
                     leaf_node* nl, iterator* path = nullptr) {
         uint32_t s = depth;
         while (s < lv.len && s < kv.len && lv.ptr[s] == kv.ptr[s]) ++s;  // divergence depth
-        node** cur = ref;
+        // Build the prefix chain off to the side and only publish it to *ref once it is
+        // fully built. make4() is the one allocation that can throw; if it does mid-chain,
+        // *ref still points at `old`, so the existing entry stays reachable and there is no
+        // partially built node (with a null child slot) left in the tree for destroy() to
+        // walk into.
+        node* head = nullptr;
+        node** cur = &head;
         uint32_t d = depth;
         while (true) {
             node4* nd = make4();
@@ -1477,6 +1551,7 @@ class art_map
                     path->push(nd, d == kv.len ? -1 : static_cast<int>(kv.ptr[d]));
                     path->_leaf = nl;
                 }
+                *ref = head;  // publish the completed chain atomically
                 return;
             }
             // bytes still shared at d: single child, continue chain
