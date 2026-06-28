@@ -614,6 +614,53 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
         }
         CHECK(saw_throw);
     }
+
+    SUBCASE("initializer-list construction that throws does not leak") {
+        // ~art_map() does not run on constructor failure; a throw partway must still tear
+        // down the staged tree (verified leak-free under ASAN).
+        bool saw_throw = false;
+        for (long k = 0;; ++k) {
+            g_throw_ctl().remaining = k;
+            try {
+                Map m({{"alpha", 1}, {"beta", 2}, {"gamma", 3}, {"delta", 4}, {"epsilon", 5}});
+                g_throw_ctl().remaining = -1;
+                CHECK_EQ(m.size(), 5);
+                break;
+            } catch (const std::bad_alloc&) {
+                saw_throw = true;
+            }
+            g_throw_ctl().remaining = -1;
+        }
+        CHECK(saw_throw);
+    }
+
+    SUBCASE("bulk_load that throws frees the staged leaves and leaves the map empty") {
+        // Fixed-width keys "k1000".."k1399" are already in ascending (encoded) order.
+        std::vector<std::pair<const std::string, int>> data;
+        for (int i = 0; i < 400; ++i) data.emplace_back(std::string("k") + std::to_string(1000 + i), i);
+
+        bool saw_throw = false;
+        for (long k = 0;; ++k) {
+            Map m;
+            g_throw_ctl().remaining = -1;
+            m["preexisting"] = 1;  // bulk_load clears this first
+            g_throw_ctl().remaining = k;
+            try {
+                m.bulk_load(data.begin(), data.end());
+                g_throw_ctl().remaining = -1;
+                CHECK_EQ(m.size(), data.size());
+                break;
+            } catch (const std::bad_alloc&) {
+                saw_throw = true;
+            }
+            g_throw_ctl().remaining = -1;
+            // bulk_load cleared first, so a failed load leaves an empty, valid map (and,
+            // under ASAN, must not leak the staged leaves).
+            CHECK(m.empty());
+            CHECK_EQ(m.size(), 0);
+        }
+        CHECK(saw_throw);
+    }
 }
 
 }  // namespace stdb::container

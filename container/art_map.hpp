@@ -688,7 +688,15 @@ class art_map
     art_map() = default;
     explicit art_map(const Allocator& alloc) : _alloc(alloc) {}
     art_map(std::initializer_list<value_type> init) {
-        for (const auto& v : init) insert(v);
+        // If an insert throws partway, this constructor fails and ~art_map() will not run;
+        // clear() tears down the (consistent) partial tree and frees the slabs so nothing
+        // leaks.
+        try {
+            for (const auto& v : init) insert(v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
 
     art_map(const art_map& other)
@@ -1896,35 +1904,49 @@ class art_map
     template <typename InputIt>
     void bulk_load(InputIt first, InputIt last) {
         clear();
+        // Leaves are staged in `e` (and the in-flight `pending`) before the tree exists;
+        // none are reachable through _root yet, so if any allocation below throws we must
+        // run their destructors here — ~art_map()/clear() would only see _root == null and
+        // release the raw slabs without destroying the staged values. Inner-node shells a
+        // partial bulk_build may have allocated own no T and are reclaimed by the next
+        // clear()/destructor via release_pools().
         std::vector<leaf_node*> e;
-        uint8_t s1[kArtKeyScratch];
-        uint8_t s2[kArtKeyScratch];
-        for (InputIt it = first; it != last; ++it) {
-            leaf_node* l = make_leaf(*it);
-            // dedup adjacent equal keys (sorted input): last wins
-            if (!e.empty() && view_eq(leaf_key(e.back(), s1), leaf_key(l, s2))) {
-                free_leaf(e.back());
-                e.back() = l;
-            } else {
-                e.push_back(l);
+        leaf_node* pending = nullptr;
+        try {
+            uint8_t s1[kArtKeyScratch];
+            uint8_t s2[kArtKeyScratch];
+            for (InputIt it = first; it != last; ++it) {
+                pending = make_leaf(*it);
+                // dedup adjacent equal keys (sorted input): last wins
+                if (!e.empty() && view_eq(leaf_key(e.back(), s1), leaf_key(pending, s2))) {
+                    free_leaf(e.back());
+                    e.back() = pending;
+                } else {
+                    e.push_back(pending);  // may throw before `pending` is owned by `e`
+                }
+                pending = nullptr;
             }
+            if (e.empty()) return;
+            // Precompute each leaf's encoded key once into a stable buffer (avoids
+            // re-encoding fixed keys on every comparison during the build).
+            std::size_t n = e.size();
+            std::vector<art_key_view> views(n);
+            std::vector<uint8_t> blob;
+            if constexpr (encoder::fixed) {
+                blob.resize(n * (encoder::bound ? encoder::bound : 1));
+                for (std::size_t i = 0; i < n; ++i)
+                    views[i] = leaf_key(e[i], blob.data() + i * encoder::bound);
+            } else {
+                uint8_t dummy[kArtKeyScratch];
+                for (std::size_t i = 0; i < n; ++i) views[i] = leaf_key(e[i], dummy);
+            }
+            _root = bulk_build(e.data(), views.data(), 0, n, 0);
+            _size = n;
+        } catch (...) {
+            if (pending) free_leaf(pending);
+            for (leaf_node* l : e) free_leaf(l);
+            throw;
         }
-        if (e.empty()) return;
-        // Precompute each leaf's encoded key once into a stable buffer (avoids
-        // re-encoding fixed keys on every comparison during the build).
-        std::size_t n = e.size();
-        std::vector<art_key_view> views(n);
-        std::vector<uint8_t> blob;
-        if constexpr (encoder::fixed) {
-            blob.resize(n * (encoder::bound ? encoder::bound : 1));
-            for (std::size_t i = 0; i < n; ++i)
-                views[i] = leaf_key(e[i], blob.data() + i * encoder::bound);
-        } else {
-            uint8_t dummy[kArtKeyScratch];
-            for (std::size_t i = 0; i < n; ++i) views[i] = leaf_key(e[i], dummy);
-        }
-        _root = bulk_build(e.data(), views.data(), 0, n, 0);
-        _size = n;
     }
 
     iterator erase(const_iterator pos) {
