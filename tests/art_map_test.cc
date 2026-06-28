@@ -661,6 +661,32 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
         }
         CHECK(saw_throw);
     }
+
+    SUBCASE("erase whose shrink allocation fails still removes the element") {
+        Map m;
+        g_throw_ctl().remaining = -1;
+        // bulk_load builds a node16 directly (5 runs), so the node4 pool stays empty and
+        // the shrink-on-erase make4() is the very next slab allocation we can force to fail.
+        std::vector<std::pair<const std::string, int>> data = {
+          {"a", 1}, {"b", 2}, {"c", 3}, {"d", 4}, {"e", 5}};
+        m.bulk_load(data.begin(), data.end());
+        CHECK_EQ(m.size(), 5);
+
+        g_throw_ctl().remaining = 0;  // next slab allocation (the shrink's make4) throws
+        CHECK_NOTHROW(m.erase("a"));  // erase must succeed despite the failed shrink
+        // The counter is reset to -1 only when a throw actually fires, so this confirms the
+        // shrink allocation really was attempted and failed (the path under test).
+        CHECK_EQ(g_throw_ctl().remaining, -1);
+        g_throw_ctl().remaining = -1;
+
+        CHECK_EQ(m.size(), 4);
+        CHECK_FALSE(m.contains("a"));
+        for (const char* k : {"b", "c", "d", "e"}) CHECK(m.contains(k));
+        // the map (with the un-shrunk node) is still fully usable
+        m["f"] = 6;
+        CHECK_EQ(m.at("f"), 6);
+        CHECK_EQ(m.size(), 5);
+    }
 }
 
 }  // namespace stdb::container

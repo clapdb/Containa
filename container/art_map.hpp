@@ -258,7 +258,14 @@ class art_map
             }
             if (left == 0) {
                 slot* c = a.allocate(kPer);
-                chunks.push_back(c);
+                // Record the slab before using it: if push_back grows `chunks` and throws,
+                // `c` is untracked and release_all() would never free it. Hand it back.
+                try {
+                    chunks.push_back(c);
+                } catch (...) {
+                    a.deallocate(c, kPer);
+                    throw;
+                }
                 cur = c;
                 left = kPer;
             }
@@ -1072,7 +1079,15 @@ class art_map
             case nkind::n16: {
                 auto* p = static_cast<node16*>(in);
                 if (p->nchild > 4) return in;
-                node4* g = make4();
+                // Shrinking is a best-effort compaction that runs after the element is
+                // already removed; if the replacement can't be allocated, keep the larger
+                // node (still valid) rather than failing an erase that already succeeded.
+                node4* g;
+                try {
+                    g = make4();
+                } catch (...) {
+                    return in;
+                }
                 copy_header(g, p);
                 for (uint8_t i = 0; i < p->nchild; ++i) {
                     g->keys[i] = p->keys[i];
@@ -1085,7 +1100,12 @@ class art_map
             case nkind::n48: {
                 auto* p = static_cast<node48*>(in);
                 if (p->nchild > 12) return in;
-                node16* g = make16();
+                node16* g;  // best-effort shrink (see node16 case)
+                try {
+                    g = make16();
+                } catch (...) {
+                    return in;
+                }
                 copy_header(g, p);
                 uint8_t i = 0;
                 for (int b = 0; b < 256; ++b)
@@ -1101,7 +1121,12 @@ class art_map
             case nkind::n256: {
                 auto* p = static_cast<node256*>(in);
                 if (p->nchild > 37) return in;
-                node48* g = make48();
+                node48* g;  // best-effort shrink (see node16 case)
+                try {
+                    g = make48();
+                } catch (...) {
+                    return in;
+                }
                 copy_header(g, p);
                 uint8_t i = 0;
                 for (int b = 0; b < 256; ++b)
