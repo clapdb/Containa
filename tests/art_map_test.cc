@@ -365,6 +365,15 @@ TEST_CASE("art_map::move_assign_allocator_aware") {
         CHECK_EQ(d.size(), 1500);
         for (int i = 0; i < 1500; ++i) CHECK_EQ(d.at(i), i);
     }
+    SUBCASE("copy ctor selects allocator (no dangling source resource)") {
+        art_map<int, int, PA> src(PA{&r1});
+        for (int i = 0; i < 1000; ++i) src[i] = i;
+        art_map<int, int, PA> cp = src;  // must NOT retain &r1
+        CHECK(cp.get_allocator().resource() != &r1);
+        CHECK(cp.get_allocator().resource() == std::pmr::get_default_resource());
+        CHECK_EQ(cp.size(), 1000);
+        for (int i = 0; i < 1000; ++i) CHECK_EQ(cp.at(i), i);
+    }
 }
 
 // Differential test against std::map as oracle.

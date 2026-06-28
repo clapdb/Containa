@@ -685,7 +685,9 @@ class art_map
         for (const auto& v : init) insert(v);
     }
 
-    art_map(const art_map& other) : _alloc(other._alloc) {
+    art_map(const art_map& other)
+        : _alloc(std::allocator_traits<Allocator>::select_on_container_copy_construction(
+              other._alloc)) {
         if (other._root) _root = clone(other._root);
         _size = other._size;
     }

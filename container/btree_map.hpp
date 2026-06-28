@@ -6117,11 +6117,13 @@ public:
         }
     }
 
-    // Insert node handle (C++17)
-    // Constrained to node_type so a braced-init-list (e.g. insert({1, "one"})) cannot
-    // match this overload — it can only deduce to value_type's insert overloads.
+    // Insert node handle (C++17). Constrained so a braced-init-list (e.g.
+    // insert({1, "one"})) cannot match — only value_type's overloads can — while
+    // staying rvalue-only: requiring NH == node_type (not remove_cvref) deduces to
+    // the bare type only for rvalue arguments, so a named lvalue handle is rejected
+    // (the caller must std::move it), matching std::map's insert(node_type&&).
     template <typename NH>
-        requires std::is_same_v<std::remove_cvref_t<NH>, node_type>
+        requires std::is_same_v<NH, node_type>
     auto insert(NH&& nh) -> insert_return_type {
         if (nh.empty()) {
             return {end(), false, std::move(nh)};
