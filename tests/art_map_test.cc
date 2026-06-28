@@ -687,6 +687,31 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
         CHECK_EQ(m.at("f"), 6);
         CHECK_EQ(m.size(), 5);
     }
+
+    SUBCASE("insert returning a deep iterator path (beyond inline stack) is correct") {
+        art_map<std::string, int> m;  // default allocator
+        const int L = 40;
+        const std::string base(L, 'a');
+        // Force a branch at every depth so the route to `base` has ~L inner nodes — more
+        // than the iterator stack's inline capacity (16) — exercising the up-front path
+        // reserve in do_insert.
+        for (int p = 0; p < L; ++p) m[base.substr(0, p) + "b"] = p;
+
+        auto res = m.insert({base, 999});
+        CHECK(res.second);
+        REQUIRE(res.first != m.end());
+        CHECK_EQ(res.first->first, base);
+        CHECK_EQ(res.first->second, 999);
+
+        // a re-insert (no structural change) must also return a valid deep iterator
+        auto res2 = m.insert({base, 111});
+        CHECK_FALSE(res2.second);
+        REQUIRE(res2.first != m.end());
+        CHECK_EQ(res2.first->second, 999);
+
+        // the returned iterator is positioned: it can walk forward over the siblings
+        CHECK_EQ(std::next(res.first) != m.end(), true);
+    }
 }
 
 }  // namespace stdb::container

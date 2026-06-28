@@ -1451,6 +1451,12 @@ class art_map
     leaf_node* do_insert(const Key& key, bool& inserted, MakeLeaf&& mk, iterator* path = nullptr) {
         ekey kc(key);
         art_key_view kv = kc.view;
+        // The path frames are pushed as the tree is mutated below — some after end_leaf/
+        // _size have already been committed. Reserve the stack up front (one frame per
+        // inner node on the route, each consuming >= 1 key byte, so kv.len + 1 bounds it)
+        // so those push() calls cannot allocate and throw. Reserving before any mutation
+        // keeps insert() strongly exception-safe: a throw here leaves the tree untouched.
+        if (path) path->_stack.reserve(static_cast<std::size_t>(kv.len) + 1);
         node** ref = &_root;
         uint32_t depth = 0;
         while (true) {
