@@ -753,6 +753,35 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
         CHECK_EQ(m.size(), 2);
         CHECK_EQ(m.at(42).v, 42);
     }
+
+    SUBCASE("a long-prefix split whose mid-chain node allocation fails stays consistent") {
+        // A shared prefix long enough that split_leaf's node4 chain spans more than one
+        // 512-slot pool slab, so a make4() partway through the chain hits a fresh slab we
+        // can force to fail while earlier shells are already staged in `head`.
+        const std::string pre(5000, 'z');
+        const std::string k1 = pre + "A";
+        const std::string k2 = pre + "B";
+        using IMap = art_map<std::string, int, throwing_alloc<std::pair<const std::string, int>>>;
+        IMap m;
+        g_throw_ctl().remaining = -1;
+        m[k1] = 1;  // single leaf; node4 pool still empty
+
+        g_throw_ctl().remaining = 1;  // first node4 slab succeeds, the mid-chain second fails
+        CHECK_THROWS_AS(m.insert({k2, 2}), std::bad_alloc);
+        g_throw_ctl().remaining = -1;
+
+        // The existing entry is untouched and the map stays usable; the staged chain shells
+        // were returned to the pool (verified clean under ASAN — no leak/UAF/double-free),
+        // so the retry below reuses them and succeeds.
+        CHECK_EQ(m.size(), 1);
+        CHECK(m.contains(k1));
+        CHECK_FALSE(m.contains(k2));
+
+        m[k2] = 2;  // retry now succeeds
+        CHECK_EQ(m.size(), 2);
+        CHECK_EQ(m.at(k1), 1);
+        CHECK_EQ(m.at(k2), 2);
+    }
 }
 
 }  // namespace stdb::container

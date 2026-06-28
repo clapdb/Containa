@@ -1576,36 +1576,50 @@ class art_map
         node* head = nullptr;
         node** cur = &head;
         uint32_t d = depth;
-        while (true) {
-            node4* nd = make4();
-            uint8_t chunk = static_cast<uint8_t>(std::min<uint32_t>(s - d, kCap));
-            nd->plen = chunk;
-            if (chunk) std::memcpy(nd->prefix, kv.ptr + d, chunk);
-            *cur = nd;
-            d += chunk;
-            if (d == s) {
-                if (d == lv.len) {
-                    nd->end_leaf = old;
-                } else {
-                    add_child(nd, lv.ptr[d], old);
+        try {
+            while (true) {
+                node4* nd = make4();
+                uint8_t chunk = static_cast<uint8_t>(std::min<uint32_t>(s - d, kCap));
+                nd->plen = chunk;
+                if (chunk) std::memcpy(nd->prefix, kv.ptr + d, chunk);
+                *cur = nd;
+                d += chunk;
+                if (d == s) {
+                    if (d == lv.len) {
+                        nd->end_leaf = old;
+                    } else {
+                        add_child(nd, lv.ptr[d], old);
+                    }
+                    if (d == kv.len) {
+                        nd->end_leaf = nl;
+                    } else {
+                        add_child(nd, kv.ptr[d], nl);
+                    }
+                    if (path) {
+                        path->push(nd, d == kv.len ? -1 : static_cast<int>(kv.ptr[d]));
+                        path->_leaf = nl;
+                    }
+                    *ref = head;  // publish the completed chain atomically
+                    return;
                 }
-                if (d == kv.len) {
-                    nd->end_leaf = nl;
-                } else {
-                    add_child(nd, kv.ptr[d], nl);
-                }
-                if (path) {
-                    path->push(nd, d == kv.len ? -1 : static_cast<int>(kv.ptr[d]));
-                    path->_leaf = nl;
-                }
-                *ref = head;  // publish the completed chain atomically
-                return;
+                // bytes still shared at d: single child, continue chain
+                uint8_t b = kv.ptr[d];
+                if (path) path->push(nd, b);
+                cur = add_child4_slot(nd, b);
+                ++d;
             }
-            // bytes still shared at d: single child, continue chain
-            uint8_t b = kv.ptr[d];
-            if (path) path->push(nd, b);
-            cur = add_child4_slot(nd, b);
-            ++d;
+        } catch (...) {
+            // make4() threw mid-chain. The staged nodes are reachable only through `head`
+            // (the divergence point — where old/nl/end_leaf are attached — was not reached,
+            // so the chain holds no leaves); free those node4 shells so they don't leak pool
+            // slots. *ref is untouched, and do_insert frees the new leaf.
+            for (node* p = head; p != nullptr;) {
+                auto* n4 = static_cast<node4*>(p);
+                node* nxt = n4->nchild > 0 ? n4->child[0] : nullptr;  // single-child links
+                free_shell(n4);
+                p = nxt;
+            }
+            throw;
         }
     }
 
