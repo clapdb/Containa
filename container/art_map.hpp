@@ -95,9 +95,9 @@ struct art_key_encoder<Key, std::enable_if_t<std::is_integral_v<Key> && std::is_
     }
 };
 
-// --- floating point ----------------------------------------------------------
+// --- floating point (storage-sized: float/double; excludes 80-bit long double) -
 template <typename Key>
-struct art_key_encoder<Key, std::enable_if_t<std::is_floating_point_v<Key>>>
+struct art_key_encoder<Key, std::enable_if_t<std::is_floating_point_v<Key> && sizeof(Key) <= 8>>
 {
     using U = std::conditional_t<sizeof(Key) == 4, uint32_t, uint64_t>;
     static constexpr bool fixed = true;
@@ -709,9 +709,17 @@ class art_map
         }
         return *this;
     }
-    art_map& operator=(art_map&& other) noexcept {
-        if (this != &other) {
+    art_map& operator=(art_map&& other) noexcept(
+        std::allocator_traits<Allocator>::propagate_on_container_move_assignment::value ||
+        std::allocator_traits<Allocator>::is_always_equal::value) {
+        if (this == &other) return *this;
+        constexpr bool pocma =
+            std::allocator_traits<Allocator>::propagate_on_container_move_assignment::value;
+        if (pocma || _alloc == other._alloc) {
+            // Safe to steal the source's slabs: either we adopt its allocator, or
+            // the two allocators are interchangeable.
             clear();
+            if constexpr (pocma) _alloc = std::move(other._alloc);
             _root = other._root;
             _size = other._size;
             _pool4 = std::move(other._pool4);
@@ -721,6 +729,19 @@ class art_map
             _poolL = std::move(other._poolL);
             other._root = nullptr;
             other._size = 0;
+        } else {
+            // Unequal, non-propagating allocators (e.g. distinct PMR resources):
+            // the source's slabs must not be freed by our allocator. Move elements
+            // individually using this map's allocator.
+            clear();
+            for (auto it = other.begin(); it != other.end(); ++it) {
+                bool inserted = false;
+                do_insert(it->first, inserted, [&] {
+                    return make_leaf(std::piecewise_construct, std::forward_as_tuple(it->first),
+                                     std::forward_as_tuple(std::move(it->second)));
+                });
+            }
+            other.clear();
         }
         return *this;
     }

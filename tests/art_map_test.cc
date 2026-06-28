@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <memory_resource>
 #include <random>
 #include <string>
 #include <vector>
@@ -337,6 +338,33 @@ TEST_CASE("art_map::move_then_reuse_source") {
     CHECK_EQ(c.size(), 5000);
     b[7] = 7;  // reuse moved-from
     CHECK(b.contains(7));
+}
+
+// Regression (review P2): move assignment across unequal, non-propagating
+// allocators (distinct PMR resources) must move elements, not steal slabs.
+TEST_CASE("art_map::move_assign_allocator_aware") {
+    using PA = std::pmr::polymorphic_allocator<std::pair<const int, int>>;
+    std::pmr::monotonic_buffer_resource r1, r2;
+
+    SUBCASE("unequal allocators -> element-wise move") {
+        art_map<int, int, PA> a(PA{&r1});
+        for (int i = 0; i < 2000; ++i) a[i] = i * 3;
+        art_map<int, int, PA> b(PA{&r2});
+        b[42] = -1;
+        b = std::move(a);
+        CHECK_EQ(b.size(), 2000);
+        for (int i = 0; i < 2000; ++i) CHECK_EQ(b.at(i), i * 3);
+        a.clear();  // moved-from is reusable
+        a[7] = 7;
+        CHECK(a.contains(7));
+    }
+    SUBCASE("equal allocators -> steal") {
+        art_map<int, int, PA> c(PA{&r1}), d(PA{&r1});
+        for (int i = 0; i < 1500; ++i) c[i] = i;
+        d = std::move(c);
+        CHECK_EQ(d.size(), 1500);
+        for (int i = 0; i < 1500; ++i) CHECK_EQ(d.at(i), i);
+    }
 }
 
 // Differential test against std::map as oracle.
