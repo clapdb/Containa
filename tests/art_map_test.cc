@@ -293,6 +293,52 @@ TEST_CASE("art_map::erase_cascade_long_prefix") {
     }
 }
 
+// Regression (review P1): a node256 holding all 256 byte values must not let its
+// child count wrap; erasing a sibling end_leaf must not free the full node.
+TEST_CASE("art_map::node256_full_with_end_leaf") {
+    art_map<std::string, int> m;
+    m[""] = -1;  // ends at root -> end_leaf
+    for (int b = 0; b < 256; ++b) {
+        std::string k(1, static_cast<char>(b));  // 256 distinct first bytes -> root node256
+        m[k] = b;
+    }
+    CHECK_EQ(m.size(), 257);
+    CHECK_EQ(m.erase(""), 1);  // remove the end_leaf from the (full) node256
+    CHECK_EQ(m.size(), 256);
+    for (int b = 0; b < 256; ++b) {
+        std::string k(1, static_cast<char>(b));
+        REQUIRE(m.contains(k));
+        CHECK_EQ(m.at(k), b);
+    }
+    // erase them all; tree must end empty and consistent
+    for (int b = 0; b < 256; ++b) CHECK_EQ(m.erase(std::string(1, static_cast<char>(b))), 1);
+    CHECK(m.empty());
+}
+
+// Regression (review P2): a moved-from map must be reusable without corruption.
+TEST_CASE("art_map::move_then_reuse_source") {
+    art_map<int, int> a;
+    for (int i = 0; i < 5000; ++i) a[i] = i;
+    art_map<int, int> b = std::move(a);
+    CHECK_EQ(b.size(), 5000);
+    CHECK(a.empty());
+    // reuse the moved-from source: must allocate fresh, not into b's slabs
+    for (int i = 0; i < 5000; ++i) a[i] = i * 2;
+    CHECK_EQ(a.size(), 5000);
+    for (int i = 0; i < 5000; ++i) CHECK_EQ(a.at(i), i * 2);
+    // both independent
+    CHECK_EQ(b.at(10), 10);
+    a.clear();
+    CHECK_EQ(b.size(), 5000);  // b unaffected by a's destruction path
+
+    // move assignment variant
+    art_map<int, int> c;
+    c = std::move(b);
+    CHECK_EQ(c.size(), 5000);
+    b[7] = 7;  // reuse moved-from
+    CHECK(b.contains(7));
+}
+
 // Differential test against std::map as oracle.
 TEST_CASE("art_map::differential_vs_std_map") {
     SUBCASE("int keys, insert/erase churn") {

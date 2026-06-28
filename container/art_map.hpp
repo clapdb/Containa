@@ -169,7 +169,7 @@ class art_map
 
     struct inner : node
     {
-        uint8_t nchild;
+        uint16_t nchild;  // up to 256 (node256 holds all byte values) — must not wrap
         uint8_t plen;
         uint8_t prefix[kCap];
         node* end_leaf;  // leaf whose key ends exactly at this node (prefix-of case)
@@ -221,6 +221,27 @@ class art_map
         slot* cur = nullptr;
         std::size_t left = 0;
         small_vectra<slot*, 8> chunks;
+
+        node_pool() = default;
+        // Moving must leave the source fully reset: otherwise its freelist/cur
+        // still point into slabs now owned by the destination (use-after-free if
+        // the moved-from map is reused).
+        node_pool(node_pool&& o) noexcept
+            : freelist(o.freelist), cur(o.cur), left(o.left), chunks(std::move(o.chunks)) {
+            o.freelist = nullptr;
+            o.cur = nullptr;
+            o.left = 0;
+        }
+        node_pool& operator=(node_pool&& o) noexcept {
+            freelist = o.freelist;
+            cur = o.cur;
+            left = o.left;
+            chunks = std::move(o.chunks);
+            o.freelist = nullptr;
+            o.cur = nullptr;
+            o.left = 0;
+            return *this;
+        }
 
         template <typename A>
         NT* allocate(A& a) {
@@ -400,7 +421,7 @@ class art_map
                 auto* p = static_cast<node4*>(n);
                 uint8_t pos = 0;
                 while (pos < p->nchild && p->keys[pos] < b) ++pos;
-                for (uint8_t i = p->nchild; i > pos; --i) {
+                for (uint8_t i = static_cast<uint8_t>(p->nchild); i > pos; --i) {
                     p->keys[i] = p->keys[i - 1];
                     p->child[i] = p->child[i - 1];
                 }
@@ -413,7 +434,7 @@ class art_map
                 auto* p = static_cast<node16*>(n);
                 uint8_t pos = 0;
                 while (pos < p->nchild && p->keys[pos] < b) ++pos;
-                for (uint8_t i = p->nchild; i > pos; --i) {
+                for (uint8_t i = static_cast<uint8_t>(p->nchild); i > pos; --i) {
                     p->keys[i] = p->keys[i - 1];
                     p->child[i] = p->child[i - 1];
                 }
@@ -424,7 +445,7 @@ class art_map
             }
             case nkind::n48: {
                 auto* p = static_cast<node48*>(n);
-                uint8_t slot = p->nchild;
+                uint8_t slot = static_cast<uint8_t>(p->nchild);
                 p->child[slot] = c;
                 p->cindex[b] = static_cast<uint8_t>(slot + 1);
                 ++p->nchild;
@@ -445,7 +466,7 @@ class art_map
     static node** add_child4_slot(node4* p, uint8_t b) {
         uint8_t pos = 0;
         while (pos < p->nchild && p->keys[pos] < b) ++pos;
-        for (uint8_t i = p->nchild; i > pos; --i) {
+        for (uint8_t i = static_cast<uint8_t>(p->nchild); i > pos; --i) {
             p->keys[i] = p->keys[i - 1];
             p->child[i] = p->child[i - 1];
         }
