@@ -276,6 +276,24 @@ TEST_CASE("art_map::signed_and_float_ordering") {
             prev = kv.first;
         }
     }
+    SUBCASE("negative zero is the same key as positive zero") {
+        art_map<double, int> m;
+        m.insert({-0.0, 1});
+        m.insert({0.0, 2});  // -0.0 == 0.0: same key, so insert is a no-op (first write wins)
+        CHECK_EQ(m.size(), 1);
+        auto it = m.find(0.0);
+        REQUIRE(it != m.end());
+        CHECK_EQ(it->second, 1);
+        CHECK(m.find(-0.0) != m.end());  // both signs locate the single entry
+    }
+    SUBCASE("negative zero is the same key as positive zero (float, operator[] overwrites)") {
+        art_map<float, int> m;
+        m[-0.0F] = 1;
+        m[0.0F] = 2;  // operator[] on the same key overwrites
+        CHECK_EQ(m.size(), 1);
+        CHECK_EQ(m[0.0F], 2);
+        CHECK_EQ(m[-0.0F], 2);
+    }
 }
 
 // Regression: erasing keys that share a prefix longer than the path-compression

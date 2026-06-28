@@ -105,6 +105,12 @@ struct art_key_encoder<Key, std::enable_if_t<std::is_floating_point_v<Key> && si
     static art_key_view encode(const Key& k, uint8_t* scratch) {
         U bits;
         std::memcpy(&bits, &k, sizeof(Key));
+        // IEEE -0.0 and +0.0 compare equal but have distinct bit patterns; collapse -0.0
+        // to the +0.0 representation so both encode to the same key and the map treats
+        // them as one entry (otherwise insert({-0.0, ...}) and insert({0.0, ...}) coexist).
+        if (k == Key(0)) {
+            bits = 0;
+        }
         U mask = (bits >> (sizeof(Key) * 8 - 1)) ? ~U(0) : (U(1) << (sizeof(Key) * 8 - 1));
         bits ^= mask;
         for (std::size_t i = 0; i < sizeof(Key); ++i) {
