@@ -784,4 +784,35 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
     }
 }
 
+TEST_CASE("art_map::pmr_mapped_type_uses_map_resource") {
+    using PV = std::pair<const int, std::pmr::string>;
+    using PMap = art_map<int, std::pmr::string, std::pmr::polymorphic_allocator<PV>>;
+    // A string long enough to force a heap allocation (beyond the SSO buffer); that heap
+    // block must come from the map's resource, not the default one.
+    const char* long_str = "the quick brown fox jumps over the lazy dog 0123456789abcdef";
+
+    std::pmr::monotonic_buffer_resource res;
+    PMap m{std::pmr::polymorphic_allocator<PV>{&res}};
+
+    SUBCASE("try_emplace constructs the value on the map resource") {
+        m.try_emplace(1, long_str);
+        auto it = m.find(1);
+        REQUIRE(it != m.end());
+        CHECK_EQ(it->second.get_allocator().resource(), &res);
+        CHECK_EQ(it->second, std::pmr::string(long_str));
+    }
+    SUBCASE("operator[] then assign keeps the value on the map resource") {
+        m[2] = long_str;
+        auto it = m.find(2);
+        REQUIRE(it != m.end());
+        CHECK_EQ(it->second.get_allocator().resource(), &res);
+    }
+    SUBCASE("insert of a value moves it onto the map resource") {
+        m.insert(PV{3, std::pmr::string(long_str)});
+        auto it = m.find(3);
+        REQUIRE(it != m.end());
+        CHECK_EQ(it->second.get_allocator().resource(), &res);
+    }
+}
+
 }  // namespace stdb::container
