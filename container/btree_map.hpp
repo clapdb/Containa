@@ -6118,7 +6118,11 @@ public:
     }
 
     // Insert node handle (C++17)
-    auto insert(node_type&& nh) -> insert_return_type {
+    // Constrained to node_type so a braced-init-list (e.g. insert({1, "one"})) cannot
+    // match this overload — it can only deduce to value_type's insert overloads.
+    template <typename NH>
+        requires std::is_same_v<std::remove_cvref_t<NH>, node_type>
+    auto insert(NH&& nh) -> insert_return_type {
         if (nh.empty()) {
             return {end(), false, std::move(nh)};
         }
