@@ -204,8 +204,13 @@ class art_map
     struct leaf_node : node
     {
         value_type kv;
-        template <typename... Args>
-        explicit leaf_node(Args&&... args) : kv(std::forward<Args>(args)...) {}
+        // Build kv with uses-allocator construction so an allocator-aware Key/T (e.g. a PMR
+        // mapped_type) receives the map allocator. Constructing kv inside the leaf_node
+        // constructor starts the enclosing object's lifetime properly; guaranteed copy
+        // elision builds kv in place (no extra move).
+        template <typename Alloc, typename... Args>
+        leaf_node(std::allocator_arg_t, const Alloc& a, Args&&... args)
+            : kv(std::make_obj_using_allocator<value_type>(a, std::forward<Args>(args)...)) {}
     };
 
     template <typename U>
@@ -343,15 +348,13 @@ class art_map
     template <typename... Args>
     leaf_node* make_leaf(Args&&... args) {
         auto* p = pool_new(_poolL);
-        // Construct the stored pair through the map allocator so uses-allocator construction
-        // reaches an allocator-aware Key/T: e.g. a PMR mapped_type gets the map's
-        // memory_resource instead of the default one (the slab itself already uses the map
-        // allocator, but a direct placement-new would not propagate it to the value).
-        // On a throwing key/value constructor, return the raw slot to the free list
-        // (nothing was constructed) so repeated failed inserts don't keep growing slabs.
+        // Start the leaf_node lifetime via its constructor (it builds kv through the map
+        // allocator, so uses-allocator construction reaches an allocator-aware Key/T — e.g.
+        // a PMR mapped_type gets the map's resource rather than the default one). On a
+        // throwing key/value constructor, return the raw slot to the free list (nothing was
+        // constructed) so repeated failed inserts don't keep growing the slab list.
         try {
-            std::allocator_traits<Allocator>::construct(_alloc, std::addressof(p->kv),
-                                                        std::forward<Args>(args)...);
+            ::new (static_cast<void*>(p)) leaf_node(std::allocator_arg, _alloc, std::forward<Args>(args)...);
         } catch (...) {
             _poolL.deallocate(p);
             throw;
@@ -360,9 +363,7 @@ class art_map
         return p;
     }
     void free_leaf(leaf_node* l) {
-        // Symmetric with make_leaf: destroy the value through the allocator. The node base
-        // is trivially destructible, so destroying `kv` is the whole leaf.
-        std::allocator_traits<Allocator>::destroy(_alloc, std::addressof(l->kv));
+        l->~leaf_node();
         _poolL.deallocate(l);
     }
     void free_shell(node4* p) { _pool4.deallocate(p); }
