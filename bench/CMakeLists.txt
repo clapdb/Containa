@@ -68,6 +68,15 @@ if(ENABLE_ABSL_BENCH)
     message(STATUS "Building Abseil btree comparison benchmarks")
 endif()
 
+# Adaptive Radix Tree benchmark (vs btree_map, with optional Abseil comparison)
+add_executable(art_bench art_bench.cc)
+target_compile_definitions(art_bench PRIVATE NDEBUG)
+target_link_libraries(art_bench nanobench)
+if(ENABLE_ABSL_BENCH)
+    target_compile_definitions(art_bench PRIVATE ENABLE_ABSL)
+    target_link_libraries(art_bench absl::btree absl::flat_hash_map absl::hash)
+endif()
+
 # PMR allocator benchmark
 option(ENABLE_PMR_BENCH "Enable PMR allocator benchmark" ON)
 if(ENABLE_PMR_BENCH)
