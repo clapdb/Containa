@@ -2006,6 +2006,10 @@ class art_map
         } catch (...) {
             if (pending) free_leaf(pending);
             for (leaf_node* l : e) free_leaf(l);
+            // bulk_build may have allocated inner shells (now orphaned, _root still
+            // null). Release the slabs so a failed load leaves a clean empty map
+            // rather than retaining consumed slots until the next clear()/destroy.
+            release_pools();
             throw;
         }
     }

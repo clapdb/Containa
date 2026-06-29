@@ -522,6 +522,7 @@ struct throw_ctl
 {
     long remaining = -1;   // -1 = disabled
     long allocations = 0;  // total slab allocations observed (for leak/reuse assertions)
+    long live = 0;         // currently-outstanding slab allocations (released == 0)
 };
 inline throw_ctl& g_throw_ctl() {
     static throw_ctl ctl;
@@ -556,9 +557,13 @@ struct throwing_alloc
             throw std::bad_alloc();
         }
         if (ctl.remaining > 0) --ctl.remaining;
+        ++ctl.live;
         return static_cast<T*>(::operator new(n * sizeof(T)));
     }
-    void deallocate(T* p, std::size_t) noexcept { ::operator delete(p); }
+    void deallocate(T* p, std::size_t) noexcept {
+        --g_throw_ctl().live;
+        ::operator delete(p);
+    }
     template <typename U>
     bool operator==(const throwing_alloc<U>&) const noexcept {
         return true;
@@ -782,6 +787,37 @@ TEST_CASE("art_map::exception_safety_on_copy_and_split") {
         CHECK_EQ(m.at(k1), 1);
         CHECK_EQ(m.at(k2), 2);
     }
+}
+
+// Regression (review): a bulk_load that throws while bulk_build() is allocating
+// inner shells must release those slabs immediately, not retain them until the
+// next clear()/destroy. Sweep the throw point across leaf + shell allocations
+// and assert no slab stays outstanding (live == 0) after a failed load.
+TEST_CASE("art_map::bulk_load_releases_slabs_on_throw") {
+    using Map = art_map<int, int, throwing_alloc<std::pair<const int, int>>>;
+    std::vector<std::pair<const int, int>> kv;
+    for (int i = 0; i < 6000; ++i) kv.push_back({i, i});  // sorted -> a real multi-node tree
+    auto& ctl = g_throw_ctl();
+    bool saw_throw = false;
+    for (long arm = 1; arm <= 60; ++arm) {
+        ctl.remaining = -1;
+        ctl.live = 0;
+        Map m;  // empty: no allocations yet
+        ctl.remaining = arm;
+        bool threw = false;
+        try {
+            m.bulk_load(kv.begin(), kv.end());
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        ctl.remaining = -1;
+        if (threw) {
+            saw_throw = true;
+            CHECK(m.empty());
+            CHECK_EQ(ctl.live, 0);  // every slab (leaves + orphaned shells) released
+        }
+    }
+    CHECK(saw_throw);
 }
 
 TEST_CASE("art_map::pmr_mapped_type_uses_map_resource") {
