@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -405,7 +406,7 @@ class art_map
                 __m128i keys = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p->keys));
                 unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(_mm_cmpeq_epi8(target, keys)));
                 mask &= (p->nchild >= 16) ? 0xFFFFu : ((1u << p->nchild) - 1u);
-                return mask ? &p->child[__builtin_ctz(mask)] : nullptr;
+                return mask ? &p->child[std::countr_zero(mask)] : nullptr;
 #else
                 for (uint8_t i = 0; i < p->nchild; ++i)
                     if (p->keys[i] == b) return &p->child[i];
