@@ -110,6 +110,10 @@ endif()
 
 
 # Add submodules
+# ctest registers nothing without this, and `ctest` with nothing registered exits 0 -- which is how CI
+# stayed green while never running a test. See tests/CMakeLists.txt.
+enable_testing()
+
 add_subdirectory(doctest)
 add_subdirectory(tests)
 add_subdirectory(bench)

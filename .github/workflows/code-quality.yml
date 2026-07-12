@@ -69,10 +69,23 @@ jobs:
         grep -v -E "(doctest|nanobench|build\.|third_party|external)" | \
         xargs clang-format --dry-run --style=file || true
 
-  memory-sanitizer:
+  # This job existed and was green, and like the rest of CI it was green on nothing: `cmake --build .`
+  # skips EXCLUDE_FROM_ALL targets, so the sanitizers were never pointed at a single test. Had they
+  # been, ASan alone would have handed over the btree_multimap SIGSEGV (heap-buffer-overflow reading a
+  # leaf past its keys) and the dense_map use-after-free (hashing string_views into a reallocated
+  # vector), and TSan the skiplist's concurrent-erase double-claim.
+  sanitizers:
+    name: Sanitizer / ${{ matrix.san }}
     runs-on: ubuntu-latest
-    name: Memory Sanitizer
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - san: address,undefined
+            env: ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          - san: thread
+            env: TSAN_OPTIONS=halt_on_error=1
+
     steps:
     - uses: actions/checkout@v7
       with:
@@ -83,20 +96,16 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
 
-    - name: Configure CMake with sanitizers
+    - name: Configure
       run: |
-        mkdir -p build.sanitizer
-        cd build.sanitizer
-        cmake .. -DCMAKE_BUILD_TYPE=Debug \
-                 -DCMAKE_CXX_COMPILER=clang++ \
-                 -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fno-omit-frame-pointer"
+        cmake -S . -B build.sanitizer \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_CXX_FLAGS="-stdlib=libc++ -g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer"
 
-    - name: Build with sanitizers
-      run: |
-        cd build.sanitizer
-        cmake --build . -j$(nproc)
+    - name: Build tests
+      run: cmake --build build.sanitizer --target containa_test -j$(nproc)
 
-    - name: Run tests with sanitizers
+    - name: Run tests
       run: |
-        cd build.sanitizer
-        ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ctest --output-on-failure
+        ${{ matrix.env }} ctest --test-dir build.sanitizer --no-tests=error --output-on-failure
