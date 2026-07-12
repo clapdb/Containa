@@ -1694,6 +1694,12 @@ TEST_CASE("dense_map::string_view_keys") {
     SUBCASE("heterogeneous lookup with string_view") {
         std::vector<std::string> strings;
         dense_map<std::string_view, int> map;
+        // The map keys are string_views into these strings, so the strings must not move. A
+        // vector<string> reallocates on growth and the keys here are short enough for SSO, so the
+        // character data lives inside the string object and moves with it -- every view handed to
+        // the map before a reallocation is left dangling. Reserve up front so the storage is stable,
+        // which is what the first subcase in this test case already does deliberately.
+        strings.reserve(1000);
 
         // Insert many strings to trigger rehashing
         for (int i = 0; i < 1000; ++i) {
@@ -1737,6 +1743,13 @@ TEST_CASE("dense_map::string_view_keys") {
         std::vector<std::string> strings;
         dense_map<std::string_view, int> map;
 
+        // The map keys are string_views into these strings, so the strings must not move. A
+        // vector<string> reallocates on growth and the keys here are short enough for SSO, so the
+        // character data lives inside the string object and moves with it -- every view handed to
+        // the map before a reallocation is left dangling. Reserve up front so the storage is stable,
+        // which is what the first subcase in this test case already does deliberately.
+        strings.reserve(100);
+
         // Small initial capacity to force rehashing
         map.reserve(4);
 
@@ -1756,6 +1769,12 @@ TEST_CASE("dense_map::string_view_keys") {
     SUBCASE("erase and find with string_view") {
         std::vector<std::string> strings;
         dense_map<std::string_view, int> map;
+        // The map keys are string_views into these strings, so the strings must not move. A
+        // vector<string> reallocates on growth and the keys here are short enough for SSO, so the
+        // character data lives inside the string object and moves with it -- every view handed to
+        // the map before a reallocation is left dangling. Reserve up front so the storage is stable,
+        // which is what the first subcase in this test case already does deliberately.
+        strings.reserve(50);
 
         for (int i = 0; i < 50; ++i) {
             strings.push_back("erase_key_" + std::to_string(i));
@@ -1801,6 +1820,12 @@ TEST_CASE("dense_map::string_view_keys") {
     SUBCASE("stress test with many string_view keys") {
         std::vector<std::string> strings;
         dense_map<std::string_view, int> map;
+        // The map keys are string_views into these strings, so the strings must not move. A
+        // vector<string> reallocates on growth and the keys here are short enough for SSO, so the
+        // character data lives inside the string object and moves with it -- every view handed to
+        // the map before a reallocation is left dangling. Reserve up front so the storage is stable,
+        // which is what the first subcase in this test case already does deliberately.
+        strings.reserve(5000);
         std::mt19937 gen(12345);
 
         auto random_string = [&gen](int len) {
