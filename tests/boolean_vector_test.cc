@@ -26,7 +26,7 @@
 using namespace stdb::container;
 
 TEST_SUITE("boolean_vector") {
-    TEST_CASE("construction") {
+    TEST_CASE("boolean_vector::construction") {
         SUBCASE("default constructor") {
             boolean_vector v;
             CHECK(v.size() == 0);

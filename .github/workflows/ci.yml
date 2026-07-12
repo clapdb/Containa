@@ -105,12 +105,32 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
 
+    # CMAKE_CXX_FLAGS_RELEASE, not CMAKE_CXX_FLAGS. CMake puts the per-config flags *after* the generic
+    # ones, and this project's CMakeLists.txt sets CMAKE_CXX_FLAGS_RELEASE to "-O3 -DNDEBUG
+    # -march=native". Passing the matrix -march through CMAKE_CXX_FLAGS produces
+    #
+    #     -march=x86-64-v2 ... -march=native
+    #
+    # and the last one wins, so both matrix entries would compile as -march=native and this job would
+    # test one path twice while claiming to test two. Verified against the generated compile command
+    # rather than assumed.
     - name: Configure
       run: |
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_COMPILER=clang++ \
+          -DCONTAINA_MARCH_NATIVE=OFF \
           -DCMAKE_CXX_FLAGS="-stdlib=libc++ -march=${{ matrix.march }}"
+
+    # Assert it, do not trust it. The first version of this job passed the matrix -march through
+    # CMAKE_CXX_FLAGS and was silently overridden to -march=native by the project's own
+    # CMAKE_CXX_FLAGS_RELEASE, so it tested one path twice while claiming to test two. A matrix that
+    # quietly collapses to one entry is worse than no matrix, because it reads as coverage.
+    - name: Confirm the intended -march actually reached the compiler
+      run: |
+        march=$(grep -o '\-march=[a-z0-9-]*' build/tests/CMakeFiles/containa_test.dir/flags.make | tail -1)
+        echo "compiling with $march"
+        test "$march" = "-march=${{ matrix.march }}"
 
     - name: Build tests
       run: cmake --build build --target containa_test -j$(nproc)

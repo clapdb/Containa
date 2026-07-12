@@ -21,9 +21,25 @@ if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED CMAKE_CXX_COMPILER)
     endif()
 endif()
 
-# Compiler flags
-# Use -march=native to enable AVX2/AVX512 SIMD optimizations
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+# Compiler flags.
+#
+# -march=native is a decree here, not a default: a plain set() overwrites whatever the build asked for,
+# so -DCMAKE_CXX_FLAGS_RELEASE=... on the command line is silently discarded, and a -march in
+# CMAKE_CXX_FLAGS loses too -- CMake appends the per-config flags *after* the generic ones, so the
+# compile line ends up "-march=x86-64-v2 ... -march=native" and the last one wins.
+#
+# That is fine for a developer building on the machine they will run on, and wrong for everything else:
+# a CI job pinning an ISA, a portable release binary, a parent vendoring us. It is also what made the
+# -march matrix in this workflow a no-op -- both entries compiled as -march=native and the job tested one
+# path twice while claiming to test two.
+#
+# So make it an option instead of a decree.
+option(CONTAINA_MARCH_NATIVE "Add -march=native to Release builds" ON)
+if(CONTAINA_MARCH_NATIVE)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+else()
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+endif()
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
 # Use libc++ with Clang for std::flat_map support (requires libc++ installed)
