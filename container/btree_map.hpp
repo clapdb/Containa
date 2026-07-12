@@ -879,10 +879,19 @@ class btree_map
     // 2. Better branch prediction
     // 3. Lower overhead per iteration
     // Returns first position where key >= slot
+    // kMaxSlots, not 32. The literal was simply false -- a node holds up to kMaxSlots entries, and that
+    // is 30 only for btree_map<int,int>. btree_set<int> gets 60, btree_set<int16_t> 120,
+    // btree_set<unsigned char> 240. BTREE_ASSUME compiles to __builtin_unreachable() when the condition
+    // fails, so a populated leaf of any of those was executing an unreachable path.
+    //
+    // It went unnoticed because the SIMD dispatch above used to catch exactly the types with big leaves
+    // before they reached here. It was never actually safe, though -- the dispatch also required
+    // Compare to be std::less, so btree_set<int, std::greater<int>> falls through to this on master and
+    // trips UBSan the same way. Deleting the SIMD search made a latent lie into a universal one.
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_in_slots(
       const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
-        BTREE_ASSUME(count <= 32);
+        BTREE_ASSUME(count <= kMaxSlots);
         for (size_type i = 0; i < count; ++i) {
             if (!_comp(slots[i].first, key)) {
                 return i;
@@ -897,7 +906,7 @@ class btree_map
     [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_in_slots(
       const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
         // Hint to compiler about expected count range (typical btree has 15 slots)
-        BTREE_ASSUME(count <= 32);
+        BTREE_ASSUME(count <= kMaxSlots);
 
         size_type lo = 0;
         size_type hi = count;
@@ -917,7 +926,7 @@ class btree_map
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto linear_search_upper_bound_in_slots(
       const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
-        BTREE_ASSUME(count <= 32);
+        BTREE_ASSUME(count <= kMaxSlots);
         for (size_type i = 0; i < count; ++i) {
             if (_comp(key, slots[i].first)) {  // key < slot
                 return i;
@@ -931,7 +940,7 @@ class btree_map
     template <typename Slots>
     [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_upper_bound_in_slots(
       const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept -> size_type {
-        BTREE_ASSUME(count <= 32);
+        BTREE_ASSUME(count <= kMaxSlots);
 
         size_type lo = 0;
         size_type hi = count;
@@ -953,7 +962,7 @@ class btree_map
     [[nodiscard]] __attribute__((always_inline, flatten)) auto binary_search_three_way(
       const Slots* __restrict__ slots, size_type count, const Key& __restrict__ key) const noexcept
       -> std::pair<size_type, bool> {
-        BTREE_ASSUME(count <= 32);
+        BTREE_ASSUME(count <= kMaxSlots);
 
         size_type lo = 0;
         size_type hi = count;

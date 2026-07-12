@@ -3287,4 +3287,106 @@ TEST_CASE("btree_multimap::differential with string keys") {
     }
 }
 
+
+// linear_search_in_slots() and its four siblings carried `BTREE_ASSUME(count <= 32)`, and a node holds
+// up to kMaxSlots entries -- 30 only for btree_map<int,int>. btree_set<int> gets 60, btree_set<int16_t>
+// 120, btree_set<unsigned char> 240. BTREE_ASSUME compiles to __builtin_unreachable() when the condition
+// is false, so a populated leaf of any of those was executing an unreachable path.
+//
+// It survived because every btree test in this file used int or std::string keys with std::less. Nothing
+// ever instantiated a small key type, and nothing ever instantiated a comparator other than std::less --
+// which is the other way in, because the SIMD dispatch that used to shield this code required std::less
+// too. On master, btree_set<int, std::greater<int>> trips UBSan on exactly this assumption.
+//
+// So: key types whose leaves are wider than 32, comparators the SIMD path never accepted, and enough
+// elements to fill a leaf past 32. Checked against std::set, and run under UBSan in CI.
+TEST_CASE("btree::key types whose leaves hold more than 32 slots") {
+    auto check_against_std_set = [](auto&& tree, auto&& ref, auto make_key, int n, const char* what) {
+        for (int i = 0; i < n; ++i) {
+            auto k = make_key(i);
+            tree.insert(k);
+            ref.insert(k);
+        }
+        INFO(what, " n=", n);
+        REQUIRE_EQ(tree.size(), ref.size());
+        for (int i = 0; i < n; ++i) {
+            auto k = make_key(i);
+            CHECK(tree.contains(k));
+            CHECK_EQ(tree.count(k), ref.count(k));
+        }
+        // in-order iteration must match the reference exactly
+        auto ri = ref.begin();
+        for (const auto& v : tree) {
+            REQUIRE(ri != ref.end());
+            CHECK_EQ(v, *ri);
+            ++ri;
+        }
+        CHECK(ri == ref.end());
+    };
+
+    SUBCASE("uint8_t keys -- 240 slots per leaf") {
+        REQUIRE(btree_set<unsigned char>::leaf_slots() > 32);
+        btree_set<unsigned char> t;
+        std::set<unsigned char> ref;
+        check_against_std_set(t, ref, [](int i) { return static_cast<unsigned char>(i); }, 200, "uint8_t");
+    }
+
+    SUBCASE("int16_t keys -- 120 slots per leaf") {
+        REQUIRE(btree_set<int16_t>::leaf_slots() > 32);
+        btree_set<int16_t> t;
+        std::set<int16_t> ref;
+        check_against_std_set(t, ref, [](int i) { return static_cast<int16_t>(i * 3); }, 500, "int16_t");
+    }
+
+    SUBCASE("int keys -- 60 slots per leaf, already past the old assumption") {
+        REQUIRE(btree_set<int>::leaf_slots() > 32);
+        btree_set<int> t;
+        std::set<int> ref;
+        check_against_std_set(t, ref, [](int i) { return i; }, 500, "int");
+    }
+
+    SUBCASE("int64_t keys") {
+        btree_set<int64_t> t;
+        std::set<int64_t> ref;
+        check_against_std_set(t, ref, [](int i) { return static_cast<int64_t>(i) * 1000; }, 400, "int64_t");
+    }
+
+    SUBCASE("double keys") {
+        btree_set<double> t;
+        std::set<double> ref;
+        check_against_std_set(t, ref, [](int i) { return i * 1.5; }, 400, "double");
+    }
+
+    // The other way into the scalar search: the SIMD dispatch required Compare to be std::less, so any
+    // other comparator fell through to it even before this deletion. This one trips UBSan on master.
+    SUBCASE("a comparator the SIMD dispatch never accepted") {
+        btree_set<int, std::greater<int>> t;
+        std::set<int, std::greater<int>> ref;
+        check_against_std_set(t, ref, [](int i) { return i; }, 500, "std::greater");
+    }
+
+    SUBCASE("small keys with a reversed comparator -- both ways in at once") {
+        btree_set<unsigned char, std::greater<unsigned char>> t;
+        std::set<unsigned char, std::greater<unsigned char>> ref;
+        check_against_std_set(t, ref, [](int i) { return static_cast<unsigned char>(i); }, 200, "uint8/greater");
+    }
+
+    SUBCASE("erase churn keeps leaves both above and below the old bound") {
+        btree_set<unsigned char> t;
+        std::set<unsigned char> ref;
+        for (int i = 0; i < 250; ++i) {
+            t.insert(static_cast<unsigned char>(i));
+            ref.insert(static_cast<unsigned char>(i));
+        }
+        for (int i = 0; i < 250; i += 3) {
+            CHECK_EQ(t.erase(static_cast<unsigned char>(i)), ref.erase(static_cast<unsigned char>(i)));
+        }
+        REQUIRE_EQ(t.size(), ref.size());
+        for (int i = 0; i < 256; ++i) {
+            const auto k = static_cast<unsigned char>(i);
+            CHECK_EQ(t.contains(k), ref.count(k) > 0);
+        }
+    }
+}
+
 }  // namespace stdb::container
