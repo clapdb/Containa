@@ -94,14 +94,26 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
+        sudo apt-get install -y cmake clang
 
+    # libstdc++, not libc++, and with every check left on rather than any of them suppressed.
+    #
+    # Ubuntu's libc++ ships as an uninstrumented shared library, and ASan reports an
+    # alloc-dealloc-mismatch inside std::logic_error's message storage the moment anything throws --
+    # art_map_test.cc:66 is just `CHECK_THROWS_AS(m.at(99), std::out_of_range)`, which is as ordinary as
+    # code gets. The mismatch is in libc++.so, a library we neither build nor ship; our frame in that
+    # stack does nothing but throw a standard exception.
+    #
+    # The alternative was ASAN_OPTIONS=alloc_dealloc_mismatch=0, and it is the wrong trade: it would
+    # disable that check for *our* code too, so a genuine new/free mismatch in a container would go
+    # unseen. Better to point the sanitizers at a standard library they can actually instrument and keep
+    # every check armed. The libc++ compile-and-run path is still covered, by the build-and-test matrix.
     - name: Configure
       run: |
         cmake -S . -B build.sanitizer \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_CXX_COMPILER=clang++ \
-          -DCMAKE_CXX_FLAGS="-stdlib=libc++ -g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer"
 
     - name: Build tests
       run: cmake --build build.sanitizer --target containa_test -j$(nproc)

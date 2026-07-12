@@ -16,6 +16,7 @@
 
 #include "container/concurrent_skiplist.hpp"
 
+#include <memory_resource>
 #include <doctest/doctest.h>
 
 #include <atomic>

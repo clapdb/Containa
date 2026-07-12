@@ -16,6 +16,8 @@
 
 #include "container/btree_map.hpp"
 
+#include <array>
+#include <memory_resource>
 #include <atomic>
 #include <map>
 #include <random>
