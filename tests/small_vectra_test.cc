@@ -16,6 +16,8 @@
 
 #include "container/small_vectra.hpp"
 
+#include <array>
+#include <memory_resource>
 #include <doctest/doctest.h>
 
 #include <iostream>

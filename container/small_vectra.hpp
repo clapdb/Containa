@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include <cstring>
 #include <algorithm>
 #include <memory_resource>
 

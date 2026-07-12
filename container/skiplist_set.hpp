@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <memory_resource>
+
 #include "skiplist_map.hpp"
 
 namespace stdb::container {

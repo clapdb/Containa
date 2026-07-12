@@ -6,11 +6,47 @@ on:
   pull_request:
     branches: [ master, main ]
 
+# Every job here ends in `ctest --no-tests=error`. That flag is not decoration: this project's CI was
+# green for its whole life while running zero tests. `containa_test` is EXCLUDE_FROM_ALL, so
+# `cmake --build .` never compiled it, and nothing ever called add_test(), so `ctest` printed
+# "No tests were found!!!" and exited 0 -- which CI read as a pass. Five real bugs, one of them
+# producing wrong query results downstream, sat behind that. --no-tests=error turns an empty test list
+# back into a failure, so this cannot quietly happen again.
+
 jobs:
-  gcc-build:
+  # The two standard libraries are not redundant. Each hid a missing include the other tolerated:
+  # <cstdlib> for std::abort in dense_map (libstdc++ drags it in, libc++ does not), and <array> in
+  # devectra_test (libc++ drags it in, libstdc++ does not). Whichever one you build with, the suite
+  # fails to compile -- just in a different file, which is how fixing one and watching the build get
+  # further led to the conclusion that the other did not exist.
+  build-and-test:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    name: GCC Build and Test
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC / libstdc++ / Debug
+            cxx: g++
+            build_type: Debug
+            cxx_flags: ""
+            apt: build-essential
+          - name: GCC / libstdc++ / Release
+            cxx: g++
+            build_type: Release
+            cxx_flags: ""
+            apt: build-essential
+          - name: Clang / libc++ / Debug
+            cxx: clang++
+            build_type: Debug
+            cxx_flags: "-stdlib=libc++"
+            apt: clang libc++-dev libc++abi-dev
+          - name: Clang / libc++ / Release
+            cxx: clang++
+            build_type: Release
+            cxx_flags: "-stdlib=libc++"
+            apt: clang libc++-dev libc++abi-dev
+
     steps:
     - uses: actions/checkout@v7
       with:
@@ -19,44 +55,46 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential
+        sudo apt-get install -y cmake ${{ matrix.apt }}
 
-    - name: Configure CMake (Debug)
+    - name: Configure
       run: |
-        mkdir -p build.debug
-        cd build.debug
-        cmake .. -DCMAKE_BUILD_TYPE=Debug
+        cmake -S . -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+          -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}"
 
-    - name: Build (Debug)
-      run: |
-        cd build.debug
-        cmake --build . -j$(nproc)
+    # By name, explicitly. containa_test is EXCLUDE_FROM_ALL so that a project vendoring us through
+    # add_subdirectory() does not have to build our tests -- which also means `cmake --build .` skips
+    # it, which is exactly how it went this long without ever being compiled.
+    - name: Build tests
+      run: cmake --build build --target containa_test -j$(nproc)
 
-    - name: Run Tests (Debug)
-      run: |
-        cd build.debug
-        ctest --output-on-failure
+    - name: Build library and benchmarks
+      run: cmake --build build -j$(nproc)
 
-    - name: Configure CMake (Release)
-      run: |
-        mkdir -p build.release
-        cd build.release
-        cmake .. -DCMAKE_BUILD_TYPE=Release
+    - name: Run tests
+      run: ctest --test-dir build --no-tests=error --output-on-failure
 
-    - name: Build (Release)
-      run: |
-        cd build.release
-        cmake --build . -j$(nproc)
-
-    - name: Run Tests (Release)
-      run: |
-        cd build.release
-        ctest --output-on-failure
-
-  clang-build:
+  # The two SIMD bugs hide from each other across this boundary, so a single -march is not enough:
+  #
+  #   * bitmap::popcount() dispatches AVX512-VPOPCNT -> AVX2 -> NEON -> scalar. There is no SSE path,
+  #     so a baseline build falls through to scalar and is correct, while the AVX2 path returned
+  #     *zero* for a fully set bitmap of 128 words or more. Baseline-only CI is structurally blind to
+  #     it.
+  #   * boolean_vector::count() is the other way round: its 8-bit lanes wrap after 256 iterations, so
+  #     the SSE path (16 bytes/iteration) breaks from 4096 elements while AVX2 (32 bytes) holds out to
+  #     8192 -- and at the density the old tests used, an AVX2 lane never reached the wrap at all.
+  #
+  # Pin both explicitly rather than trusting whatever -march=native happens to give the runner.
+  simd-paths:
+    name: SIMD / ${{ matrix.march }}
     runs-on: ubuntu-latest
-    name: Clang Build and Test
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        march: [x86-64-v2, x86-64-v3]   # v2 = SSE4.2, no AVX2 (scalar popcount); v3 = AVX2
+
     steps:
     - uses: actions/checkout@v7
       with:
@@ -67,39 +105,35 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
 
-    - name: Configure CMake with Clang (Debug)
+    # CMAKE_CXX_FLAGS_RELEASE, not CMAKE_CXX_FLAGS. CMake puts the per-config flags *after* the generic
+    # ones, and this project's CMakeLists.txt sets CMAKE_CXX_FLAGS_RELEASE to "-O3 -DNDEBUG
+    # -march=native". Passing the matrix -march through CMAKE_CXX_FLAGS produces
+    #
+    #     -march=x86-64-v2 ... -march=native
+    #
+    # and the last one wins, so both matrix entries would compile as -march=native and this job would
+    # test one path twice while claiming to test two. Verified against the generated compile command
+    # rather than assumed.
+    - name: Configure
       run: |
-        mkdir -p build.clang.debug
-        cd build.clang.debug
-        cmake .. -DCMAKE_BUILD_TYPE=Debug \
-                 -DCMAKE_CXX_COMPILER=clang++ \
-                 -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+        cmake -S . -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCONTAINA_MARCH_NATIVE=OFF \
+          -DCMAKE_CXX_FLAGS="-stdlib=libc++ -march=${{ matrix.march }}"
 
-    - name: Build with Clang (Debug)
+    # Assert it, do not trust it. The first version of this job passed the matrix -march through
+    # CMAKE_CXX_FLAGS and was silently overridden to -march=native by the project's own
+    # CMAKE_CXX_FLAGS_RELEASE, so it tested one path twice while claiming to test two. A matrix that
+    # quietly collapses to one entry is worse than no matrix, because it reads as coverage.
+    - name: Confirm the intended -march actually reached the compiler
       run: |
-        cd build.clang.debug
-        cmake --build . -j$(nproc)
+        march=$(grep -o '\-march=[a-z0-9-]*' build/tests/CMakeFiles/containa_test.dir/flags.make | tail -1)
+        echo "compiling with $march"
+        test "$march" = "-march=${{ matrix.march }}"
 
-    - name: Run Tests with Clang (Debug)
-      run: |
-        cd build.clang.debug
-        ctest --output-on-failure
+    - name: Build tests
+      run: cmake --build build --target containa_test -j$(nproc)
 
-    - name: Configure CMake with Clang (Release)
-      run: |
-        mkdir -p build.clang.release
-        cd build.clang.release
-        cmake .. -DCMAKE_BUILD_TYPE=Release \
-                 -DCMAKE_CXX_COMPILER=clang++ \
-                 -DCMAKE_CXX_FLAGS="-stdlib=libc++"
-
-    - name: Build with Clang (Release)
-      run: |
-        cd build.clang.release
-        cmake --build . -j$(nproc)
-
-    - name: Run Tests with Clang (Release)
-      run: |
-        cd build.clang.release
-        ctest --output-on-failure
-
+    - name: Run tests
+      run: ctest --test-dir build --no-tests=error --output-on-failure

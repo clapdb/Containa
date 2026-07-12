@@ -16,6 +16,8 @@
 
 #include "container/btree_map.hpp"
 
+#include <array>
+#include <memory_resource>
 #include <atomic>
 #include <map>
 #include <random>
@@ -2344,7 +2346,7 @@ TEST_CASE("btree_map::copy_constructor_comprehensive") {
 
 #ifdef BTREE_HAS_PMR
 
-TEST_CASE("btree_map::pmr") {
+TEST_CASE("btree_map::pmr with null_memory_resource") {
     SUBCASE("basic operations with monotonic_buffer_resource") {
         std::array<std::byte, 8192> buffer;
         std::pmr::monotonic_buffer_resource resource(buffer.data(), buffer.size(),

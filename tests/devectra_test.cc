@@ -16,6 +16,7 @@
 
 #include "container/devectra.hpp"
 
+#include <memory_resource>
 #include <doctest/doctest.h>
 
 #include <array>  // std::array, used by the pmr buffer cases below

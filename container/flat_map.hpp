@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <string_view>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>

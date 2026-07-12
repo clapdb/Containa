@@ -69,34 +69,75 @@ jobs:
         grep -v -E "(doctest|nanobench|build\.|third_party|external)" | \
         xargs clang-format --dry-run --style=file || true
 
-  memory-sanitizer:
+  # This job existed and was green, and like the rest of CI it was green on nothing: `cmake --build .`
+  # skips EXCLUDE_FROM_ALL targets, so the sanitizers were never pointed at a single test. Had they
+  # been, ASan alone would have handed over the btree_multimap SIGSEGV (heap-buffer-overflow reading a
+  # leaf past its keys) and the dense_map use-after-free (hashing string_views into a reallocated
+  # vector), and TSan the skiplist's concurrent-erase double-claim.
+  sanitizers:
+    name: Sanitizer / ${{ matrix.san }}
     runs-on: ubuntu-latest
-    name: Memory Sanitizer
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - san: address,undefined
+            env: ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          - san: thread
+            env: TSAN_OPTIONS=halt_on_error=1
+
     steps:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
 
+    # clang for the sanitizers, and build-essential for the standard library they run against: Ubuntu's
+    # clang package ships no C++ standard library headers of its own, so dropping libc++ without adding
+    # libstdc++ leaves it unable to find <algorithm> at all.
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake clang libc++-dev libc++abi-dev
+        sudo apt-get install -y cmake clang build-essential
 
-    - name: Configure CMake with sanitizers
+    # libstdc++, not libc++, and with every check left on rather than any of them suppressed.
+    #
+    # Ubuntu's libc++ ships as an uninstrumented shared library, and ASan reports an
+    # alloc-dealloc-mismatch inside std::logic_error's message storage the moment anything throws --
+    # art_map_test.cc:66 is just `CHECK_THROWS_AS(m.at(99), std::out_of_range)`, which is as ordinary as
+    # code gets. The mismatch is in libc++.so, a library we neither build nor ship; our frame in that
+    # stack does nothing but throw a standard exception.
+    #
+    # The alternative was ASAN_OPTIONS=alloc_dealloc_mismatch=0, and it is the wrong trade: it would
+    # disable that check for *our* code too, so a genuine new/free mismatch in a container would go
+    # unseen. Better to point the sanitizers at a standard library they can actually instrument and keep
+    # every check armed. The libc++ compile-and-run path is still covered, by the build-and-test matrix.
+    # USE_LIBCXX_DEFAULT=OFF, explicitly. Not passing -stdlib is not the same as asking for libstdc++:
+    # this project's CMakeLists does `add_compile_options(-stdlib=libc++)` for any Clang unless that
+    # option is turned off, so dropping libc++-dev from the apt line while leaving the option on left
+    # clang under orders to use a standard library that was no longer installed -- "'algorithm' file not
+    # found", on every translation unit.
+    - name: Configure
       run: |
-        mkdir -p build.sanitizer
-        cd build.sanitizer
-        cmake .. -DCMAKE_BUILD_TYPE=Debug \
-                 -DCMAKE_CXX_COMPILER=clang++ \
-                 -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fsanitize=address,undefined -fno-omit-frame-pointer"
+        cmake -S . -B build.sanitizer \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DUSE_LIBCXX_DEFAULT=OFF \
+          -DCMAKE_CXX_FLAGS="-g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer"
 
-    - name: Build with sanitizers
+    # Assert it, do not trust it -- for the third time in this PR. The -march matrix was silently
+    # overridden, the standard library was silently overridden, and both times the job went on looking
+    # like it was doing what it said. A flag that does not reach the compiler is worse than a missing
+    # flag, because the job stays green while testing something else.
+    - name: Confirm the sanitizer and the standard library actually reached the compiler
       run: |
-        cd build.sanitizer
-        cmake --build . -j$(nproc)
+        flags=$(cat build.sanitizer/tests/CMakeFiles/containa_test.dir/flags.make)
+        echo "$flags" | grep -q -- "-fsanitize=${{ matrix.san }}" || { echo "sanitizer flag missing"; exit 1; }
+        echo "$flags" | grep -q -- "-stdlib=libc++" && { echo "still building against libc++"; exit 1; }
+        echo "ok: -fsanitize=${{ matrix.san }}, libstdc++"
 
-    - name: Run tests with sanitizers
+    - name: Build tests
+      run: cmake --build build.sanitizer --target containa_test -j$(nproc)
+
+    - name: Run tests
       run: |
-        cd build.sanitizer
-        ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ctest --output-on-failure
+        ${{ matrix.env }} ctest --test-dir build.sanitizer --no-tests=error --output-on-failure
