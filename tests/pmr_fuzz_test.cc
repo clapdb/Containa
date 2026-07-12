@@ -27,7 +27,6 @@
  */
 
 #include "container/btree_map.hpp"
-#include "container/concurrent_skiplist.hpp"
 #include "container/dense_map.hpp"
 #include "container/devectra.hpp"
 #include "container/skiplist_map.hpp"
@@ -610,116 +609,6 @@ TEST_CASE("pmr_fuzz::copy_move_semantics") {
 // ============================================================================
 // Concurrent Skiplist Fuzz Tests
 // ============================================================================
-
-TEST_CASE("pmr_fuzz::concurrent_skiplist") {
-    SUBCASE("single thread 1K ops") {
-        std::pmr::synchronized_pool_resource pool;
-        stdb::pmr::concurrent_skiplist<int, std::string> sl(&pool);
-        std::unordered_map<int, std::string> reference;
-
-        FuzzRng rng(11111);
-        constexpr size_t num_ops = 1000;
-
-        for (size_t i = 0; i < num_ops; ++i) {
-            int op = rng.randint(0, 99);
-            int key = rng.randint(0, 5000);
-            std::string value = rng.randstring(rng.randsize(1, 30));
-
-            if (op < 60) {
-                // Insert
-                bool inserted = sl.insert(key, value);
-                auto [it, ref_inserted] = reference.insert({key, value});
-                CHECK_EQ(inserted, ref_inserted);
-            } else if (op < 80) {
-                // Find
-                auto result = sl.find(key);
-                auto ref_it = reference.find(key);
-                CHECK_EQ(result.has_value(), (ref_it != reference.end()));
-            } else {
-                // Erase
-                bool erased = sl.erase(key);
-                bool ref_erased = reference.erase(key) > 0;
-                CHECK_EQ(erased, ref_erased);
-            }
-        }
-
-        CHECK_EQ(sl.size(), reference.size());
-    }
-
-    SUBCASE("multi-thread stress test") {
-        std::pmr::synchronized_pool_resource pool;
-        stdb::pmr::concurrent_skiplist<int, int> sl(&pool);
-
-        constexpr int num_threads = 4;
-        constexpr int ops_per_thread = 500;
-
-        std::vector<std::thread> threads;
-        std::atomic<int> successful_inserts{0};
-
-        for (int t = 0; t < num_threads; ++t) {
-            threads.emplace_back([&sl, &successful_inserts, t]() {
-                FuzzRng rng(t * 1000 + 12345);
-                for (int i = 0; i < ops_per_thread; ++i) {
-                    int op = rng.randint(0, 99);
-                    int key = rng.randint(0, 10000);
-
-                    if (op < 50) {
-                        if (sl.insert(key, key * 10)) {
-                            successful_inserts.fetch_add(1, std::memory_order_relaxed);
-                        }
-                    } else if (op < 80) {
-                        sl.contains(key);
-                    } else {
-                        sl.erase(key);
-                    }
-                }
-            });
-        }
-
-        for (auto& th : threads) {
-            th.join();
-        }
-
-        // Verify data integrity
-        sl.for_each([](const int& k, const int& v) { CHECK_EQ(v, k * 10); });
-    }
-
-    SUBCASE("high contention scenario") {
-        std::pmr::synchronized_pool_resource pool;
-        stdb::pmr::concurrent_skiplist<int, int> sl(&pool);
-
-        constexpr int num_threads = 4;
-        constexpr int key_range = 100;  // Small range = high contention
-        constexpr int ops_per_thread = 500;
-
-        std::vector<std::thread> threads;
-
-        for (int t = 0; t < num_threads; ++t) {
-            threads.emplace_back([&sl, t]() {
-                FuzzRng rng(t * 7777);
-                for (int i = 0; i < ops_per_thread; ++i) {
-                    int op = rng.randint(0, 99);
-                    int key = rng.randint(0, key_range);
-
-                    if (op < 40) {
-                        sl.insert(key, key);
-                    } else if (op < 70) {
-                        sl.find(key);
-                    } else {
-                        sl.erase(key);
-                    }
-                }
-            });
-        }
-
-        for (auto& th : threads) {
-            th.join();
-        }
-
-        // Just verify no crashes and data is consistent
-        sl.for_each([](const int& k, const int& v) { CHECK_EQ(v, k); });
-    }
-}
 
 // ============================================================================
 // Large Scale Tests

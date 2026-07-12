@@ -47,7 +47,6 @@ container/
 ├── btree_set.hpp       # B-tree based set
 ├── skiplist_map.hpp    # Skip list map
 ├── skiplist_set.hpp    # Skip list set
-├── concurrent_skiplist.hpp  # Thread-safe skip list
 ├── static_vectra.hpp   # Fixed-capacity vector
 └── bitmap.hpp          # Bitmap implementation
 

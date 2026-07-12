@@ -41,11 +41,6 @@ add_executable(dense_map_comprehensive_bench dense_map_comprehensive_bench.cc)
 target_compile_definitions(dense_map_comprehensive_bench PRIVATE NDEBUG)
 target_link_libraries(dense_map_comprehensive_bench nanobench)
 
-# Concurrent benchmark (skiplist vs btree)
-add_executable(skiplist_concurrent_bench skiplist_concurrent_bench.cc)
-target_compile_definitions(skiplist_concurrent_bench PRIVATE NDEBUG)
-target_link_libraries(skiplist_concurrent_bench pthread)
-
 # B-tree benchmark (with optional Abseil comparison)
 add_executable(btree_bench btree_bench.cc)
 target_compile_definitions(btree_bench PRIVATE NDEBUG)
