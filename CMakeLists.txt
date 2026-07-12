@@ -184,6 +184,27 @@ if(CONTAINA_BUILD_MODULES)
 else()
     target_compile_features(containa INTERFACE cxx_std_20)
 endif()
+
+# ...but a floor is not a standard. target_compile_features says "at least C++20"; it does not make the
+# module target adopt the standard its importers actually use. A BMI records the language dialect it was
+# compiled with, and unlike the extensions mismatch this one is a hard failure:
+#
+#   error: language dialect differs 'C++20', expected 'C++23'
+#   error: failed to read compiled module: Bad file data
+#
+# Reproduced with a parent that leaves CMAKE_CXX_STANDARD unset and asks for C++23 on its own target
+# (`target_compile_features(app PRIVATE cxx_std_23)`): containa.cppm compiles at C++20, the importer at
+# C++23, and `import containa;` does not build. A C++23 consumer had no way to say "build the module at
+# my standard" -- CONTAINA_CXX_STANDARD is that way. It follows the parent's global choice when there is
+# one, which is the common case and why this went unnoticed.
+if(DEFINED CMAKE_CXX_STANDARD)
+    set(_containa_standard_default ${CMAKE_CXX_STANDARD})
+else()
+    set(_containa_standard_default 20)
+endif()
+set(CONTAINA_CXX_STANDARD "${_containa_standard_default}" CACHE STRING
+    "C++ standard to compile containa (and its module) with; must match importers")
+set_target_properties(containa PROPERTIES CXX_STANDARD ${CONTAINA_CXX_STANDARD})
 # A BMI records the language options it was compiled with, so the module and everyone who imports it must
 # agree on whether GNU extensions are on. CMake gives us no way to discover what our importers will pick,
 # so the best we can do is be *deterministic* and let the parent pin it.
