@@ -19,6 +19,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -409,6 +410,65 @@ TEST_CASE("concurrent_skiplist::concurrent erase of the same key claims it exact
 
         CHECK_EQ(claimed.load(), kKeys);  // not 422
         CHECK_EQ(sl.size(), 0);
+    }
+}
+
+
+// A mark on a pointer belongs to the node the pointer came *out of*, not to the node it points *at*.
+// Two places in the helping path got that backwards, and both quietly deleted live nodes:
+//
+//   * The branch was entered on `succ.marked() || curr.marked()` and then spliced pred->next in either
+//     case. But curr.marked() is the mark on pred->next, so it says *pred* is being erased -- it says
+//     nothing about curr, which may be a node someone inserted after pred a moment ago. Rewriting a
+//     dying predecessor's next pointer splices that live node straight out.
+//   * The walk that skipped the run of marked nodes went one node too far: it started from succ (already
+//     marked, because curr is deleted), stepped to n->next, found it unmarked because n is *alive*, and
+//     stopped holding n's successor rather than n. The CAS then spliced pred past the live n.
+//
+// Either way the node is still counted in _size, no longer reachable from level 0, and not on the
+// retired list either -- so the destructor cannot free it. It shows up as size() disagreeing with what
+// the list actually contains, which is the only way to see it: nothing else in the API reports it.
+TEST_CASE("concurrent_skiplist::concurrent insert and erase never lose a live node") {
+    constexpr int kN = 2000;
+    constexpr int kThreads = 4;
+
+    for (int round = 0; round < 25; ++round) {
+        concurrent_skiplist<int, int> sl;
+
+        std::vector<std::thread> threads;
+        threads.reserve(kThreads * 2);
+        for (int t = 0; t < kThreads; ++t) {
+            // inserters cover every key; erasers only ever remove odd ones, so every even key that goes
+            // in must still be there at the end -- and must be reachable, not merely counted.
+            threads.emplace_back([&, t] {
+                for (int i = t; i < kN; i += kThreads) {
+                    sl.insert(i, i);
+                }
+            });
+            threads.emplace_back([&, t] {
+                for (int i = t; i < kN; i += kThreads) {
+                    if (i % 2 == 1) {
+                        sl.erase(i);
+                    }
+                }
+            });
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        std::set<int> reachable;
+        sl.for_each([&](int k, int) { reachable.insert(k); });
+
+        INFO("round=", round);
+        for (int i = 0; i < kN; i += 2) {
+            INFO("even key=", i);
+            CHECK(reachable.count(i) == 1);       // never erased -- must still be in the list
+            CHECK(sl.find(i).has_value());        // and must be findable through the index
+        }
+
+        // size() must agree with what is actually there. A spliced-out node keeps its slot in the count.
+        CHECK_EQ(sl.size(), reachable.size());
     }
 }
 

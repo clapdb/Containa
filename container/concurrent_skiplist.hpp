@@ -494,9 +494,18 @@ class concurrent_skiplist {
             for (int i = victim->height; i >= 0; --i) {
                 std::atomic<MarkedPtr<Node>>* pred_next = preds[i] ? &preds[i]->next[i] : &_head[i];
                 MarkedPtr<Node> expected(victim);
-                MarkedPtr<Node> succ = victim->next[i].load(std::memory_order_relaxed);
+                // acquire on the load, release on the CAS -- and neither is optional.
+                //
+                // This CAS *publishes* victim's successor into pred->next[i]. A reader that acquire-loads
+                // pred->next[i] and finds that node has to see the node's contents, and it only does if
+                // the store that put it there was a release. Relaxed here breaks the chain: the node was
+                // released into the list by whoever inserted it, but that release was on a *different*
+                // location, and re-publishing it under relaxed carries none of it forward. The reader
+                // then reaches a node it is not guaranteed to see the construction of. TSan calls it
+                // exactly that -- a data race between Node::create() and the traversal load.
+                MarkedPtr<Node> succ = victim->next[i].load(std::memory_order_acquire);
                 pred_next->compare_exchange_strong(expected, MarkedPtr<Node>(succ.ptr()),
-                                                    std::memory_order_relaxed);
+                                                    std::memory_order_release, std::memory_order_relaxed);
             }
 
             // The destructor used to find erased nodes by walking the level-0 chain. They are not in
@@ -559,19 +568,57 @@ class concurrent_skiplist {
                 // physically points at the marked node. The two can never be equal, so the CAS can never
                 // succeed, and insert()'s retry loop never terminates. Erased nodes are on the retired
                 // list now, so level 0 no longer has to carry them and no longer does.
-                if (succ.marked() || curr.marked()) {
-                    MarkedPtr<Node> next_unmarked = succ;
-                    while (next_unmarked.ptr() && next_unmarked.marked()) {
-                        next_unmarked = next_unmarked.ptr()->next[i].load(std::memory_order_acquire);
+                // The two marks mean different things and must not be handled together.
+                //
+                // curr.marked() is the mark on the pointer we just read out of pred->next, and by the
+                // Harris convention a mark on x->next says *x* is deleted. So it says pred is being
+                // erased. It says nothing whatever about curr, which may be a live node that someone
+                // inserted after pred a moment ago. Splicing pred->next in that state -- which is what
+                // handling the two cases with one CAS did -- rewrites the dying predecessor's next
+                // pointer straight past that live node. The eraser then unlinks pred and takes the live
+                // node with it: still counted in _size, no longer reachable from level 0, and not on the
+                // retired list either, so the destructor cannot free it. Reproduced: size() reports 1500
+                // where only 1499 nodes are reachable.
+                //
+                // So do not touch a marked predecessor. Start the search again; the pass that meets pred
+                // as curr will see the mark on *its* next and unlink it properly.
+                if (curr.marked()) {
+                    pred = nullptr;
+                    goto retry;
+                }
+
+                // succ.marked() is the mark on curr->next: curr itself is deleted. Splice it, and any
+                // run of marked nodes behind it, out of pred->next -- which is unmarked here, so pred is
+                // alive and its next pointer is ours to rewrite.
+                if (succ.marked()) {
+                    // Walk to the first *live* node after curr.
+                    //
+                    // The mark on a pointer belongs to the node the pointer came out of, not to the node
+                    // it points at: succ is curr->next, and its mark says curr is deleted. So to decide
+                    // whether the next node n is deleted you have to look at n->next, and if it is not
+                    // marked then n is alive and n is the answer.
+                    //
+                    // The loop this replaces walked one node too far. It started with next_unmarked =
+                    // succ -- already marked, because curr is deleted -- stepped to n->next, found that
+                    // unmarked because n is alive, and stopped holding *n's successor*. The CAS below
+                    // then spliced pred straight past n. n was live, still counted in _size, and now
+                    // reachable from nothing: reproduced as size() == 1500 with 1499 nodes reachable.
+                    Node* live = succ.ptr();
+                    while (live != nullptr) {
+                        MarkedPtr<Node> live_next = live->next[i].load(std::memory_order_acquire);
+                        if (!live_next.marked()) {
+                            break;  // `live` is not deleted -- this is the first survivor
+                        }
+                        live = live_next.ptr();
                     }
-                    if (!pred_next->compare_exchange_strong(curr, MarkedPtr<Node>(next_unmarked.ptr()),
+                    if (!pred_next->compare_exchange_strong(curr, MarkedPtr<Node>(live),
                                                              std::memory_order_release,
                                                              std::memory_order_relaxed)) {
                         // CAS failed, restart from top
                         pred = nullptr;
                         goto retry;
                     }
-                    curr = MarkedPtr<Node>(next_unmarked.ptr());
+                    curr = MarkedPtr<Node>(live);
                     continue;
                 }
 
