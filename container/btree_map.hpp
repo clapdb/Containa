@@ -5677,7 +5677,17 @@ public:
 
         size_type n = 0;
         while (it != stop) {
-            if (it._node->is_leaf_node()) {
+            // The per-leaf SIMD upper_bound only takes a Key. For a heterogeneous lookup there is no
+            // Key to give it, so that leaf walks one element at a time -- correct either way, and the
+            // homogeneous path, which is the one that has to be fast, keeps the jump.
+            if constexpr (!std::is_same_v<K, Key>) {
+                if (_comp(key, get_key_from_iterator(it))) {
+                    break;
+                }
+                ++n;
+                ++it;
+                continue;
+            } else if (it._node->is_leaf_node()) {
                 // Inside a leaf the equal keys are contiguous, so take the whole run at once with the
                 // SIMD upper_bound rather than incrementing an iterator through it. This is what the old
                 // implementation was really buying -- and it is the only thing it was buying: on the
@@ -5887,23 +5897,38 @@ public:
     // Erase by key - O(log n) with proper B-tree rebalancing
     // In unique mode: erases at most 1 element
     // In multi mode: erases all elements with matching key
-    auto erase(const Key& key) -> size_type {
+    auto erase(const Key& key) -> size_type { return erase_key_impl(key); }
+
+    // Heterogeneous erase by key
+    template <typename K>
+        requires is_transparent_comparator_v<Compare>
+    auto erase(const K& key) -> size_type {
+        return erase_key_impl(key);
+    }
+
+  private:
+    // One body, two overloads. This is not tidiness: erase(const Key&) and the heterogeneous
+    // erase(const K&) were two copies of the same walk, and when the copy above was fixed the other one
+    // was not -- so `m.erase("20")` on a transparent comparator still ran the old code, reported erasing
+    // one of seven duplicates, and left the other six in the tree. Two copies of a subtle loop is how
+    // that happens. Now there is one.
+    template <typename K>
+    auto erase_key_impl(const K& key) -> size_type {
         if constexpr (is_multi_mode) {
-            // Multi mode: erase every element with this key.
+            // Erase every element with this key, re-finding the first one on each pass rather than
+            // walking the run with the iterator that erase(iterator) hands back. Two things went wrong
+            // with walking it:
             //
-            // Re-find the first one on each pass rather than walking the run with the iterator that
-            // erase(iterator) hands back. Two things went wrong with walking it:
+            //   * It started at find(key), which returns *an* element with this key -- whichever one the
+            //     descent lands on -- so erasing forward from the middle of a run left the duplicates
+            //     before it in the tree.
+            //   * Even starting from lower_bound(), the "next" iterator erase(iterator) returns does not
+            //     survive the rebalancing an erase can trigger, so the walk still dropped elements.
+            //     Against std::multimap it reported 3 erased where 4 were present.
             //
-            //   * It started at find(key), which returns *an* element with this key -- whichever the
-            //     descent lands on -- so erasing forward from the middle of a run left the earlier
-            //     duplicates in the tree.
-            //   * Even from lower_bound(), the "next" iterator returned by erase(iterator) does not
-            //     survive the rebalancing that erasing can trigger, so the walk still dropped elements.
-            //     Measured against std::multimap: erase() reported 3 where 4 were present.
-            //
-            // A fresh lower_bound() per element is O(k log n) instead of O(k + log n). That is the price
+            // A fresh lower_bound() per element is O(k log n) rather than O(k + log n). That is the price
             // of not depending on an iterator staying valid across a structural mutation, and erase-all
-            // is not the hot path -- correctness here is worth more than the constant.
+            // is not the hot path.
             size_type erased = 0;
             while (true) {
                 auto it = lower_bound(key);
@@ -5925,38 +5950,6 @@ public:
             }
             return erased;
         } else {
-            auto it = find(key);
-            if (it == end()) {
-                return 0;
-            }
-            erase_impl(it._node, it._pos);
-            return 1;
-        }
-    }
-
-    // Heterogeneous erase by key
-    template <typename K>
-        requires is_transparent_comparator_v<Compare>
-    auto erase(const K& key) -> size_type {
-        if constexpr (is_multi_mode) {
-            size_type erased = 0;
-            auto it = find_impl(key);
-            while (it != end()) {
-                const Key& iter_key = [&]() -> const Key& {
-                    if constexpr (is_set_mode) {
-                        return *it;
-                    } else {
-                        return it->first;
-                    }
-                }();
-                if (_comp(key, iter_key) || _comp(iter_key, key)) {
-                    break;
-                }
-                it = erase(it);
-                ++erased;
-            }
-            return erased;
-        } else {
             auto it = find_impl(key);
             if (it == end()) {
                 return 0;
@@ -5966,6 +5959,7 @@ public:
         }
     }
 
+  public:
     // Erase by iterator - returns iterator to next element
     // Simplified structure following absl's approach
     auto erase(iterator pos) -> iterator {

@@ -21,6 +21,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "doctest/doctest/doctest.h"
@@ -3035,6 +3036,253 @@ TEST_CASE("btree_multiset::differential against std::multiset") {
             INFO("round=", round, " key=", k);
             CHECK_EQ(s.count(k), ref.count(k));
             CHECK_EQ(s.contains(k), ref.count(k) > 0);
+        }
+    }
+}
+
+
+// The heterogeneous overloads are a second copy of every lookup, and a second place for the same bug to
+// live. erase(const Key&) and erase(const K&) were two copies of the same walk; fixing one left the
+// other running the old code, so `m.erase("20")` on a transparent comparator reported erasing one of
+// seven duplicates and left the other six in the tree. They share one body now -- and this checks it,
+// because "they look like they delegate" is not the same as knowing they behave the same.
+TEST_CASE("btree_multimap::heterogeneous lookups differential against std::multimap") {
+    std::mt19937 rng(31415926);
+
+    for (int round = 0; round < 20; ++round) {
+        btree_multimap<std::string, int, std::less<>> m;
+        std::multimap<std::string, int, std::less<>> ref;
+
+        const int span = 1 + static_cast<int>(rng() % 60);
+        for (int i = 0; i < 600; ++i) {
+            std::string k = std::to_string(rng() % static_cast<unsigned>(span));
+            m.insert({k, i});
+            ref.insert({k, i});
+        }
+
+        for (int k = 0; k < span; ++k) {
+            const std::string ks = std::to_string(k);
+            const std::string_view kv{ks};
+            const char* kc = ks.c_str();
+            const size_t want = ref.count(ks);
+
+            INFO("round=", round, " key=", ks);
+
+            // every heterogeneous spelling must agree with the homogeneous one and with the reference
+            CHECK_EQ(m.count(kv), want);
+            CHECK_EQ(m.count(kc), want);
+            CHECK_EQ(m.count(ks), want);
+            CHECK_EQ(m.contains(kv), want > 0);
+            CHECK_EQ(m.contains(kc), want > 0);
+
+            size_t by_range = 0;
+            auto [lo, hi] = m.equal_range(kv);
+            for (auto it = lo; it != hi; ++it) {
+                ++by_range;
+            }
+            CHECK_EQ(by_range, want);
+
+            size_t by_bounds = 0;
+            for (auto it = m.lower_bound(kv); it != m.upper_bound(kv); ++it) {
+                ++by_bounds;
+            }
+            CHECK_EQ(by_bounds, want);
+        }
+
+        // and heterogeneous erase must remove every duplicate, not just the ones after find()
+        for (int k = 0; k < span; ++k) {
+            const std::string ks = std::to_string(k);
+            const size_t want = ref.count(ks);
+            INFO("round=", round, " erase key=", ks);
+            CHECK_EQ(m.erase(ks.c_str()), want);   // heterogeneous erase
+            CHECK_EQ(ref.erase(ks), want);
+            CHECK_EQ(m.count(ks), 0);              // nothing left behind
+        }
+        CHECK_EQ(m.size(), 0);
+        CHECK_EQ(ref.size(), 0);
+    }
+}
+
+
+// A templated differential harness, so the same churn runs against every shape of the tree rather than
+// only the one that happened to be broken.
+//
+// Every bug in this file was found the same way: a hand-written traversal that was right on the common
+// path and wrong somewhere nobody looked. count(), equal_range() and erase() each had one, the
+// heterogeneous erase had its own copy of one, and the heterogeneous multi-mode count() did not even
+// compile. Enumerating cases by hand is how that happened; comparing against std::map / std::multimap on
+// randomised churn is how it stops.
+namespace btree_diff {
+
+template <typename Tree, typename Ref>
+void churn_and_compare(unsigned seed, int rounds, int ops, int span, const char* what) {
+    std::mt19937 rng(seed);
+
+    for (int round = 0; round < rounds; ++round) {
+        Tree t;
+        Ref ref;
+
+        for (int i = 0; i < ops; ++i) {
+            const int k = static_cast<int>(rng() % static_cast<unsigned>(span));
+            if (rng() % 4 == 0) {
+                INFO(what, " round=", round, " erase=", k);
+                CHECK_EQ(t.erase(k), ref.erase(k));
+            } else {
+                t.insert({k, i});
+                ref.insert({k, i});
+            }
+        }
+
+        INFO(what, " round=", round);
+        REQUIRE_EQ(t.size(), ref.size());
+
+        for (int k = -2; k <= span + 2; ++k) {
+            const size_t want = ref.count(k);
+            INFO(what, " round=", round, " key=", k);
+
+            CHECK_EQ(t.count(k), want);
+            CHECK_EQ(t.contains(k), want > 0);
+
+            size_t by_range = 0;
+            auto [lo, hi] = t.equal_range(k);
+            for (auto it = lo; it != hi; ++it) {
+                ++by_range;
+            }
+            CHECK_EQ(by_range, want);
+
+            size_t by_bounds = 0;
+            for (auto it = t.lower_bound(k); it != t.upper_bound(k); ++it) {
+                ++by_bounds;
+            }
+            CHECK_EQ(by_bounds, want);
+        }
+
+        // in-order iteration must match the reference key for key
+        auto ri = ref.begin();
+        for (const auto& kv : t) {
+            REQUIRE(ri != ref.end());
+            CHECK_EQ(kv.first, ri->first);
+            ++ri;
+        }
+        CHECK(ri == ref.end());
+    }
+}
+
+}  // namespace btree_diff
+
+TEST_CASE("btree::differential across every map shape") {
+    // Small key domains against large op counts: long runs of duplicates, keys promoted into internal
+    // nodes, and enough erase churn to force rebalancing.
+    SUBCASE("btree_map (unique)") {
+        btree_diff::churn_and_compare<btree_map<int, int>, std::map<int, int>>(11, 20, 1500, 150,
+                                                                               "btree_map");
+    }
+    SUBCASE("btree_multimap") {
+        btree_diff::churn_and_compare<btree_multimap<int, int>, std::multimap<int, int>>(
+          22, 20, 1500, 150, "btree_multimap");
+    }
+    SUBCASE("btree_map_compact (unique, N=256)") {
+        btree_diff::churn_and_compare<btree_map_compact<int, int>, std::map<int, int>>(
+          33, 15, 1500, 120, "btree_map_compact");
+    }
+    SUBCASE("btree_multimap_compact (N=256)") {
+        btree_diff::churn_and_compare<btree_multimap_compact<int, int>, std::multimap<int, int>>(
+          44, 15, 1500, 120, "btree_multimap_compact");
+    }
+    SUBCASE("narrow key domain: nearly every key is a long run of duplicates") {
+        btree_diff::churn_and_compare<btree_multimap<int, int>, std::multimap<int, int>>(
+          55, 10, 3000, 12, "btree_multimap/narrow");
+    }
+    SUBCASE("wide key domain: mostly unique, deeper tree") {
+        btree_diff::churn_and_compare<btree_multimap<int, int>, std::multimap<int, int>>(
+          66, 8, 6000, 5000, "btree_multimap/wide");
+    }
+}
+
+TEST_CASE("btree_set/multiset::differential") {
+    std::mt19937 rng(778899);
+
+    auto run = [&](auto&& t, auto&& ref, const char* what, int rounds, int ops, int span) {
+        for (int round = 0; round < rounds; ++round) {
+            t.clear();
+            ref.clear();
+            for (int i = 0; i < ops; ++i) {
+                const int k = static_cast<int>(rng() % static_cast<unsigned>(span));
+                if (rng() % 4 == 0) {
+                    INFO(what, " round=", round, " erase=", k);
+                    CHECK_EQ(t.erase(k), ref.erase(k));
+                } else {
+                    t.insert(k);
+                    ref.insert(k);
+                }
+            }
+            REQUIRE_EQ(t.size(), ref.size());
+            for (int k = -2; k <= span + 2; ++k) {
+                INFO(what, " round=", round, " key=", k);
+                CHECK_EQ(t.count(k), ref.count(k));
+                CHECK_EQ(t.contains(k), ref.count(k) > 0);
+            }
+            auto ri = ref.begin();
+            for (const auto& v : t) {
+                REQUIRE(ri != ref.end());
+                CHECK_EQ(v, *ri);
+                ++ri;
+            }
+            CHECK(ri == ref.end());
+        }
+    };
+
+    SUBCASE("btree_set") {
+        btree_set<int> t;
+        std::set<int> ref;
+        run(t, ref, "btree_set", 15, 1200, 120);
+    }
+    SUBCASE("btree_multiset") {
+        btree_multiset<int> t;
+        std::multiset<int> ref;
+        run(t, ref, "btree_multiset", 15, 1200, 120);
+    }
+    SUBCASE("btree_multiset narrow (long duplicate runs)") {
+        btree_multiset<int> t;
+        std::multiset<int> ref;
+        run(t, ref, "btree_multiset/narrow", 10, 2500, 10);
+    }
+}
+
+// String keys exercise a completely different comparison and leaf layout than ints (no SIMD leaf
+// search), so the same churn has to run over them too.
+TEST_CASE("btree_multimap::differential with string keys") {
+    std::mt19937 rng(20260713);
+
+    for (int round = 0; round < 12; ++round) {
+        btree_multimap<std::string, int> m;
+        std::multimap<std::string, int> ref;
+        const int span = 1 + static_cast<int>(rng() % 80);
+
+        for (int i = 0; i < 1200; ++i) {
+            std::string k = "k" + std::to_string(rng() % static_cast<unsigned>(span));
+            if (rng() % 4 == 0) {
+                INFO("round=", round, " erase=", k);
+                CHECK_EQ(m.erase(k), ref.erase(k));
+            } else {
+                m.insert({k, i});
+                ref.insert({k, i});
+            }
+        }
+
+        REQUIRE_EQ(m.size(), ref.size());
+        for (int k = 0; k < span; ++k) {
+            const std::string ks = "k" + std::to_string(k);
+            const size_t want = ref.count(ks);
+            INFO("round=", round, " key=", ks);
+            CHECK_EQ(m.count(ks), want);
+            CHECK_EQ(m.contains(ks), want > 0);
+            size_t by_range = 0;
+            auto [lo, hi] = m.equal_range(ks);
+            for (auto it = lo; it != hi; ++it) {
+                ++by_range;
+            }
+            CHECK_EQ(by_range, want);
         }
     }
 }
