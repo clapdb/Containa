@@ -687,6 +687,43 @@ TEST_SUITE("boolean_vector") {
             CHECK(v.count() == expected);
         }
 
+        // Regression: count() used to accumulate 0/1 bytes into 8-bit SIMD lanes and only widen after
+        // the loop, so a lane wrapped after 256 iterations -- 4096 elements for the 16-byte SSE loop,
+        // 8192 for the 32-byte AVX2 loop. Dense inputs are what expose it: the "count large vector"
+        // case above is 10000 elements, comfortably past the SSE boundary, but at 1/3 density its
+        // hottest lane only reaches 209 of the 256 it needs to wrap, which is why this survived. An
+        // all-true vector drives every lane at full rate, so it wraps exactly on the boundary --
+        // count() returned 0 at n=4096 and 1808 at n=10000.
+        SUBCASE("count does not wrap the SIMD accumulator on dense input") {
+            // Every size straddling both boundaries, at the density that maximises lane pressure.
+            for (size_t n : {4095UL, 4096UL, 4097UL, 8191UL, 8192UL, 8193UL, 10000UL, 65536UL}) {
+                boolean_vector all_true(n, true);
+                CHECK(all_true.count() == n);
+
+                boolean_vector all_false(n, false);
+                CHECK(all_false.count() == 0);
+            }
+
+            // Exhaustive across a boundary, so no vector-width/remainder combination is missed and the
+            // scalar tail is exercised at every offset.
+            for (size_t n = 4080; n <= 4112; ++n) {
+                boolean_vector v(n, true);
+                CHECK(v.count() == n);
+            }
+
+            // Dense but not uniform, checked against a scalar reference: catches a lane that wraps
+            // without the answer happening to land on 0.
+            constexpr size_t kN = 50000;
+            boolean_vector mixed(kN);
+            size_t expected = 0;
+            for (size_t i = 0; i < kN; ++i) {
+                bool bit = (i % 4) != 0;  // 75% set: every lane climbs fast enough to overflow
+                mixed[i] = bit;
+                expected += bit ? 1 : 0;
+            }
+            CHECK(mixed.count() == expected);
+        }
+
         SUBCASE("any basic") {
             boolean_vector v1{false, false, true, false};
             CHECK(v1.any() == true);

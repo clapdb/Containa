@@ -561,35 +561,41 @@ public:
         size_type total = 0;
         size_type i = 0;
 
+        // The accumulator must be 64-bit lanes, not 8-bit ones. Each element contributes 0 or 1, so an
+        // 8-bit lane saturates after 256 iterations and silently wraps to zero -- that is 4096 elements
+        // for the 16-byte SSE loop and 8192 for the 32-byte AVX2 loop. `sad_epu8` against zero already
+        // sums each 8-byte group into a 64-bit lane (max 8 per lane per iteration), so folding with it
+        // *inside* the loop keeps every partial sum in a 64-bit lane that cannot overflow for any
+        // vector that fits in memory. Folding only after the loop, as this used to, is what wrapped.
 #if defined(BOOLVEC_HAS_AVX2)
+        const __m256i zero = _mm256_setzero_si256();
         __m256i acc = _mm256_setzero_si256();
         for (; i + 32 <= _size; i += 32) {
             __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
-            acc = _mm256_add_epi8(acc, v);
+            acc = _mm256_add_epi64(acc, _mm256_sad_epu8(v, zero));
         }
-        // Horizontal sum
-        __m256i sum16 = _mm256_sad_epu8(acc, _mm256_setzero_si256());
-        total = _mm256_extract_epi64(sum16, 0) + _mm256_extract_epi64(sum16, 1) +
-                _mm256_extract_epi64(sum16, 2) + _mm256_extract_epi64(sum16, 3);
+        // Horizontal sum of the four 64-bit lanes.
+        total = static_cast<size_type>(_mm256_extract_epi64(acc, 0) + _mm256_extract_epi64(acc, 1) +
+                                       _mm256_extract_epi64(acc, 2) + _mm256_extract_epi64(acc, 3));
 #elif defined(BOOLVEC_HAS_SSE4)
+        const __m128i zero = _mm_setzero_si128();
         __m128i acc = _mm_setzero_si128();
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
-            acc = _mm_add_epi8(acc, v);
+            acc = _mm_add_epi64(acc, _mm_sad_epu8(v, zero));
         }
-        __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
-        total = _mm_extract_epi64(sum16, 0) + _mm_extract_epi64(sum16, 1);
+        total = static_cast<size_type>(_mm_extract_epi64(acc, 0) + _mm_extract_epi64(acc, 1));
 #elif defined(BOOLVEC_HAS_SSE2)
+        const __m128i zero = _mm_setzero_si128();
         __m128i acc = _mm_setzero_si128();
         for (; i + 16 <= _size; i += 16) {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
-            acc = _mm_add_epi8(acc, v);
+            acc = _mm_add_epi64(acc, _mm_sad_epu8(v, zero));
         }
-        __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
-        // SSE2 fallback: extract via shuffle and store
+        // SSE2 has no _mm_extract_epi64; go through memory.
         alignas(16) uint64_t tmp[2];
-        _mm_store_si128(reinterpret_cast<__m128i*>(tmp), sum16);
-        total = tmp[0] + tmp[1];
+        _mm_store_si128(reinterpret_cast<__m128i*>(tmp), acc);
+        total = static_cast<size_type>(tmp[0] + tmp[1]);
 #elif defined(BOOLVEC_HAS_NEON)
         uint64x2_t acc = vdupq_n_u64(0);
         for (; i + 16 <= _size; i += 16) {

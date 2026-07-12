@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>  // std::abort, used in erase_value_at; only ever reached transitively until now
 #include <cstring>
 #include <functional>
 #include <initializer_list>
