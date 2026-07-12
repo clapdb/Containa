@@ -162,49 +162,53 @@ target_include_directories(containa INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>
 )
-# PUBLIC, not INTERFACE, once there is a real target to compile: INTERFACE alone only propagates the
-# requirement to consumers, leaving containa.cppm itself to be compiled at whatever standard the parent
-# picked. Under a parent at CMAKE_CXX_STANDARD=17 that fails generation outright -- "target 'containa'
-# has module sources but only cxx_std_17". A header-only INTERFACE library has no objects of its own,
-# so INTERFACE is the right answer there.
-#
-# cxx_std_20, not 23, and that is deliberate on both paths. A compile feature is a *floor*, and PUBLIC
-# propagates that floor to everyone who links us -- asking for 23 here would not say "the module needs
-# 23", it would say "everyone who imports the module must be C++23". Nothing in the library asks for
-# that: the README and CLAUDE.md promise a C++20 compiler and no header uses a C++23 feature. The module
-# does not either -- containa.cppm precompiles clean at -std=c++20, and a -std=c++20 consumer imports
-# the resulting BMI, links and runs.
-#
-# The floor costs C++23 users nothing, which is the part worth being careful about: a BMI can only be
-# imported by a TU built at the same standard as the BMI, so a module pinned below its consumers would
-# be unimportable. A floor does not pin -- a parent at CMAKE_CXX_STANDARD=23 still compiles the module,
-# and its BMI, at 23. Propagating is exactly what keeps the BMI and its importers in step.
-if(CONTAINA_BUILD_MODULES)
-    target_compile_features(containa PUBLIC cxx_std_20)
-else()
-    target_compile_features(containa INTERFACE cxx_std_20)
-endif()
-
-# ...but a floor is not a standard. target_compile_features says "at least C++20"; it does not make the
-# module target adopt the standard its importers actually use. A BMI records the language dialect it was
-# compiled with, and unlike the extensions mismatch this one is a hard failure:
+# A BMI can only be loaded by a TU compiled at the same standard as the BMI. Not "at least" -- the same:
 #
 #   error: language dialect differs 'C++20', expected 'C++23'
 #   error: failed to read compiled module: Bad file data
 #
-# Reproduced with a parent that leaves CMAKE_CXX_STANDARD unset and asks for C++23 on its own target
-# (`target_compile_features(app PRIVATE cxx_std_23)`): containa.cppm compiles at C++20, the importer at
-# C++23, and `import containa;` does not build. A C++23 consumer had no way to say "build the module at
-# my standard" -- CONTAINA_CXX_STANDARD is that way. It follows the parent's global choice when there is
-# one, which is the common case and why this went unnoticed.
+# So for the module build, the standard is not a preference of ours that consumers may exceed. It is a
+# term of the contract, and it has to be *one* number that the module target and every importer share.
+#
+# CONTAINA_CXX_STANDARD is that number. It defaults to the parent's global choice -- the common case, and
+# why none of this was visible for so long -- and a parent that configures the standard per-target can
+# pin us to match. Two things then have to happen with it, and getting only one of them is how both
+# halves of this bug were written:
+#
+#   set_target_properties(CXX_STANDARD)  compiles containa.cppm, and its BMI, at that standard.
+#   target_compile_features(PUBLIC)      raises every consumer that links us to that standard.
+#
+# With only the first, a parent asking for 23 gets a gnu++23 BMI and a gnu++20 app: 'C++23', expected
+# 'C++20'. With only the second, a parent whose *own* target is C++23 while the global is unset gets a
+# gnu++20 BMI and a gnu++23 app: the mirror image. Both were reproduced with a minimal Ninja parent; both
+# are the same failure. The feature must name the standard we actually selected, never a hard-coded floor.
+#
+# PUBLIC and not INTERFACE, because there is a real target to compile: INTERFACE alone would leave
+# containa.cppm itself at whatever the parent picked, and under a parent at CMAKE_CXX_STANDARD=17 that
+# fails generation outright -- "target 'containa' has module sources but only cxx_std_17".
+#
+# The header-only path keeps a plain cxx_std_20 floor, and that is not an oversight. An INTERFACE library
+# has no objects and no BMI, so there is nothing for a consumer to be out of step *with*; 20 is a genuine
+# minimum (the README and CLAUDE.md promise a C++20 compiler) and a C++23 consumer is free to exceed it.
+# The pinning exists only because modules make the standard observable at link time.
 if(DEFINED CMAKE_CXX_STANDARD)
     set(_containa_standard_default ${CMAKE_CXX_STANDARD})
 else()
     set(_containa_standard_default 20)
 endif()
 set(CONTAINA_CXX_STANDARD "${_containa_standard_default}" CACHE STRING
-    "C++ standard to compile containa (and its module) with; must match importers")
-set_target_properties(containa PROPERTIES CXX_STANDARD ${CONTAINA_CXX_STANDARD})
+    "C++ standard to compile containa (and its module) with; importers are raised to match")
+
+if(CONTAINA_BUILD_MODULES)
+    if(CONTAINA_CXX_STANDARD LESS 20)
+        message(FATAL_ERROR
+            "CONTAINA_CXX_STANDARD is ${CONTAINA_CXX_STANDARD}; containa requires C++20 or later.")
+    endif()
+    set_target_properties(containa PROPERTIES CXX_STANDARD ${CONTAINA_CXX_STANDARD})
+    target_compile_features(containa PUBLIC cxx_std_${CONTAINA_CXX_STANDARD})
+else()
+    target_compile_features(containa INTERFACE cxx_std_20)
+endif()
 # A BMI records the language options it was compiled with, so the module and everyone who imports it must
 # agree on whether GNU extensions are on. CMake gives us no way to discover what our importers will pick,
 # so the best we can do is be *deterministic* and let the parent pin it.
