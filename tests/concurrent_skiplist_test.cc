@@ -18,6 +18,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -302,4 +303,113 @@ TEST_CASE("concurrent_skiplist::concurrent") {
 }
 
 // NOLINTEND
+
+// erase() used to leave the victim wired into the level-0 chain on purpose, so the destructor could
+// still find it. find_insert_position() then reported the successor with that corpse skipped, while
+// pred->next[0] still physically pointed at it -- so insert()'s CAS compared a logical successor
+// against a physical link, could never match, and its retry loop never terminated.
+//
+// The whole trigger is: erase anything, then insert anything. Three operations hang the container.
+// Nothing raced; the loop condition was simply unsatisfiable. These cases hang forever on master, so
+// they were verified there under an external timeout rather than by watching them fail.
+TEST_CASE("concurrent_skiplist::insert after erase") {
+    SUBCASE("re-insert the same key") {
+        concurrent_skiplist<int, std::string> sl;
+        CHECK(sl.insert(1, "a"));
+        CHECK(sl.erase(1));
+        CHECK_FALSE(sl.find(1).has_value());
+
+        CHECK(sl.insert(1, "b"));  // used to hang forever
+        auto v = sl.find(1);
+        REQUIRE(v.has_value());
+        CHECK_EQ(v.value(), "b");
+        CHECK_EQ(sl.size(), 1);
+    }
+
+    SUBCASE("insert a different key after an erase") {
+        concurrent_skiplist<int, std::string> sl;
+        CHECK(sl.insert(1, "a"));
+        CHECK(sl.erase(1));
+
+        CHECK(sl.insert(5, "b"));  // used to hang forever: any key, not just the erased one
+        CHECK(sl.find(5).has_value());
+        CHECK_FALSE(sl.find(1).has_value());
+        CHECK_EQ(sl.size(), 1);
+    }
+
+    SUBCASE("churn: repeated insert/erase cycles stay consistent") {
+        concurrent_skiplist<int, int> sl;
+        for (int round = 0; round < 50; ++round) {
+            for (int k = 0; k < 32; ++k) {
+                CHECK(sl.insert(k, round * 100 + k));
+            }
+            CHECK_EQ(sl.size(), 32);
+            for (int k = 0; k < 32; ++k) {
+                CHECK(sl.erase(k));
+            }
+            CHECK_EQ(sl.size(), 0);
+            for (int k = 0; k < 32; ++k) {
+                CHECK_FALSE(sl.find(k).has_value());
+            }
+        }
+    }
+
+    SUBCASE("erased keys stay erased and live keys stay findable") {
+        concurrent_skiplist<int, int> sl;
+        for (int k = 0; k < 200; ++k) {
+            sl.insert(k, k);
+        }
+        for (int k = 0; k < 200; k += 2) {
+            CHECK(sl.erase(k));  // corpses now sit between every surviving pair
+        }
+        for (int k = 200; k < 400; ++k) {
+            CHECK(sl.insert(k, k));  // each of these used to hang
+        }
+        CHECK_EQ(sl.size(), 300);
+        for (int k = 0; k < 400; ++k) {
+            bool want = (k >= 200) || (k % 2 == 1);
+            CHECK_EQ(sl.find(k).has_value(), want);
+        }
+    }
+}
+
+// Erased nodes are handed to a retired list now, so exactly one thread must claim each node -- push it
+// twice and the destructor frees it twice. The marking loop cannot tell you who won, because it exits
+// on "already marked", which is also true for the thread that lost the CAS. On master both threads
+// return true from erase() and both decrement _size.
+TEST_CASE("concurrent_skiplist::concurrent erase of the same key claims it exactly once") {
+    constexpr int kKeys = 400;
+    constexpr int kThreads = 8;
+
+    // Enough rounds to actually land the interleaving: on master this reliably over-counts within the
+    // first handful, but five rounds is not enough to be sure of catching it.
+    for (int round = 0; round < 40; ++round) {
+        concurrent_skiplist<int, int> sl;
+        for (int k = 0; k < kKeys; ++k) {
+            sl.insert(k, k);
+        }
+
+        std::atomic<int> claimed{0};
+        std::vector<std::thread> threads;
+        threads.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t) {
+            threads.emplace_back([&] {
+                int n = 0;
+                for (int k = 0; k < kKeys; ++k) {
+                    if (sl.erase(k)) {
+                        ++n;
+                    }
+                }
+                claimed += n;
+            });
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        CHECK_EQ(claimed.load(), kKeys);  // not 422
+        CHECK_EQ(sl.size(), 0);
+    }
+}
+
 }  // namespace stdb::container
