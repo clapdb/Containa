@@ -184,12 +184,30 @@ if(CONTAINA_BUILD_MODULES)
 else()
     target_compile_features(containa INTERFACE cxx_std_20)
 endif()
-# Only when the parent actually chose. Vendored via add_subdirectory() into a parent that never set
-# CMAKE_CXX_EXTENSIONS, this expands to `set_target_properties(containa PROPERTIES CXX_EXTENSIONS )` and
-# CMake aborts with "incorrect number of arguments" before it configures anything at all.
+# A BMI records the language options it was compiled with, so the module and everyone who imports it must
+# agree on whether GNU extensions are on. CMake gives us no way to discover what our importers will pick,
+# so the best we can do is be *deterministic* and let the parent pin it.
+#
+# The old `if(DEFINED CMAKE_CXX_EXTENSIONS)` guard was not enough. It exists because writing
+# `set_target_properties(containa PROPERTIES CXX_EXTENSIONS ${CMAKE_CXX_EXTENSIONS})` with the variable
+# unset expands to a property with no value and CMake aborts outright -- so that part must stay. But a
+# parent can set CXX_EXTENSIONS on its *own* target without ever defining the global variable, and then
+# the guard silently does nothing: containa.cppm compiles -std=gnu++20 (CMake's default) while the
+# importer compiles -std=c++20. Reproduced exactly that.
+#
+# clang 22 happens to accept the mismatched BMI today, so this is not a live break -- but it is an
+# unintended divergence in the one thing a BMI is most sensitive to, and "the current compiler tolerates
+# it" is not a property worth depending on. CONTAINA_CXX_EXTENSIONS makes it explicit: it follows the
+# parent's global choice when there is one, falls back to CMake's own default when there is not, and a
+# parent that configures extensions per-target can pin us to match.
 if(DEFINED CMAKE_CXX_EXTENSIONS)
-    set_target_properties(containa PROPERTIES CXX_EXTENSIONS ${CMAKE_CXX_EXTENSIONS})
+    set(_containa_extensions_default ${CMAKE_CXX_EXTENSIONS})
+else()
+    set(_containa_extensions_default ON)   # CMake's default, i.e. what an unconfigured importer gets
 endif()
+option(CONTAINA_CXX_EXTENSIONS "Compile containa (and its module) with GNU extensions; must match importers"
+       ${_containa_extensions_default})
+set_target_properties(containa PROPERTIES CXX_EXTENSIONS ${CONTAINA_CXX_EXTENSIONS})
 
 if(PROJECT_IS_TOP_LEVEL)
     if(MSVC)
