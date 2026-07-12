@@ -18,6 +18,7 @@
 
 #include <doctest/doctest.h>
 
+#include <array>  // std::array, used by the pmr buffer cases below
 #include <string>
 #include <vector>
 
