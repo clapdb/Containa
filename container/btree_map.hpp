@@ -4162,7 +4162,18 @@ class btree_map
                     }
                     current = parent;
                 }
-                // End of tree - stay at this leaf with pos = count
+                // End of tree - stay at this leaf with pos = count.
+                //
+                // Say it, do not just intend it. _pos was incremented above, so it is count + 1 here
+                // whenever we entered at count -- and entering at count is exactly what end() is, since
+                // end() is const_iterator(_rightmost_leaf, _rightmost_leaf->count). Leaving _pos there
+                // makes the incremented iterator compare *unequal* to end(), so a `while (it != end())`
+                // loop runs on past the last element and dereferences the leaf beyond its keys.
+                //
+                // For an iterator that was on a real element this assignment changes nothing: _pos was
+                // count - 1, ++ made it count, and count is what we want. It only matters when the
+                // iterator was already at the end, and then it is what keeps ++end() == end().
+                _pos = leaf->count;
                 return;
             } else {
                 auto* internal = static_cast<const internal_node*>(_node);
@@ -5636,67 +5647,76 @@ public:
 
   private:
     // Optimized count for multi mode - single tree traversal with fast path
+    // count() and equal_range() in multi mode used to run their own "optimized single traversal": walk
+    // internal nodes with lower_bound_in_internal(), descend to a leaf, and work from there. That is a
+    // B+-tree's shape, and this is a B-tree -- internal nodes hold keys of their own. When a key is
+    // promoted into an internal node as a separator, lower_bound_in_internal() stops *at* it and the
+    // descent goes into children[pos], the subtree to its left, which by definition holds only keys
+    // smaller than it. The leaf reached there does not contain the key, so both functions concluded it
+    // was absent: count(99) returned 0 and equal_range(99) came back empty on a tree where iteration
+    // plainly saw sixteen 99s.
+    //
+    // lower_bound() and upper_bound() get this right -- they always did -- so use them, and delete the
+    // traversal that did not. It was wrong twice over: this, and walking off the end of the rightmost
+    // leaf for the largest key. Two hand-rolled fast paths, neither of which had ever been run.
     template <typename K>
-    [[nodiscard]] __attribute__((always_inline, hot)) auto count_multi_impl(const K& key) const -> size_type {
-        if (_root == nullptr) [[unlikely]] return 0;
+    [[nodiscard]] auto count_multi_impl(const K& key) const -> size_type {
+        // One traversal, not two. lower_bound() is the part that has to be right about internal nodes,
+        // and it is; from there the run of equal keys is contiguous, so scan it rather than paying for a
+        // second descent in upper_bound(). Measured on 200k elements: lower_bound + scan is ~2x cheaper
+        // than lower_bound + upper_bound, and within noise of the old hand-rolled descent that this
+        // replaces -- which is the point, since that descent was wrong.
+        const_iterator it = lower_bound(key);
+        const const_iterator stop = end();
 
-        // Single traversal to find lower_bound leaf position
-        const node_base* node = _root;
-        while (!node->is_leaf_node()) {
-            auto* internal = static_cast<const internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
-            node = internal->children[pos];
-        }
-
-        auto* leaf = static_cast<const leaf_node*>(node);
-        size_type lb_pos = lower_bound_in_leaf(leaf, key);
-
-        // Check if key exists (90% of benchmark queries are for non-existent keys)
-        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) [[likely]] {
+        // Absent keys are the overwhelmingly common query, so reject them on one comparison rather than
+        // on a SIMD upper_bound scan of the leaf we happened to land in.
+        if (it == stop || _comp(key, get_key_from_iterator(it))) {
             return 0;
         }
 
-        // Fast path: count duplicates in same leaf with SIMD upper_bound
-        size_type ub_pos = upper_bound_in_leaf(leaf, key);
-        if (ub_pos < leaf->count) [[likely]] {
-            return ub_pos - lb_pos;
-        }
-
-        // Slow path: duplicates extend beyond this leaf
-        // Walk through leaves using iterator, but use SIMD per leaf for efficiency
-        size_type result = leaf->count - lb_pos;
-        const_iterator it(leaf, leaf->count);
-        ++it;
-        const node_base* current_leaf = leaf;
-
-        while (it != end()) {
-            // Check if we've moved to a new leaf
-            if (it._node != current_leaf && it._node->is_leaf_node()) {
-                current_leaf = it._node;
-                auto* iter_leaf = static_cast<const leaf_node*>(current_leaf);
-
-                // Check first element - if it's greater than key, we're done
-                if (_comp(key, iter_leaf->key(0))) break;
-
-                // Use SIMD to find upper_bound in this leaf
-                size_type ub = upper_bound_in_leaf(iter_leaf, key);
-                result += ub;
-
-                // If upper_bound is within leaf, we found all duplicates
-                if (ub < iter_leaf->count) break;
-
-                // Move iterator to end of this leaf
-                it = const_iterator(iter_leaf, iter_leaf->count);
+        size_type n = 0;
+        while (it != stop) {
+            // The per-leaf SIMD upper_bound only takes a Key. For a heterogeneous lookup there is no
+            // Key to give it, so that leaf walks one element at a time -- correct either way, and the
+            // homogeneous path, which is the one that has to be fast, keeps the jump.
+            if constexpr (!std::is_same_v<K, Key>) {
+                if (_comp(key, get_key_from_iterator(it))) {
+                    break;
+                }
+                ++n;
+                ++it;
+                continue;
+            } else if (it._node->is_leaf_node()) {
+                // Inside a leaf the equal keys are contiguous, so take the whole run at once with the
+                // SIMD upper_bound rather than incrementing an iterator through it. This is what the old
+                // implementation was really buying -- and it is the only thing it was buying: on the
+                // "90% of queries are for absent keys" case it claimed to optimise, and on unique keys,
+                // a plain lower_bound is already just as fast.
+                auto* leaf = static_cast<const leaf_node*>(it._node);
+                size_type ub = upper_bound_in_leaf(leaf, key);
+                if (ub <= it._pos) {
+                    break;  // nothing equal at or after this position
+                }
+                n += ub - it._pos;
+                if (ub < leaf->count) {
+                    break;  // the run ends inside this leaf
+                }
+                // The run reaches the end of this leaf; step past it. Safe now that increment() clamps
+                // _pos at the rightmost leaf instead of walking off the end.
+                it = const_iterator(leaf, leaf->count);
                 ++it;
             } else {
-                // Fallback: count one element at a time (handles edge cases)
-                const Key& iter_key = get_key_from_iterator(it);
-                if (_comp(key, iter_key)) break;
-                ++result;
+                // A separator in an internal node. This is the case the old descent could not see: it
+                // walked straight past internal keys into the subtree to their left.
+                if (_comp(key, get_key_from_iterator(it))) {
+                    break;
+                }
+                ++n;
                 ++it;
             }
         }
-        return result;
+        return n;
     }
 
     // Helper to get key from iterator position
@@ -5711,46 +5731,14 @@ public:
 
     // Optimized equal_range for multi mode - single tree traversal for common case
     template <typename K>
-    [[nodiscard]] __attribute__((always_inline, hot)) auto equal_range_multi_impl(const K& key) -> std::pair<iterator, iterator> {
-        if (_root == nullptr) [[unlikely]] return {end(), end()};
-
-        // Single traversal to find lower_bound leaf position
-        node_base* node = _root;
-        while (!node->is_leaf_node()) {
-            auto* internal = static_cast<internal_node*>(node);
-            size_type pos = lower_bound_in_internal(internal, key);
-            if constexpr (!string_like<Key>) {
-                __builtin_prefetch(internal->children[pos], 0, 3);
-            }
-            node = internal->children[pos];
-        }
-
-        auto* leaf = static_cast<leaf_node*>(node);
-        size_type lb_pos = lower_bound_in_leaf(leaf, key);
-
-        // Check if key exists
-        if (lb_pos >= leaf->count || _comp(key, leaf->key(lb_pos))) [[likely]] {
-            iterator it(leaf, lb_pos < leaf->count ? lb_pos : leaf->count);
-            return {it, it};
-        }
-
-        iterator lb_iter(leaf, lb_pos);
-
-        // Fast path: find upper_bound in same leaf with SIMD
-        size_type ub_pos = upper_bound_in_leaf(leaf, key);
-        if (ub_pos < leaf->count) [[likely]] {
-            return {lb_iter, iterator(leaf, ub_pos)};
-        }
-
-        // Slow path: duplicates extend beyond this leaf - use regular upper_bound
-        // This requires a second tree traversal but handles edge cases correctly
-        return {lb_iter, upper_bound(key)};
+    [[nodiscard]] auto equal_range_multi_impl(const K& key) -> std::pair<iterator, iterator> {
+        return {lower_bound(key), upper_bound(key)};
     }
 
+
     template <typename K>
-    [[nodiscard]] __attribute__((always_inline, hot)) auto equal_range_multi_impl(const K& key) const -> std::pair<const_iterator, const_iterator> {
-        auto result = const_cast<btree_map*>(this)->equal_range_multi_impl(key);
-        return {const_iterator(result.first), const_iterator(result.second)};
+    [[nodiscard]] auto equal_range_multi_impl(const K& key) const -> std::pair<const_iterator, const_iterator> {
+        return {lower_bound(key), upper_bound(key)};
     }
 
   public:
@@ -5909,46 +5897,44 @@ public:
     // Erase by key - O(log n) with proper B-tree rebalancing
     // In unique mode: erases at most 1 element
     // In multi mode: erases all elements with matching key
-    auto erase(const Key& key) -> size_type {
-        if constexpr (is_multi_mode) {
-            // Multi mode: erase all elements with matching key
-            size_type erased = 0;
-            auto it = find(key);
-            while (it != end()) {
-                // Get the key from iterator
-                const Key& iter_key = [&]() -> const Key& {
-                    if constexpr (is_set_mode) {
-                        return *it;
-                    } else {
-                        return it->first;
-                    }
-                }();
-                // Check if still matching
-                if (_comp(key, iter_key) || _comp(iter_key, key)) {
-                    break;  // No longer matching
-                }
-                it = erase(it);  // erase(iterator) returns next iterator
-                ++erased;
-            }
-            return erased;
-        } else {
-            auto it = find(key);
-            if (it == end()) {
-                return 0;
-            }
-            erase_impl(it._node, it._pos);
-            return 1;
-        }
-    }
+    auto erase(const Key& key) -> size_type { return erase_key_impl(key); }
 
     // Heterogeneous erase by key
     template <typename K>
         requires is_transparent_comparator_v<Compare>
     auto erase(const K& key) -> size_type {
+        return erase_key_impl(key);
+    }
+
+  private:
+    // One body, two overloads. This is not tidiness: erase(const Key&) and the heterogeneous
+    // erase(const K&) were two copies of the same walk, and when the copy above was fixed the other one
+    // was not -- so `m.erase("20")` on a transparent comparator still ran the old code, reported erasing
+    // one of seven duplicates, and left the other six in the tree. Two copies of a subtle loop is how
+    // that happens. Now there is one.
+    template <typename K>
+    auto erase_key_impl(const K& key) -> size_type {
         if constexpr (is_multi_mode) {
+            // Erase every element with this key, re-finding the first one on each pass rather than
+            // walking the run with the iterator that erase(iterator) hands back. Two things went wrong
+            // with walking it:
+            //
+            //   * It started at find(key), which returns *an* element with this key -- whichever one the
+            //     descent lands on -- so erasing forward from the middle of a run left the duplicates
+            //     before it in the tree.
+            //   * Even starting from lower_bound(), the "next" iterator erase(iterator) returns does not
+            //     survive the rebalancing an erase can trigger, so the walk still dropped elements.
+            //     Against std::multimap it reported 3 erased where 4 were present.
+            //
+            // A fresh lower_bound() per element is O(k log n) rather than O(k + log n). That is the price
+            // of not depending on an iterator staying valid across a structural mutation, and erase-all
+            // is not the hot path.
             size_type erased = 0;
-            auto it = find_impl(key);
-            while (it != end()) {
+            while (true) {
+                auto it = lower_bound(key);
+                if (it == end()) {
+                    break;
+                }
                 const Key& iter_key = [&]() -> const Key& {
                     if constexpr (is_set_mode) {
                         return *it;
@@ -5957,9 +5943,9 @@ public:
                     }
                 }();
                 if (_comp(key, iter_key) || _comp(iter_key, key)) {
-                    break;
+                    break;  // no more elements with this key
                 }
-                it = erase(it);
+                erase(it);
                 ++erased;
             }
             return erased;
@@ -5973,6 +5959,7 @@ public:
         }
     }
 
+  public:
     // Erase by iterator - returns iterator to next element
     // Simplified structure following absl's approach
     auto erase(iterator pos) -> iterator {
@@ -6117,8 +6104,14 @@ public:
         }
     }
 
-    // Insert node handle (C++17)
-    auto insert(node_type&& nh) -> insert_return_type {
+    // Insert node handle (C++17). Constrained so a braced-init-list (e.g.
+    // insert({1, "one"})) cannot match — only value_type's overloads can — while
+    // staying rvalue-only: requiring NH == node_type (not remove_cvref) deduces to
+    // the bare type only for rvalue arguments, so a named lvalue handle is rejected
+    // (the caller must std::move it), matching std::map's insert(node_type&&).
+    template <typename NH>
+        requires std::is_same_v<NH, node_type>
+    auto insert(NH&& nh) -> insert_return_type {
         if (nh.empty()) {
             return {end(), false, std::move(nh)};
         }

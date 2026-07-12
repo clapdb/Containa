@@ -279,6 +279,18 @@ inline void deallocate_aligned(uint64_t* ptr) noexcept {
     __m256i acc = _mm256_setzero_si256();
     size_t total = 0;
 
+    // acc holds 8-bit lanes and each iteration adds two nibble popcounts, so a lane grows by at most
+    // 4 + 4 = 8 and can absorb 255 / 8 = 31 iterations before it wraps. Count the iterations and fold
+    // on the 31st.
+    //
+    // The bitmask this replaces -- `if ((i & 0x7C) == 0x7C)`, with i stepping by 4 -- fired when
+    // i % 128 == 124, which is once every *32* iterations, not 31. One iteration too late: a lane
+    // reaches 32 * 8 = 256 and wraps to 0. On an all-ones bitmap every lane wrapped together, so
+    // popcount returned 0 for a fully-set bitmap of 128 words or more, and undercounted by a multiple
+    // of 256 in general. The comment said 31 all along; only the code disagreed.
+    constexpr size_t kFoldEvery = 31;
+    size_t since_fold = 0;
+
     // Process 32 bytes (4 words) at a time
     for (; i + 4 <= word_count; i += 4) {
         __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(data + i));
@@ -289,13 +301,13 @@ inline void deallocate_aligned(uint64_t* ptr) noexcept {
         acc = _mm256_add_epi8(acc, popcnt_lo);
         acc = _mm256_add_epi8(acc, popcnt_hi);
 
-        // Prevent overflow: accumulate every 31 iterations (255/8 = 31)
-        if ((i & 0x7C) == 0x7C) {
+        if (++since_fold == kFoldEvery) {
             // Sum bytes horizontally
             acc = _mm256_sad_epu8(acc, _mm256_setzero_si256());
             total += _mm256_extract_epi64(acc, 0) + _mm256_extract_epi64(acc, 1) +
                      _mm256_extract_epi64(acc, 2) + _mm256_extract_epi64(acc, 3);
             acc = _mm256_setzero_si256();
+            since_fold = 0;
         }
     }
 

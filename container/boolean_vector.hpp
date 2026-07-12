@@ -561,34 +561,57 @@ public:
         size_type total = 0;
         size_type i = 0;
 
+        // The vector accumulators below add the bytes with add_epi8, so every lane is 8 bits wide.
+        // Each bool contributes 0 or 1, so a lane holds at most 255 after 255 iterations and the
+        // *256th* wraps it silently to zero -- count() then under-reports by 256 per wrapped lane.
+        // On an all-true vector that first bites at 256 * 16 = 4096 elements on SSE and 256 * 32 =
+        // 8192 on AVX2. Fold the byte accumulator into 64-bit lanes with sad_epu8 once per block of
+        // 255 iterations, before it can get there, and keep the running total in those 64-bit lanes.
+        // (NEON below is already safe: it widens to 64 bits every iteration.)
+        //
+        // Folding every iteration instead of every 255th is simpler and also correct, but measurably
+        // slower -- 32 GB/s vs 43 on SSE4 and 64 vs 75-91 on AVX2, on a 4M-element vector.
+        // maybe_unused: a platform with neither the x86 nor the NEON path falls through to the
+        // scalar loop below and never reads this, and -Wunused-variable is an error here.
+        [[maybe_unused]] constexpr size_type kFoldEvery = 255;
+
 #if defined(BOOLVEC_HAS_AVX2)
-        __m256i acc = _mm256_setzero_si256();
-        for (; i + 32 <= _size; i += 32) {
-            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
-            acc = _mm256_add_epi8(acc, v);
+        constexpr size_type kStep = 32;
+        const __m256i zero = _mm256_setzero_si256();
+        __m256i total64 = zero;
+        while (i + kStep <= _size) {
+            size_type block_end = i + kFoldEvery * kStep;
+            if (block_end > _size) {
+                block_end = _size;
+            }
+            __m256i acc = zero;
+            for (; i + kStep <= block_end; i += kStep) {
+                acc = _mm256_add_epi8(acc, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i)));
+            }
+            total64 = _mm256_add_epi64(total64, _mm256_sad_epu8(acc, zero));
         }
-        // Horizontal sum
-        __m256i sum16 = _mm256_sad_epu8(acc, _mm256_setzero_si256());
-        total = _mm256_extract_epi64(sum16, 0) + _mm256_extract_epi64(sum16, 1) +
-                _mm256_extract_epi64(sum16, 2) + _mm256_extract_epi64(sum16, 3);
-#elif defined(BOOLVEC_HAS_SSE4)
-        __m128i acc = _mm_setzero_si128();
-        for (; i + 16 <= _size; i += 16) {
-            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
-            acc = _mm_add_epi8(acc, v);
+        alignas(32) uint64_t tmp[4];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(tmp), total64);
+        total = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+#elif defined(BOOLVEC_HAS_SSE4) || defined(BOOLVEC_HAS_SSE2)
+        // One body for both: every intrinsic here is SSE2, and SSE4 gained nothing but a shorter
+        // horizontal extract, which is not worth a second copy of the loop.
+        constexpr size_type kStep = 16;
+        const __m128i zero = _mm_setzero_si128();
+        __m128i total64 = zero;
+        while (i + kStep <= _size) {
+            size_type block_end = i + kFoldEvery * kStep;
+            if (block_end > _size) {
+                block_end = _size;
+            }
+            __m128i acc = zero;
+            for (; i + kStep <= block_end; i += kStep) {
+                acc = _mm_add_epi8(acc, _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i)));
+            }
+            total64 = _mm_add_epi64(total64, _mm_sad_epu8(acc, zero));
         }
-        __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
-        total = _mm_extract_epi64(sum16, 0) + _mm_extract_epi64(sum16, 1);
-#elif defined(BOOLVEC_HAS_SSE2)
-        __m128i acc = _mm_setzero_si128();
-        for (; i + 16 <= _size; i += 16) {
-            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
-            acc = _mm_add_epi8(acc, v);
-        }
-        __m128i sum16 = _mm_sad_epu8(acc, _mm_setzero_si128());
-        // SSE2 fallback: extract via shuffle and store
         alignas(16) uint64_t tmp[2];
-        _mm_store_si128(reinterpret_cast<__m128i*>(tmp), sum16);
+        _mm_store_si128(reinterpret_cast<__m128i*>(tmp), total64);
         total = tmp[0] + tmp[1];
 #elif defined(BOOLVEC_HAS_NEON)
         uint64x2_t acc = vdupq_n_u64(0);

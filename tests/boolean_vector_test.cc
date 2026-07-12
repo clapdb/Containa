@@ -658,6 +658,45 @@ TEST_SUITE("boolean_vector") {
     }
 
     TEST_CASE("count/any/all/none") {
+        // count()'s SIMD loops accumulate the 0/1 bytes in 8-bit lanes, so the 256th iteration wraps
+        // a lane to zero: on an all-true vector that is 256 * 16 = 4096 elements on SSE and
+        // 256 * 32 = 8192 on AVX2.
+        //
+        // Density is what decides whether a lane ever gets there, and it is why this survived. The
+        // "count large vector" case above is 10000 elements -- well past the SSE boundary -- but its
+        // density is low enough that a lane never climbs to 256, and an AVX2 lane, seeing only 312
+        // bytes, gets nowhere near. Since CMAKE_CXX_FLAGS_RELEASE carries -march=native, the release
+        // build takes the AVX2 path and the bug was invisible there. Dense input is the case that
+        // exposes it, and nothing covered dense input.
+        SUBCASE("count does not overflow the SIMD accumulator") {
+            for (size_t n : {4095U, 4096U, 4097U, 8191U, 8192U, 8193U, 20000U, 65536U, 100000U}) {
+                boolean_vector all_set(n, true);
+                CHECK(all_set.count() == n);
+
+                boolean_vector none_set(n, false);
+                CHECK(none_set.count() == 0);
+
+                // dense but not full, so a wrap cannot cancel out to the right answer by luck
+                boolean_vector most_set(n, true);
+                size_t expect = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (i % 7 == 0) {
+                        most_set[i] = false;
+                    } else {
+                        ++expect;
+                    }
+                }
+                CHECK(most_set.count() == expect);
+            }
+
+            // Exhaustive across the SSE boundary, so no vector-width/remainder combination is missed
+            // and the scalar tail is exercised at every offset.
+            for (size_t n = 4080; n <= 4112; ++n) {
+                boolean_vector v(n, true);
+                CHECK(v.count() == n);
+            }
+        }
+
         SUBCASE("count basic") {
             boolean_vector v{true, false, true, true, false};
             CHECK(v.count() == 3);
