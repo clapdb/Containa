@@ -17,6 +17,8 @@
 #include "container/skiplist_map.hpp"
 #include "container/skiplist_set.hpp"
 
+#include <array>
+#include <memory_resource>
 #include <atomic>
 #include <map>
 #include <random>

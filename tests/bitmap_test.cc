@@ -29,7 +29,7 @@ using namespace stdb::container;
 // =============================================================================
 
 TEST_SUITE("bitmap") {
-    TEST_CASE("construction") {
+    TEST_CASE("bitmap::construction") {
         SUBCASE("default constructor") {
             bitmap b;
             CHECK(b.size() == 0);
@@ -66,7 +66,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("single bit operations") {
+    TEST_CASE("bitmap::single bit operations") {
         bitmap b(200);
 
         SUBCASE("set and test") {
@@ -113,7 +113,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("popcount") {
+    TEST_CASE("bitmap::popcount") {
         SUBCASE("empty bitmap") {
             bitmap b(1000);
             CHECK(b.popcount() == 0);
@@ -150,7 +150,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("find_first and find_next") {
+    TEST_CASE("bitmap::find_first and find_next") {
         SUBCASE("empty bitmap") {
             bitmap b(100);
             CHECK(b.find_first() == -1);
@@ -193,7 +193,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("iterator") {
+    TEST_CASE("bitmap::iterator") {
         bitmap b(200);
         b.set(5);
         b.set(64);
@@ -212,7 +212,7 @@ TEST_SUITE("bitmap") {
         CHECK(bits[3] == 128);
     }
 
-    TEST_CASE("bitwise operations") {
+    TEST_CASE("bitmap::bitwise operations") {
         bitmap a(128);
         bitmap b(128);
 
@@ -291,7 +291,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("large bitwise operations") {
+    TEST_CASE("bitmap::large bitwise operations") {
         constexpr size_t size = 100000;
         bitmap a(size);
         bitmap b(size);
@@ -328,7 +328,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("bulk IN operations") {
+    TEST_CASE("bitmap::bulk IN operations") {
         bitmap b(1000);
         b.set(10);
         b.set(50);
@@ -372,7 +372,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("resize") {
+    TEST_CASE("bitmap::resize") {
         SUBCASE("grow") {
             bitmap b(100);
             b.set(50);
@@ -398,7 +398,7 @@ TEST_SUITE("bitmap") {
         }
     }
 
-    TEST_CASE("clear") {
+    TEST_CASE("bitmap::clear") {
         bitmap b(1000);
         for (uint32_t i = 0; i < 1000; ++i) {
             b.set(i);
@@ -416,13 +416,13 @@ TEST_SUITE("bitmap") {
 // =============================================================================
 
 TEST_SUITE("static_bitmap") {
-    TEST_CASE("construction") {
+    TEST_CASE("static_bitmap::construction") {
         static_bitmap<100> b;
         CHECK(b.size() == 100);
         CHECK(b.popcount() == 0);
     }
 
-    TEST_CASE("single bit operations") {
+    TEST_CASE("static_bitmap::single bit operations") {
         static_bitmap<200> b;
 
         b.set(0);
@@ -446,7 +446,7 @@ TEST_SUITE("static_bitmap") {
         CHECK_FALSE(b.test(100));
     }
 
-    TEST_CASE("popcount") {
+    TEST_CASE("static_bitmap::popcount") {
         static_bitmap<1000> b;
         for (uint32_t i = 0; i < 100; ++i) {
             b.set(i * 10);
@@ -454,7 +454,7 @@ TEST_SUITE("static_bitmap") {
         CHECK(b.popcount() == 100);
     }
 
-    TEST_CASE("find_first and find_next") {
+    TEST_CASE("static_bitmap::find_first and find_next") {
         static_bitmap<200> b;
         b.set(10);
         b.set(64);
@@ -466,7 +466,7 @@ TEST_SUITE("static_bitmap") {
         CHECK(b.find_next(100) == -1);
     }
 
-    TEST_CASE("iterator") {
+    TEST_CASE("static_bitmap::iterator") {
         static_bitmap<200> b;
         b.set(5);
         b.set(64);
@@ -483,7 +483,7 @@ TEST_SUITE("static_bitmap") {
         CHECK(bits[2] == 127);
     }
 
-    TEST_CASE("bitwise operations") {
+    TEST_CASE("static_bitmap::bitwise operations") {
         static_bitmap<128> a;
         static_bitmap<128> b;
 
@@ -516,7 +516,7 @@ TEST_SUITE("static_bitmap") {
         }
     }
 
-    TEST_CASE("fill and clear") {
+    TEST_CASE("static_bitmap::fill and clear") {
         static_bitmap<100> b;
 
         b.fill();
@@ -528,7 +528,7 @@ TEST_SUITE("static_bitmap") {
         CHECK(b.popcount() == 0);
     }
 
-    TEST_CASE("bulk IN operations") {
+    TEST_CASE("static_bitmap::bulk IN operations") {
         static_bitmap<1000> b;
         b.set(10);
         b.set(50);
@@ -550,7 +550,7 @@ TEST_SUITE("static_bitmap") {
 // =============================================================================
 
 TEST_SUITE("bitmap edge cases") {
-    TEST_CASE("very small bitmap") {
+    TEST_CASE("bitmap edge cases::very small bitmap") {
         bitmap b(1);
         CHECK(b.size() == 1);
         b.set(0);
@@ -558,7 +558,7 @@ TEST_SUITE("bitmap edge cases") {
         CHECK(b.popcount() == 1);
     }
 
-    TEST_CASE("word-aligned sizes") {
+    TEST_CASE("bitmap edge cases::word-aligned sizes") {
         for (size_t size : {64, 128, 192, 256, 512}) {
             bitmap b(size);
             b.set(0);
@@ -567,7 +567,7 @@ TEST_SUITE("bitmap edge cases") {
         }
     }
 
-    TEST_CASE("non-word-aligned sizes") {
+    TEST_CASE("bitmap edge cases::non-word-aligned sizes") {
         for (size_t size : {65, 127, 129, 255, 257}) {
             bitmap b(size);
             b.set(0);

@@ -38,26 +38,32 @@ if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED CMAKE_CXX_COMPILER)
     endif()
 endif()
 
-# Compiler flags. Top-level only, like everything else that configures the *project* rather than the
-# *library* -- and -march=native is the one that must not escape, for two separate reasons.
+# Compiler flags. Two separate things had to be fixed here, and they are orthogonal -- keep both.
 #
-# It is not ours to impose. A parent that vendors us with add_subdirectory() gets this applied to our
-# directory scope while its own targets keep its flags, so we would quietly compile a piece of their
-# build for whatever CPU the build machine happens to have. That is a portability bug on its own: a
-# binary built on a machine with AVX-512 will not run on one without it.
+# 1. Top-level only. A parent that vendors us with add_subdirectory() gets these applied to our directory
+#    scope while its own targets keep its flags, so we would quietly compile a piece of their build for
+#    whatever CPU the build machine happens to have. That is a portability bug on its own (a binary built
+#    on an AVX-512 machine will not run without it), and with CONTAINA_BUILD_MODULES it is fatal: a BMI
+#    records the target features it was compiled with, and clang refuses to load one into a TU that lacks
+#    them --
 #
-# And with CONTAINA_BUILD_MODULES it is not merely impolite, it is fatal. A BMI records the target
-# features it was compiled with and clang refuses to load it into a translation unit that does not have
-# them:
+#      error: precompiled file '...bmi' was compiled with the target feature '+adx'
+#             but the current translation unit is not
 #
-#   error: precompiled file '...bmi' was compiled with the target feature '+adx'
-#          but the current translation unit is not
+#    so `import containa;` fails for a consumer that did nothing wrong.
 #
-# So a vendored Release build compiles containa.cppm with -march=native and then cannot import it from
-# the parent's own generic-flagged code. `import containa;` fails for a consumer that did nothing wrong.
+# 2. An option, not a decree. Even at top level, a plain `set()` overwrites whatever the build asked for:
+#    a -DCMAKE_CXX_FLAGS_RELEASE=... on the command line is silently discarded, and a -march passed
+#    through CMAKE_CXX_FLAGS loses too, because CMake appends the per-config flags *after* the generic
+#    ones and clang takes the last -march. That is what made the -march matrix in our own CI a no-op --
+#    both entries compiled -march=native, and the job tested one path twice while claiming to test two.
 if(PROJECT_IS_TOP_LEVEL)
-    # Use -march=native to enable AVX2/AVX512 SIMD optimizations
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+    option(CONTAINA_MARCH_NATIVE "Add -march=native to Release builds" ON)
+    if(CONTAINA_MARCH_NATIVE)
+        set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+    else()
+        set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+    endif()
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 endif()
 
@@ -195,6 +201,15 @@ if(PROJECT_IS_TOP_LEVEL)
     endif()
 endif()
 
+
+# ctest registers nothing without enable_testing(), and `ctest` with nothing registered exits 0 -- which
+# is how CI stayed green for years while never running a single test. See tests/CMakeLists.txt.
+#
+# Only when we are the project being tested, though: a parent that vendors us wants our headers, not our
+# test suite, and CONTAINA_BUILD_TESTS defaults to PROJECT_IS_TOP_LEVEL.
+if(CONTAINA_BUILD_TESTS)
+    enable_testing()
+endif()
 
 if(CONTAINA_BUILD_TESTS OR CONTAINA_BUILD_BENCHMARKS)
     add_subdirectory(doctest)

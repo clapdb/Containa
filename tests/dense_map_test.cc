@@ -17,6 +17,7 @@
 #include "container/dense_map.hpp"
 #include "container/dense_set.hpp"
 
+#include <memory_resource>
 #include <array>
 #include <random>
 #include <string>

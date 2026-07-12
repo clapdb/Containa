@@ -33,6 +33,8 @@
 #include "container/skiplist_map.hpp"
 #include "container/small_vectra.hpp"
 
+#include <atomic>
+#include <memory_resource>
 #include <doctest/doctest.h>
 
 #include <algorithm>

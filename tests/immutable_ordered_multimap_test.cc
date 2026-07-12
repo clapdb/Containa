@@ -5,6 +5,7 @@
 
 #include "container/immutable_ordered_multimap.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <random>
