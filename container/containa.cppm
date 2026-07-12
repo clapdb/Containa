@@ -2,6 +2,7 @@ module;
 #include "boolean_vector.hpp"
 #include "btree_map.hpp"
 #include "btree_set.hpp"
+#include "art_map.hpp"
 #include "container_base.hpp"
 #include "dense_map.hpp"
 #include "dense_set.hpp"
@@ -45,7 +46,11 @@ using ::stdb::container::boolean_vector;
 
 // The rest of the public containers. `import containa;` must not expose a smaller API than a textual
 // includer does, or the module is not a replacement for the headers.
+using ::stdb::container::art_key_encoder;
+using ::stdb::container::art_key_view;
+using ::stdb::container::art_map;
 using ::stdb::container::bitmap;
+using ::stdb::container::kArtKeyScratch;
 using ::stdb::container::static_bitmap;
 // concurrent_skiplist and concurrent_skiplist_map are deliberately NOT exported, and their header is
 // not even in the global module fragment above.
