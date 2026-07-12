@@ -28,6 +28,9 @@
 #include "container/btree_map.hpp"
 
 #ifdef ENABLE_ARENA_BENCH
+// A textual include, not `import arena;`. This optional benchmark builds arena from ARENA_DIR as a
+// plain static library plus an include directory (bench/CMakeLists.txt) -- there is no CXX_MODULES file
+// set or prebuilt BMI for a module named `arena` here, so the import has nothing to resolve against.
 #include "arena/arena.hpp"
 #endif
 
