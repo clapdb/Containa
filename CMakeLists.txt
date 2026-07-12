@@ -38,10 +38,28 @@ if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED CMAKE_CXX_COMPILER)
     endif()
 endif()
 
-# Compiler flags
-# Use -march=native to enable AVX2/AVX512 SIMD optimizations
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+# Compiler flags. Top-level only, like everything else that configures the *project* rather than the
+# *library* -- and -march=native is the one that must not escape, for two separate reasons.
+#
+# It is not ours to impose. A parent that vendors us with add_subdirectory() gets this applied to our
+# directory scope while its own targets keep its flags, so we would quietly compile a piece of their
+# build for whatever CPU the build machine happens to have. That is a portability bug on its own: a
+# binary built on a machine with AVX-512 will not run on one without it.
+#
+# And with CONTAINA_BUILD_MODULES it is not merely impolite, it is fatal. A BMI records the target
+# features it was compiled with and clang refuses to load it into a translation unit that does not have
+# them:
+#
+#   error: precompiled file '...bmi' was compiled with the target feature '+adx'
+#          but the current translation unit is not
+#
+# So a vendored Release build compiles containa.cppm with -march=native and then cannot import it from
+# the parent's own generic-flagged code. `import containa;` fails for a consumer that did nothing wrong.
+if(PROJECT_IS_TOP_LEVEL)
+    # Use -march=native to enable AVX2/AVX512 SIMD optimizations
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+endif()
 
 if(PROJECT_IS_TOP_LEVEL)
     # Use libc++ with Clang for std::flat_map support (requires libc++ installed)
