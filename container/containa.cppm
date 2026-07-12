@@ -6,7 +6,6 @@ module;
 #include "dense_map.hpp"
 #include "dense_set.hpp"
 #include "bitmap.hpp"
-#include "concurrent_skiplist.hpp"
 #include "devectra.hpp"
 #include "flat_map.hpp"
 #include "immutable_ordered_multimap.hpp"
@@ -48,8 +47,21 @@ using ::stdb::container::boolean_vector;
 // includer does, or the module is not a replacement for the headers.
 using ::stdb::container::bitmap;
 using ::stdb::container::static_bitmap;
-using ::stdb::container::concurrent_skiplist;
-using ::stdb::container::concurrent_skiplist_map;
+// concurrent_skiplist and concurrent_skiplist_map are deliberately NOT exported, and their header is
+// not even in the global module fragment above.
+//
+// It is a lock-free container with deletion and no reclamation scheme -- no hazard pointers, no epoch,
+// no RCU; nodes are only freed at destruction. That is not a bug someone forgot to fix, it is the
+// design, and it is what forces an erased node to stay on the level-0 chain, which is what made any
+// insert-after-erase spin forever (clapdb/Containa#48 fixed the hang; it did not and could not give the
+// container a reclamation story). Until it has one, it is a container that *works*, not one that is
+// *verified*, and the first real user would meet the gap as a memory-safety problem rather than a
+// correctness one.
+//
+// So it stays in the tree and stays reachable through concurrent_skiplist.hpp for anyone who reaches for
+// it on purpose -- but nobody acquires it by writing `import containa;`.
+//
+// The ordinary skiplist_map / skiplist_set below are unrelated to it and are exported normally.
 using ::stdb::container::devectra;
 using ::stdb::container::flat_hash;
 using ::stdb::container::flat_map;
@@ -138,8 +150,6 @@ using ::stdb::pmr::small_vectra;
 // The PMR aliases the newly-included headers define. Declarations in the global module fragment are
 // not visible to importers unless exported, so leaving these out kept `import containa;` narrower than
 // a textual include for exactly these containers.
-using ::stdb::pmr::concurrent_skiplist;
-using ::stdb::pmr::concurrent_skiplist_map;
 using ::stdb::pmr::devectra;
 using ::stdb::pmr::skiplist_map;
 using ::stdb::pmr::skiplist_set;
