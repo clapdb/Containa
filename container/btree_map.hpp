@@ -4162,7 +4162,18 @@ class btree_map
                     }
                     current = parent;
                 }
-                // End of tree - stay at this leaf with pos = count
+                // End of tree - stay at this leaf with pos = count.
+                //
+                // Say it, do not just intend it. _pos was incremented above, so it is count + 1 here
+                // whenever we entered at count -- and entering at count is exactly what end() is, since
+                // end() is const_iterator(_rightmost_leaf, _rightmost_leaf->count). Leaving _pos there
+                // makes the incremented iterator compare *unequal* to end(), so a `while (it != end())`
+                // loop runs on past the last element and dereferences the leaf beyond its keys.
+                //
+                // For an iterator that was on a real element this assignment changes nothing: _pos was
+                // count - 1, ++ made it count, and count is what we want. It only matters when the
+                // iterator was already at the end, and then it is what keeps ++end() == end().
+                _pos = leaf->count;
                 return;
             } else {
                 auto* internal = static_cast<const internal_node*>(_node);

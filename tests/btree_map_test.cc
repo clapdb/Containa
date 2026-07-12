@@ -2662,6 +2662,93 @@ TEST_CASE("btree_multimap::string_keys") {
     }
 }
 
+// count() on a multi-mode tree takes a slow path whenever the matches run to the end of their leaf --
+// upper_bound_in_leaf() == leaf->count -- and walks the following leaves with an iterator. When the key
+// is the *largest* in the tree that leaf is the rightmost one, so the iterator it starts from,
+// const_iterator(leaf, leaf->count), is exactly end(); incrementing it used to leave _pos at count + 1,
+// which is not equal to end(), so the walk ran off the end of the leaf and read whatever came next.
+//
+// With int keys that is a garbage integer and count() returns a wrong number. With std::string keys it
+// is a garbage std::string, and following its data pointer is a SIGSEGV.
+//
+// So: query the largest key. It is a one-line trigger and nothing covered it.
+TEST_CASE("btree_multimap::count on the largest key") {
+    SUBCASE("largest key, single leaf") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({2, 100});
+        mmap.insert({2, 200});
+        mmap.insert({2, 300});
+
+        CHECK_EQ(mmap.count(1), 2);
+        CHECK_EQ(mmap.count(2), 3);  // largest key: the slow path
+        CHECK_EQ(mmap.count(3), 0);  // absent, above every key
+    }
+
+    SUBCASE("largest key, after erasing every duplicate of a smaller one") {
+        btree_multimap<int, int> mmap;
+        mmap.insert({1, 10});
+        mmap.insert({1, 20});
+        mmap.insert({1, 30});
+        mmap.insert({2, 100});
+
+        CHECK_EQ(mmap.erase(1), 3);
+        CHECK_EQ(mmap.size(), 1);
+        CHECK_EQ(mmap.count(1), 0);
+        CHECK_EQ(mmap.count(2), 1);  // sole survivor, and the largest key
+    }
+
+    SUBCASE("largest key, string keys -- used to SIGSEGV") {
+        btree_multimap<std::string, int> mmap;
+        mmap.insert({"apple", 1});
+        mmap.insert({"apple", 2});
+        mmap.insert({"banana", 10});
+        mmap.insert({"apple", 3});
+
+        CHECK_EQ(mmap.count("apple"), 3);   // not the largest: the fast path, always worked
+        CHECK_EQ(mmap.count("banana"), 1);  // largest: the slow path, used to crash
+    }
+
+    SUBCASE("largest key, spanning many leaves") {
+        // Enough elements to force a multi-level tree, so the slow path really does walk leaves
+        // rather than just meeting end() immediately.
+        btree_multimap<int, int> mmap;
+        constexpr int kKeys = 500;
+        constexpr int kDupsOfLargest = 40;
+        for (int k = 0; k < kKeys; ++k) {
+            mmap.insert({k, k * 10});
+        }
+        for (int d = 0; d < kDupsOfLargest; ++d) {
+            mmap.insert({kKeys - 1, 9000 + d});
+        }
+
+        CHECK_EQ(mmap.size(), static_cast<size_t>(kKeys + kDupsOfLargest));
+        CHECK_EQ(mmap.count(0), 1);
+        CHECK_EQ(mmap.count(kKeys / 2), 1);
+        CHECK_EQ(mmap.count(kKeys - 1), 1 + kDupsOfLargest);  // largest key, many duplicates
+        CHECK_EQ(mmap.count(kKeys), 0);
+
+        // and the counts agree with what iteration sees
+        size_t by_iteration = 0;
+        for (const auto& kv : mmap) {
+            if (kv.first == kKeys - 1) ++by_iteration;
+        }
+        CHECK_EQ(by_iteration, static_cast<size_t>(1 + kDupsOfLargest));
+    }
+
+    SUBCASE("largest key, multiset shares the same count path") {
+        btree_multiset<int> mset;
+        mset.insert(1);
+        mset.insert(2);
+        mset.insert(2);
+        mset.insert(2);
+
+        CHECK_EQ(mset.count(1), 1);
+        CHECK_EQ(mset.count(2), 3);  // largest key
+    }
+}
+
 // =============================================================================
 // btree_multiset tests
 // =============================================================================
