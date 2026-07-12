@@ -576,4 +576,29 @@ TEST_SUITE("bitmap edge cases") {
             CHECK(b.test(static_cast<uint32_t>(size - 1)));
         }
     }
+
+    // The AVX2 popcount accumulates nibble popcounts in 8-bit lanes, adding up to 4+4 per iteration,
+    // so a lane must be folded every 31 iterations or it wraps. Every test above sets one or two bits
+    // and can never reach that; a dense bitmap can. Fully set, every lane wrapped in lockstep and
+    // popcount() returned *zero* from 128 words up.
+    TEST_CASE("popcount on dense bitmaps does not overflow the SIMD accumulator") {
+        for (size_t bits : {64UL, 4096UL, 8192UL, 8256UL, 16384UL, 65536UL, 262144UL}) {
+            bitmap all_set(bits);
+            for (uint32_t i = 0; i < bits; ++i) {
+                all_set.set(i);
+            }
+            CHECK(all_set.popcount() == bits);
+
+            // dense but not full, so a wrap cannot coincidentally land on the right answer
+            bitmap most_set(bits);
+            size_t expect = 0;
+            for (uint32_t i = 0; i < bits; ++i) {
+                if (i % 7 != 0) {
+                    most_set.set(i);
+                    ++expect;
+                }
+            }
+            CHECK(most_set.popcount() == expect);
+        }
+    }
 }
