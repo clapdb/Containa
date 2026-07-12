@@ -91,10 +91,13 @@ jobs:
       with:
         submodules: recursive
 
+    # clang for the sanitizers, and build-essential for the standard library they run against: Ubuntu's
+    # clang package ships no C++ standard library headers of its own, so dropping libc++ without adding
+    # libstdc++ leaves it unable to find <algorithm> at all.
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake clang
+        sudo apt-get install -y cmake clang build-essential
 
     # libstdc++, not libc++, and with every check left on rather than any of them suppressed.
     #
