@@ -111,12 +111,29 @@ jobs:
     # disable that check for *our* code too, so a genuine new/free mismatch in a container would go
     # unseen. Better to point the sanitizers at a standard library they can actually instrument and keep
     # every check armed. The libc++ compile-and-run path is still covered, by the build-and-test matrix.
+    # USE_LIBCXX_DEFAULT=OFF, explicitly. Not passing -stdlib is not the same as asking for libstdc++:
+    # this project's CMakeLists does `add_compile_options(-stdlib=libc++)` for any Clang unless that
+    # option is turned off, so dropping libc++-dev from the apt line while leaving the option on left
+    # clang under orders to use a standard library that was no longer installed -- "'algorithm' file not
+    # found", on every translation unit.
     - name: Configure
       run: |
         cmake -S . -B build.sanitizer \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_CXX_COMPILER=clang++ \
+          -DUSE_LIBCXX_DEFAULT=OFF \
           -DCMAKE_CXX_FLAGS="-g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer"
+
+    # Assert it, do not trust it -- for the third time in this PR. The -march matrix was silently
+    # overridden, the standard library was silently overridden, and both times the job went on looking
+    # like it was doing what it said. A flag that does not reach the compiler is worse than a missing
+    # flag, because the job stays green while testing something else.
+    - name: Confirm the sanitizer and the standard library actually reached the compiler
+      run: |
+        flags=$(cat build.sanitizer/tests/CMakeFiles/containa_test.dir/flags.make)
+        echo "$flags" | grep -q -- "-fsanitize=${{ matrix.san }}" || { echo "sanitizer flag missing"; exit 1; }
+        echo "$flags" | grep -q -- "-stdlib=libc++" && { echo "still building against libc++"; exit 1; }
+        echo "ok: -fsanitize=${{ matrix.san }}, libstdc++"
 
     - name: Build tests
       run: cmake --build build.sanitizer --target containa_test -j$(nproc)
