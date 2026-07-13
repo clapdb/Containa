@@ -214,14 +214,24 @@ set(CONTAINA_CXX_STANDARD "${_containa_standard_default}" CACHE STRING
 # same hard failure in the other direction. CONTAINA_CXX_STANDARD *can* fix that -- but only if the
 # consumer already knows to set it, and a consumer who knew would not have hit the bug.
 #
-# CMake has no way to propagate an exact dialect, so we check instead. This runs deferred to the end of
+# CMake has no way to propagate an exact dialect, so we report instead. This runs deferred to the end of
 # the top-level directory, by which point every target exists, and compares the effective standard of
-# each target that links us against the one the BMI was built with. A module consumer must link its
-# provider directly (that is how it gets the BMI into its modmap at all), so LINK_LIBRARIES is the
-# complete set -- there is no transitive importer to miss.
+# each target that links us -- transitively -- against the one the BMI was built with.
 #
-# It fails the configure rather than compiling something that cannot link. The one thing it must not do
-# is guess: it never edits the parent's targets, only reports what has to change.
+# Transitively, because a module provider reaches a consumer through an INTERFACE wrapper just as well as
+# through a direct link: `target_link_libraries(wrapper INTERFACE containa)` and an app that links only
+# `wrapper` still gets containa's BMI in its modmap, and still fails with "language dialect differs" if
+# its standard does not match. A direct-membership test misses exactly that consumer.
+#
+# A WARNING and not a FATAL_ERROR, deliberately. "Links containa" is not the same question as "imports
+# containa", and at configure time CMake cannot answer the second -- module scanning happens at build
+# time. A target may link us purely for the include directories and use the headers textually, never
+# writing `import containa;`; its BMI is never loaded and its standard is its own business. Erroring
+# would break that build, which is a worse failure than the one this exists to catch: it turns a valid
+# configuration into a hard stop. So we name the targets, say what will happen if they do import, and let
+# the build proceed.
+#
+# The one thing it must not do is guess: it never edits the parent's targets, only reports.
 function(_containa_collect_targets dir out_var)
     get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
     get_property(_children DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
@@ -313,7 +323,36 @@ function(_containa_effective_standard target out_var)
     set(${out_var} "${_std}" PARENT_SCOPE)
 endfunction()
 
-function(_containa_assert_importers_match_dialect)
+# Whether `target` reaches containa through its link closure, however many INTERFACE wrappers deep.
+function(_containa_links_containa target seen_var out_var)
+    set(${out_var} OFF PARENT_SCOPE)
+    if(NOT TARGET ${target} OR ${target} IN_LIST ${seen_var})
+        return()
+    endif()
+    list(APPEND ${seen_var} ${target})
+    set(${seen_var} "${${seen_var}}" PARENT_SCOPE)
+
+    foreach(_prop LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+        get_target_property(_libs ${target} ${_prop})
+        if(NOT _libs)
+            continue()
+        endif()
+        foreach(_lib IN LISTS _libs)
+            if("${_lib}" STREQUAL "containa")
+                set(${out_var} ON PARENT_SCOPE)
+                return()
+            endif()
+            _containa_links_containa(${_lib} ${seen_var} _sub)
+            set(${seen_var} "${${seen_var}}" PARENT_SCOPE)
+            if(_sub)
+                set(${out_var} ON PARENT_SCOPE)
+                return()
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
+function(_containa_warn_importer_dialect_mismatch)
     _containa_collect_targets("${CMAKE_SOURCE_DIR}" _all_targets)
 
     set(_mismatched "")
@@ -325,8 +364,9 @@ function(_containa_assert_importers_match_dialect)
         if(_type STREQUAL "INTERFACE_LIBRARY" OR _type STREQUAL "UTILITY")
             continue()   # no translation units of its own, so no BMI to be out of step with
         endif()
-        get_target_property(_libs ${_target} LINK_LIBRARIES)
-        if(NOT _libs OR NOT "containa" IN_LIST _libs)
+        set(_seen "")
+        _containa_links_containa(${_target} _seen _links)
+        if(NOT _links)
             continue()
         endif()
 
@@ -338,15 +378,18 @@ function(_containa_assert_importers_match_dialect)
 
     if(_mismatched)
         list(JOIN _mismatched "\n    " _report)
-        message(FATAL_ERROR
-            "containa's module was built at C++${CONTAINA_CXX_STANDARD}, but these targets import it at a "
-            "different standard:\n\n"
+        message(WARNING
+            "containa's module is built at C++${CONTAINA_CXX_STANDARD}, but these targets link it and "
+            "compile at a different standard:\n\n"
             "    ${_report}\n\n"
             "A BMI can only be loaded by a translation unit compiled at the *same* standard -- not merely "
-            "at least it -- so this would fail as \"language dialect differs\" at build time.\n\n"
+            "at least it. If any of them writes `import containa;` the build will fail with\n\n"
+            "    error: language dialect differs 'C++${CONTAINA_CXX_STANDARD}', expected 'C++<theirs>'\n\n"
             "Build the module at the standard they use:\n\n"
             "    -DCONTAINA_CXX_STANDARD=<their standard>\n\n"
-            "or set CMAKE_CXX_STANDARD globally, which containa follows by default.")
+            "or set CMAKE_CXX_STANDARD globally, which containa follows by default.\n\n"
+            "If they only include containa's headers textually and never import the module, no BMI is "
+            "loaded and this is harmless -- silence it with -DCONTAINA_WARN_IMPORTER_DIALECT=OFF.")
     endif()
 endfunction()
 
@@ -357,7 +400,12 @@ if(CONTAINA_BUILD_MODULES)
     endif()
     set_target_properties(containa PROPERTIES CXX_STANDARD ${CONTAINA_CXX_STANDARD})
     target_compile_features(containa PUBLIC cxx_std_${CONTAINA_CXX_STANDARD})
-    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _containa_assert_importers_match_dialect)
+    option(CONTAINA_WARN_IMPORTER_DIALECT
+           "Warn when a target linking containa compiles at a different C++ standard than its module" ON)
+    if(CONTAINA_WARN_IMPORTER_DIALECT)
+        cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
+                       CALL _containa_warn_importer_dialect_mismatch)
+    endif()
 else()
     target_compile_features(containa INTERFACE cxx_std_20)
 endif()
