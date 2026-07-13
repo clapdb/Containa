@@ -232,27 +232,84 @@ function(_containa_collect_targets dir out_var)
     set(${out_var} "${_targets}" PARENT_SCOPE)
 endfunction()
 
-# The standard `target` will actually compile at: the CXX_STANDARD property, or the highest cxx_std_NN
-# among its compile features, whichever is greater. Empty if the target picks neither and just inherits
-# the floor we publish -- which is by definition a match.
+# The highest cxx_std_NN a target *publishes* to whoever links it, following its own interface link
+# libraries transitively. `seen` guards against a cycle in the link graph.
+function(_containa_interface_standard target seen_var out_var)
+    set(_std "")
+    if(NOT TARGET ${target} OR ${target} IN_LIST ${seen_var})
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+    list(APPEND ${seen_var} ${target})
+    set(${seen_var} "${${seen_var}}" PARENT_SCOPE)
+
+    get_target_property(_features ${target} INTERFACE_COMPILE_FEATURES)
+    if(_features)
+        foreach(_feature IN LISTS _features)
+            if(_feature MATCHES "^cxx_std_([0-9]+)$" AND ("${_std}" STREQUAL "" OR CMAKE_MATCH_1 GREATER _std))
+                set(_std ${CMAKE_MATCH_1})
+            endif()
+        endforeach()
+    endif()
+
+    get_target_property(_libs ${target} INTERFACE_LINK_LIBRARIES)
+    if(_libs)
+        foreach(_lib IN LISTS _libs)
+            _containa_interface_standard(${_lib} ${seen_var} _sub)
+            set(${seen_var} "${${seen_var}}" PARENT_SCOPE)
+            if(NOT "${_sub}" STREQUAL "" AND ("${_std}" STREQUAL "" OR _sub GREATER _std))
+                set(_std ${_sub})
+            endif()
+        endforeach()
+    endif()
+    set(${out_var} "${_std}" PARENT_SCOPE)
+endfunction()
+
+# The standard `target` will actually compile at: the greatest of its CXX_STANDARD property, the
+# cxx_std_NN among its own compile features, and -- the part that is easy to miss -- the cxx_std_NN any
+# target it links *publishes* to it through INTERFACE_COMPILE_FEATURES. That last one does not appear in
+# the importer's own COMPILE_FEATURES property, but CMake still raises its -std for it, so a check that
+# reads only the importer's own properties passes a build that then fails to link:
+#
+#   add_library(needs23 INTERFACE)
+#   target_compile_features(needs23 INTERFACE cxx_std_23)
+#   target_link_libraries(app containa needs23)   # app compiles at 23; containa's BMI at 20
+#
+# Empty if the target picks up nothing anywhere and just inherits the floor we publish -- which is by
+# definition a match.
 function(_containa_effective_standard target out_var)
     set(_std "")
     get_target_property(_prop ${target} CXX_STANDARD)
     if(_prop)
         set(_std ${_prop})
     endif()
-    foreach(_prop_name COMPILE_FEATURES INTERFACE_COMPILE_FEATURES)
-        get_target_property(_features ${target} ${_prop_name})
-        if(_features)
-            foreach(_feature IN LISTS _features)
-                if(_feature MATCHES "^cxx_std_([0-9]+)$")
-                    if("${_std}" STREQUAL "" OR CMAKE_MATCH_1 GREATER _std)
-                        set(_std ${CMAKE_MATCH_1})
-                    endif()
-                endif()
-            endforeach()
-        endif()
-    endforeach()
+    get_target_property(_features ${target} COMPILE_FEATURES)
+    if(_features)
+        foreach(_feature IN LISTS _features)
+            if(_feature MATCHES "^cxx_std_([0-9]+)$" AND ("${_std}" STREQUAL "" OR CMAKE_MATCH_1 GREATER _std))
+                set(_std ${CMAKE_MATCH_1})
+            endif()
+        endforeach()
+    endif()
+
+    # Its own interface features and everything its link closure publishes to it. Start `seen` empty --
+    # target itself must be walked, since PUBLIC features land in INTERFACE_COMPILE_FEATURES too.
+    set(_seen "")
+    _containa_interface_standard(${target} _seen _iface)
+    if(NOT "${_iface}" STREQUAL "" AND ("${_std}" STREQUAL "" OR _iface GREATER _std))
+        set(_std ${_iface})
+    endif()
+
+    get_target_property(_libs ${target} LINK_LIBRARIES)
+    if(_libs)
+        foreach(_lib IN LISTS _libs)
+            _containa_interface_standard(${_lib} _seen _sub)
+            if(NOT "${_sub}" STREQUAL "" AND ("${_std}" STREQUAL "" OR _sub GREATER _std))
+                set(_std ${_sub})
+            endif()
+        endforeach()
+    endif()
+
     set(${out_var} "${_std}" PARENT_SCOPE)
 endfunction()
 
