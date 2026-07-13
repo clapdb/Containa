@@ -8,20 +8,29 @@ project(Containa
 
 # project() only sets PROJECT_IS_TOP_LEVEL from CMake 3.21, and we still claim 3.20. On 3.20 the
 # variable is simply empty, which is not an error and not a warning -- it silently reads as false, so
-# every `if(PROJECT_IS_TOP_LEVEL)` below is skipped and the two options that default to it come out
-# OFF. A 3.20 user configuring this project directly would get no tests and no benchmarks, and the
+# every top-level-only block below is skipped and the two options that default to it come out OFF. A
+# 3.20 user configuring this project directly would get no tests and no benchmarks, and the
 # `containa_test` target the README tells them to build would not exist.
 #
-# So compute it. Same definition project() uses.
-if(NOT DEFINED PROJECT_IS_TOP_LEVEL)
-    if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-        set(PROJECT_IS_TOP_LEVEL ON)
-    else()
-        set(PROJECT_IS_TOP_LEVEL OFF)
-    endif()
+# So compute it -- but into our *own* variable, and unconditionally.
+#
+# Not `if(NOT DEFINED PROJECT_IS_TOP_LEVEL)`: on 3.20, where the polyfill is the whole point, project()
+# defines nothing and add_subdirectory() inherits the parent's variables. A parent that carries its own
+# 3.20 polyfill therefore hands us its own PROJECT_IS_TOP_LEVEL=ON, the guard sees it as DEFINED, skips
+# the computation, and vendored containa concludes it is the top-level project -- re-enabling its tests
+# and benchmarks and overwriting the parent's flags and C++ standard. That is precisely the class of bug
+# the rest of this file exists to prevent, reintroduced by the guard meant to prevent it.
+#
+# And into CONTAINA_IS_TOP_LEVEL rather than PROJECT_IS_TOP_LEVEL, so the value cannot leak the other way
+# either: our subdirectories (doctest, tests, bench) get their own from project(), or from their own
+# polyfill, and never ours.
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    set(CONTAINA_IS_TOP_LEVEL ON)
+else()
+    set(CONTAINA_IS_TOP_LEVEL OFF)
 endif()
 
-if(PROJECT_IS_TOP_LEVEL)
+if(CONTAINA_IS_TOP_LEVEL)
     # Set C++ standard (C++23 for std::flat_map)
     set(CMAKE_CXX_STANDARD 23)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,7 +66,7 @@ endif()
 #    through CMAKE_CXX_FLAGS loses too, because CMake appends the per-config flags *after* the generic
 #    ones and clang takes the last -march. That is what made the -march matrix in our own CI a no-op --
 #    both entries compiled -march=native, and the job tested one path twice while claiming to test two.
-if(PROJECT_IS_TOP_LEVEL)
+if(CONTAINA_IS_TOP_LEVEL)
     option(CONTAINA_MARCH_NATIVE "Add -march=native to Release builds" ON)
     if(CONTAINA_MARCH_NATIVE)
         set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
@@ -67,7 +76,7 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 endif()
 
-if(PROJECT_IS_TOP_LEVEL)
+if(CONTAINA_IS_TOP_LEVEL)
     # Use libc++ with Clang for std::flat_map support (requires libc++ installed)
     option(USE_LIBCXX_DEFAULT "Use libc++ by default with Clang" ON)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND USE_LIBCXX_DEFAULT)
@@ -81,7 +90,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-if(PROJECT_IS_TOP_LEVEL)
+if(CONTAINA_IS_TOP_LEVEL)
     # libc++ option (for Clang)
     option(USE_LIBCXX "Use libc++ instead of libstdc++" OFF)
     if(USE_LIBCXX)
@@ -137,8 +146,8 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/)
 
 option(CONTAINA_BUILD_MODULES "Build Containa C++ module interface" OFF)
-option(CONTAINA_BUILD_TESTS "Build Containa tests" ${PROJECT_IS_TOP_LEVEL})
-option(CONTAINA_BUILD_BENCHMARKS "Build Containa benchmarks" ${PROJECT_IS_TOP_LEVEL})
+option(CONTAINA_BUILD_TESTS "Build Containa tests" ${CONTAINA_IS_TOP_LEVEL})
+option(CONTAINA_BUILD_BENCHMARKS "Build Containa benchmarks" ${CONTAINA_IS_TOP_LEVEL})
 
 if(CONTAINA_BUILD_MODULES)
     # CXX_MODULES file sets landed in CMake 3.28. The project as a whole still supports 3.20, so say so
@@ -320,7 +329,7 @@ option(CONTAINA_CXX_EXTENSIONS "Compile containa (and its module) with GNU exten
        ${_containa_extensions_default})
 set_target_properties(containa PROPERTIES CXX_EXTENSIONS ${CONTAINA_CXX_EXTENSIONS})
 
-if(PROJECT_IS_TOP_LEVEL)
+if(CONTAINA_IS_TOP_LEVEL)
     if(MSVC)
         target_compile_options(containa INTERFACE /W4 /WX)
     else()
@@ -335,15 +344,17 @@ endif()
 # is how CI stayed green for years while never running a single test. See tests/CMakeLists.txt.
 #
 # Only when we are the project being tested, though: a parent that vendors us wants our headers, not our
-# test suite, and CONTAINA_BUILD_TESTS defaults to PROJECT_IS_TOP_LEVEL.
+# test suite, and CONTAINA_BUILD_TESTS defaults to CONTAINA_IS_TOP_LEVEL.
 if(CONTAINA_BUILD_TESTS)
     enable_testing()
 endif()
 
-if(CONTAINA_BUILD_TESTS OR CONTAINA_BUILD_BENCHMARKS)
-    add_subdirectory(doctest)
-endif()
+# Tests only. The benchmarks link nanobench (and pthread, and optionally abseil/arena) and not one bench
+# source includes doctest, so pulling it in for CONTAINA_BUILD_BENCHMARKS=ON only made a benchmark-only
+# configure depend on a test framework it never uses -- and fail outright when the doctest submodule is
+# absent, which is exactly the configuration the new split options exist to make possible.
 if(CONTAINA_BUILD_TESTS)
+    add_subdirectory(doctest)
     add_subdirectory(tests)
 endif()
 if(CONTAINA_BUILD_BENCHMARKS)
