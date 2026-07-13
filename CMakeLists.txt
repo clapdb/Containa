@@ -199,6 +199,91 @@ endif()
 set(CONTAINA_CXX_STANDARD "${_containa_standard_default}" CACHE STRING
     "C++ standard to compile containa (and its module) with; importers are raised to match")
 
+# Raising importers is only half of it. `target_compile_features` publishes a *minimum*, and CMake never
+# lowers a target that already asks for more: a parent that leaves CMAKE_CXX_STANDARD unset but puts
+# CXX_STANDARD 23 on the target that imports us gets a C++20 BMI and a C++23 importing TU, which is the
+# same hard failure in the other direction. CONTAINA_CXX_STANDARD *can* fix that -- but only if the
+# consumer already knows to set it, and a consumer who knew would not have hit the bug.
+#
+# CMake has no way to propagate an exact dialect, so we check instead. This runs deferred to the end of
+# the top-level directory, by which point every target exists, and compares the effective standard of
+# each target that links us against the one the BMI was built with. A module consumer must link its
+# provider directly (that is how it gets the BMI into its modmap at all), so LINK_LIBRARIES is the
+# complete set -- there is no transitive importer to miss.
+#
+# It fails the configure rather than compiling something that cannot link. The one thing it must not do
+# is guess: it never edits the parent's targets, only reports what has to change.
+function(_containa_collect_targets dir out_var)
+    get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+    get_property(_children DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    foreach(_child IN LISTS _children)
+        _containa_collect_targets("${_child}" _grandchildren)
+        list(APPEND _targets ${_grandchildren})
+    endforeach()
+    set(${out_var} "${_targets}" PARENT_SCOPE)
+endfunction()
+
+# The standard `target` will actually compile at: the CXX_STANDARD property, or the highest cxx_std_NN
+# among its compile features, whichever is greater. Empty if the target picks neither and just inherits
+# the floor we publish -- which is by definition a match.
+function(_containa_effective_standard target out_var)
+    set(_std "")
+    get_target_property(_prop ${target} CXX_STANDARD)
+    if(_prop)
+        set(_std ${_prop})
+    endif()
+    foreach(_prop_name COMPILE_FEATURES INTERFACE_COMPILE_FEATURES)
+        get_target_property(_features ${target} ${_prop_name})
+        if(_features)
+            foreach(_feature IN LISTS _features)
+                if(_feature MATCHES "^cxx_std_([0-9]+)$")
+                    if("${_std}" STREQUAL "" OR CMAKE_MATCH_1 GREATER _std)
+                        set(_std ${CMAKE_MATCH_1})
+                    endif()
+                endif()
+            endforeach()
+        endif()
+    endforeach()
+    set(${out_var} "${_std}" PARENT_SCOPE)
+endfunction()
+
+function(_containa_assert_importers_match_dialect)
+    _containa_collect_targets("${CMAKE_SOURCE_DIR}" _all_targets)
+
+    set(_mismatched "")
+    foreach(_target IN LISTS _all_targets)
+        if(_target STREQUAL "containa")
+            continue()
+        endif()
+        get_target_property(_type ${_target} TYPE)
+        if(_type STREQUAL "INTERFACE_LIBRARY" OR _type STREQUAL "UTILITY")
+            continue()   # no translation units of its own, so no BMI to be out of step with
+        endif()
+        get_target_property(_libs ${_target} LINK_LIBRARIES)
+        if(NOT _libs OR NOT "containa" IN_LIST _libs)
+            continue()
+        endif()
+
+        _containa_effective_standard(${_target} _std)
+        if(NOT "${_std}" STREQUAL "" AND NOT _std EQUAL CONTAINA_CXX_STANDARD)
+            list(APPEND _mismatched "${_target} (C++${_std})")
+        endif()
+    endforeach()
+
+    if(_mismatched)
+        list(JOIN _mismatched "\n    " _report)
+        message(FATAL_ERROR
+            "containa's module was built at C++${CONTAINA_CXX_STANDARD}, but these targets import it at a "
+            "different standard:\n\n"
+            "    ${_report}\n\n"
+            "A BMI can only be loaded by a translation unit compiled at the *same* standard -- not merely "
+            "at least it -- so this would fail as \"language dialect differs\" at build time.\n\n"
+            "Build the module at the standard they use:\n\n"
+            "    -DCONTAINA_CXX_STANDARD=<their standard>\n\n"
+            "or set CMAKE_CXX_STANDARD globally, which containa follows by default.")
+    endif()
+endfunction()
+
 if(CONTAINA_BUILD_MODULES)
     if(CONTAINA_CXX_STANDARD LESS 20)
         message(FATAL_ERROR
@@ -206,6 +291,7 @@ if(CONTAINA_BUILD_MODULES)
     endif()
     set_target_properties(containa PROPERTIES CXX_STANDARD ${CONTAINA_CXX_STANDARD})
     target_compile_features(containa PUBLIC cxx_std_${CONTAINA_CXX_STANDARD})
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _containa_assert_importers_match_dialect)
 else()
     target_compile_features(containa INTERFACE cxx_std_20)
 endif()
