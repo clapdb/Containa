@@ -141,6 +141,13 @@ struct compressed_pair
 
 #endif  // STDB_CONTAINER_IS_TRANSPARENT_COMPARATOR_DEFINED
 
+template <typename Compare, typename Key, typename K>
+concept transparent_comparable = is_transparent_comparator_v<Compare> &&
+    requires(const Compare& compare, const Key& key, const K& other) {
+        { compare(key, other) } -> std::convertible_to<bool>;
+        { compare(other, key) } -> std::convertible_to<bool>;
+    };
+
 // Empty value type for set implementation
 // When used as Value type, btree_map operates in "set mode"
 struct btree_set_empty_value
@@ -186,7 +193,7 @@ constexpr std::size_t optimal_node_size() {
     return 4096;
 }
 
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>,
           std::size_t TargetNodeSize = optimal_node_size<Key, Value>(),
           typename DuplicatePolicy = btree_unique_policy>
@@ -3935,13 +3942,13 @@ public:
 
     // Heterogeneous lookup - find with transparent comparator
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto find(const K& key) -> iterator {
         return find_impl(key);
     }
 
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto find(const K& key) const -> const_iterator {
         return const_iterator(const_cast<btree_map*>(this)->find_impl(key));
     }
@@ -4000,7 +4007,7 @@ public:
 
     // Heterogeneous contains
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto contains(const K& key) const -> bool {
         return const_cast<btree_map*>(this)->find_impl(key) != end();
     }
@@ -4018,7 +4025,7 @@ public:
 
     // Heterogeneous count
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto count(const K& key) const -> size_type {
         if constexpr (is_multi_mode) {
             return count_multi_impl(key);
@@ -4200,26 +4207,26 @@ public:
 
     // Heterogeneous lower_bound
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto lower_bound(const K& key) -> iterator {
         return lower_bound_impl(key);
     }
 
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto lower_bound(const K& key) const -> const_iterator {
         return const_iterator(const_cast<btree_map*>(this)->lower_bound_impl(key));
     }
 
     // Heterogeneous upper_bound
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto upper_bound(const K& key) -> iterator {
         return upper_bound_impl(key);
     }
 
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto upper_bound(const K& key) const -> const_iterator {
         return const_iterator(const_cast<btree_map*>(this)->upper_bound_impl(key));
     }
@@ -4283,7 +4290,7 @@ public:
 
     // Heterogeneous erase by key
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     auto erase(const K& key) -> size_type {
         return erase_key_impl(key);
     }
@@ -4457,7 +4464,7 @@ public:
 
     // Heterogeneous extract by key
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     auto extract(const K& key) -> node_type {
         auto it = find_impl(key);
         if (it == end()) {
@@ -4578,7 +4585,7 @@ public:
 
     // Heterogeneous equal_range
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto equal_range(const K& key) -> std::pair<iterator, iterator> {
         if constexpr (is_multi_mode) {
             return equal_range_multi_impl(key);
@@ -4602,7 +4609,7 @@ public:
     }
 
     template <typename K>
-        requires is_transparent_comparator_v<Compare>
+        requires transparent_comparable<Compare, Key, K>
     [[nodiscard]] auto equal_range(const K& key) const -> std::pair<const_iterator, const_iterator> {
         if constexpr (is_multi_mode) {
             return equal_range_multi_impl(key);
@@ -4966,12 +4973,12 @@ public:
 
 // btree_map now automatically selects optimal node size by default.
 // btree_map_auto is kept for backward compatibility but is now identical to btree_map.
-template <typename Key, typename Value, typename Compare = std::less<Key>>
+template <typename Key, typename Value, typename Compare = std::less<>>
 using btree_map_auto = btree_map<Key, Value, Compare>;
 
 // Explicit 256-byte node size for when you want minimal memory footprint
 // at the cost of potentially fewer slots for large value types
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>>
 using btree_map_compact = btree_map<Key, Value, Compare, Allocator, 256>;
 
@@ -5008,17 +5015,17 @@ erase_if(btree_map<Key, Value, Compare, Allocator, N, DuplicatePolicy>& c, Pred 
 //   - insert() takes just a key, not a key-value pair
 //   - operator[] and at() are disabled
 //   - Memory is optimized (empty value uses [[no_unique_address]])
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>,
           std::size_t TargetNodeSize = optimal_node_size<Key, btree_set_empty_value>()>
 using btree_set = btree_map<Key, btree_set_empty_value, Compare, Allocator, TargetNodeSize>;
 
 // btree_set_auto is kept for backward compatibility
-template <typename Key, typename Compare = std::less<Key>>
+template <typename Key, typename Compare = std::less<>>
 using btree_set_auto = btree_set<Key, Compare>;
 
 // Explicit 256-byte node size for minimal memory footprint
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
 using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 
@@ -5026,13 +5033,13 @@ using btree_set_compact = btree_set<Key, Compare, Allocator, 256>;
 // btree_multimap - B-tree based ordered multimap (allows duplicate keys)
 // =============================================================================
 
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>,
           std::size_t TargetNodeSize = optimal_node_size<Key, Value>()>
 using btree_multimap = btree_map<Key, Value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
 
 // btree_multimap_compact with 256-byte node size
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, Value>>>
 using btree_multimap_compact = btree_multimap<Key, Value, Compare, Allocator, 256>;
 
@@ -5040,13 +5047,13 @@ using btree_multimap_compact = btree_multimap<Key, Value, Compare, Allocator, 25
 // btree_multiset - B-tree based ordered multiset (allows duplicate keys)
 // =============================================================================
 
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>,
           std::size_t TargetNodeSize = optimal_node_size<Key, btree_set_empty_value>()>
 using btree_multiset = btree_map<Key, btree_set_empty_value, Compare, Allocator, TargetNodeSize, btree_multi_policy>;
 
 // btree_multiset_compact with 256-byte node size
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           typename Allocator = std::allocator<std::pair<const Key, btree_set_empty_value>>>
 using btree_multiset_compact = btree_multiset<Key, Compare, Allocator, 256>;
 
@@ -5060,53 +5067,53 @@ using btree_multiset_compact = btree_multiset<Key, Compare, Allocator, 256>;
 namespace stdb::pmr {
 
 // btree_map with polymorphic allocator
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           std::size_t TargetNodeSize = container::optimal_node_size<Key, Value>()>
 using btree_map = container::btree_map<Key, Value, Compare,
                                        std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
                                        TargetNodeSize>;
 
 // btree_map_compact with polymorphic allocator (256-byte node size)
-template <typename Key, typename Value, typename Compare = std::less<Key>>
+template <typename Key, typename Value, typename Compare = std::less<>>
 using btree_map_compact = container::btree_map<Key, Value, Compare,
                                                std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
                                                256>;
 
 // btree_set with polymorphic allocator
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           std::size_t TargetNodeSize = container::optimal_node_size<Key, container::btree_set_empty_value>()>
 using btree_set = container::btree_set<Key, Compare,
                                        std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                        TargetNodeSize>;
 
 // btree_set_compact with polymorphic allocator (256-byte node size)
-template <typename Key, typename Compare = std::less<Key>>
+template <typename Key, typename Compare = std::less<>>
 using btree_set_compact = container::btree_set<Key, Compare,
                                                std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                                256>;
 
 // btree_multimap with polymorphic allocator
-template <typename Key, typename Value, typename Compare = std::less<Key>,
+template <typename Key, typename Value, typename Compare = std::less<>,
           std::size_t TargetNodeSize = container::optimal_node_size<Key, Value>()>
 using btree_multimap = container::btree_multimap<Key, Value, Compare,
                                                  std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
                                                  TargetNodeSize>;
 
 // btree_multimap_compact with polymorphic allocator (256-byte node size)
-template <typename Key, typename Value, typename Compare = std::less<Key>>
+template <typename Key, typename Value, typename Compare = std::less<>>
 using btree_multimap_compact = container::btree_multimap<Key, Value, Compare,
                                                          std::pmr::polymorphic_allocator<std::pair<const Key, Value>>,
                                                          256>;
 
 // btree_multiset with polymorphic allocator
-template <typename Key, typename Compare = std::less<Key>,
+template <typename Key, typename Compare = std::less<>,
           std::size_t TargetNodeSize = container::optimal_node_size<Key, container::btree_set_empty_value>()>
 using btree_multiset = container::btree_multiset<Key, Compare,
                                                  std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                                  TargetNodeSize>;
 
 // btree_multiset_compact with polymorphic allocator (256-byte node size)
-template <typename Key, typename Compare = std::less<Key>>
+template <typename Key, typename Compare = std::less<>>
 using btree_multiset_compact = container::btree_multiset<Key, Compare,
                                                          std::pmr::polymorphic_allocator<std::pair<const Key, container::btree_set_empty_value>>,
                                                          256>;

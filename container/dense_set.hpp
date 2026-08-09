@@ -23,7 +23,7 @@ namespace stdb::container {
 // dense_set is just dense_map with T=void
 template <typename Key,
           typename Hash = dense_hash<Key>,
-          typename KeyEqual = std::equal_to<Key>,
+          typename KeyEqual = std::equal_to<>,
           typename Allocator = std::allocator<Key>,
           typename MemoryPolicy = default_memory_policy<Key, void>>
 using dense_set = dense_map<Key, void, Hash, KeyEqual, Allocator, MemoryPolicy>;
