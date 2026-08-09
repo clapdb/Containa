@@ -29,6 +29,19 @@
 
 namespace stdb::container {
 
+namespace {
+
+struct CountingIntHash {
+    size_t* calls{nullptr};
+
+    auto operator()(int value) const noexcept -> size_t {
+        ++*calls;
+        return dense_hash<int>{}(value);
+    }
+};
+
+}  // namespace
+
 TEST_CASE("dense_map::basic") {
     SUBCASE("default constructor") {
         dense_map<int, int> map;
@@ -121,6 +134,36 @@ TEST_CASE("dense_map::emplace") {
         auto [it2, inserted2] = map.try_emplace(1, "world");
         CHECK_FALSE(inserted2);
         CHECK_EQ(it2->second, "hello");  // Original value preserved
+    }
+
+    SUBCASE("try_emplace_prehashed") {
+        auto check_policy = []<typename Policy>() {
+            size_t hash_calls = 0;
+            using Value = std::pair<int, std::string>;
+            dense_map<int, std::string, CountingIntHash, std::equal_to<int>, std::allocator<Value>, Policy> map(
+                64, CountingIntHash{&hash_calls});
+
+            for (int key = 0; key < 32; ++key) {
+                const auto hash = dense_hash<int>{}(key);
+                auto [it, inserted] = key % 2 == 0
+                                        ? map.try_emplace_prehashed(hash, key, std::to_string(key))
+                                        : map.try_emplace_prehashed(hash, int{key}, std::to_string(key));
+                CHECK(inserted);
+                CHECK_EQ(it->second, std::to_string(key));
+            }
+            CHECK_EQ(hash_calls, 0);
+
+            int duplicate = 7;
+            auto [it, inserted] =
+                map.try_emplace_prehashed(dense_hash<int>{}(duplicate), duplicate, "replacement");
+            CHECK_FALSE(inserted);
+            CHECK_EQ(it->second, "7");
+            CHECK_EQ(hash_calls, 0);
+        };
+
+        check_policy.template operator()<force_inline_policy>();
+        check_policy.template operator()<force_flat_policy>();
+        check_policy.template operator()<force_indirect_policy>();
     }
 }
 
