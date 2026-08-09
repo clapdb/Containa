@@ -1242,6 +1242,17 @@ public:
         return try_emplace_impl(std::move(key), std::forward<Args>(args)...);
     }
 
+    // Insert using a hash already computed by hash_function(). The caller must pass the exact hash for key.
+    template <typename U = T, typename... Args, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    std::pair<iterator, bool> try_emplace_prehashed(size_t hash, const Key& key, Args&&... args) {
+        return try_emplace_prehashed_impl(hash, key, std::forward<Args>(args)...);
+    }
+
+    template <typename U = T, typename... Args, std::enable_if_t<!std::is_void_v<U>, int> = 0>
+    std::pair<iterator, bool> try_emplace_prehashed(size_t hash, Key&& key, Args&&... args) {
+        return try_emplace_prehashed_impl(hash, std::move(key), std::forward<Args>(args)...);
+    }
+
     iterator erase(const_iterator pos) {
         if constexpr (kUseInline) {
             assert(pos.ctrl_ != nullptr);
@@ -1890,6 +1901,11 @@ private:
 
     template <typename K, typename... Args>
     std::pair<iterator, bool> try_emplace_impl(K&& key, Args&&... args) {
+        return try_emplace_prehashed_impl(hash_(key), std::forward<K>(key), std::forward<Args>(args)...);
+    }
+
+    template <typename K, typename... Args>
+    std::pair<iterator, bool> try_emplace_prehashed_impl(size_t hash, K&& key, Args&&... args) {
         if (DENSE_MAP_UNLIKELY(capacity_ == 0)) {
             initialize(kMinCapacity);
         } else if (DENSE_MAP_UNLIKELY(growth_left_ == 0)) {
@@ -1898,7 +1914,6 @@ private:
 
         if constexpr (kUseInline) {
             // Swiss Table: inline storage
-            size_t hash = hash_(key);
             size_t idx = find_slot_for_insert(key, hash);
 
             if (detail::is_full(ctrl_[idx])) {
@@ -1924,7 +1939,6 @@ private:
         } else if constexpr (kUseFlat) {
             // Flat storage: Robin Hood linear probing (ankerl-style optimized)
             // Use HIGH bits for bucket index, LOW 8 bits for fingerprint
-            const size_t hash = hash_(key);
             const size_t mask = capacity_ - 1;
             size_t bucket_idx = hash >> shift_;  // HIGH bits for bucket index
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
@@ -1961,7 +1975,6 @@ private:
             return {values_ + new_value_idx, true};
         } else {
             // Swiss Table + Indirect: SIMD probing with values array
-            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
             const size_t mask = capacity_ - 1;
 
