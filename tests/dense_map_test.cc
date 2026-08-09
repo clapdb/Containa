@@ -437,8 +437,8 @@ TEST_CASE("dense_map::string_keys") {
 }
 
 TEST_CASE("dense_map::transparent_lookup") {
-    SUBCASE("string_hash transparent lookup") {
-        dense_map<std::string, int, string_hash, std::equal_to<>> map;
+    SUBCASE("default string policies support transparent lookup") {
+        dense_map<std::string, int> map;
         map["hello"] = 1;
         map["world"] = 2;
 

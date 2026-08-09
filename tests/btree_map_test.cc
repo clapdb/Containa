@@ -521,8 +521,7 @@ TEST_CASE("btree_map::string_keys") {
 }
 
 TEST_CASE("btree_map::heterogeneous_lookup") {
-    // Use std::less<> for transparent comparison
-    btree_map<std::string, int, std::less<>> map;
+    btree_map<std::string, int> map;
 
     map["apple"] = 1;
     map["banana"] = 2;

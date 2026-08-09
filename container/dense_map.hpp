@@ -221,8 +221,14 @@ struct dense_hash<T*> {
 // Specialization for std::string and string_view
 template <>
 struct dense_hash<std::string> {
-    size_t operator()(const std::string& s) const noexcept {
+    using is_transparent = void;
+
+    size_t operator()(std::string_view s) const noexcept {
         return static_cast<size_t>(detail::wyhash(s.data(), s.size()));
+    }
+
+    size_t operator()(const char* s) const noexcept {
+        return operator()(std::string_view{s});
     }
 };
 
@@ -652,7 +658,7 @@ struct Bucket {
 // When T=void, acts as a set. Otherwise acts as a map.
 // ============================================================================
 template <typename Key, typename T = void, typename Hash = dense_hash<Key>,
-          typename KeyEqual = std::equal_to<Key>,
+          typename KeyEqual = std::equal_to<>,
           typename Allocator = std::allocator<std::conditional_t<detail::is_map_v<T>, std::pair<Key, T>, Key>>,
           typename MemoryPolicy = default_memory_policy<Key, T>>
 class dense_map {
@@ -2390,7 +2396,7 @@ using fast_map = dense_map<Key, Value>;
 namespace pmr {
 
 template <typename Key, typename T = void, typename Hash = dense_hash<Key>,
-          typename KeyEqual = std::equal_to<Key>,
+          typename KeyEqual = std::equal_to<>,
           typename MemoryPolicy = default_memory_policy<Key, T>>
 using dense_map = stdb::container::dense_map<
     Key, T, Hash, KeyEqual,
