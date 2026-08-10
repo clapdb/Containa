@@ -245,57 +245,14 @@ class concurrent_skiplist {
     // =========================================================================
 
     std::optional<Value> find(const Key& key) const {
-        Node* pred = nullptr;
-        int h = _height.load(std::memory_order_relaxed);  // height is approximate, relaxed OK
-
-        for (int i = h; i >= 0; --i) {
-            // acquire: synchronize with insert's release to see node data
-            Node* curr = (pred ? pred->next[i] : _head[i]).load(std::memory_order_acquire).ptr();
-
-            while (__builtin_expect(curr != nullptr, 1)) {
-                const Key& k = curr->key;  // safe: we used acquire above
-                if (_cmp(k, key)) {
-                    pred = curr;
-                    // acquire: need to see next node's data
-                    curr = curr->next[i].load(std::memory_order_acquire).ptr();
-                } else if (!_cmp(key, k)) {
-                    // acquire: synchronize with delete's release to see mark
-                    if (__builtin_expect(!curr->next[0].load(std::memory_order_acquire).marked(), 1)) {
-                        return curr->value;
-                    }
-                    return std::nullopt;  // Deleted
-                } else {
-                    break;
-                }
-            }
+        if (Node* node = find_node(key)) {
+            return node->value;
         }
         return std::nullopt;
     }
 
     // Optimized contains - avoids value copy
-    bool contains(const Key& key) const {
-        Node* pred = nullptr;
-        int h = _height.load(std::memory_order_relaxed);
-
-        for (int i = h; i >= 0; --i) {
-            // acquire: synchronize with insert's release
-            Node* curr = (pred ? pred->next[i] : _head[i]).load(std::memory_order_acquire).ptr();
-
-            while (curr) {
-                const Key& k = curr->key;
-                if (_cmp(k, key)) {
-                    pred = curr;
-                    curr = curr->next[i].load(std::memory_order_acquire).ptr();
-                } else if (!_cmp(key, k)) {
-                    // acquire: synchronize with delete's release
-                    return !curr->next[0].load(std::memory_order_acquire).marked();
-                } else {
-                    break;
-                }
-            }
-        }
-        return false;
-    }
+    bool contains(const Key& key) const { return find_node(key) != nullptr; }
 
     // =========================================================================
     // Insert
@@ -360,9 +317,20 @@ class concurrent_skiplist {
                     // Re-find position for this level
                     find_insert_position(key, preds, succs);
 
-                    // Update new_node's next if successor changed
-                    if (succs[i] != new_node->next[i].load(std::memory_order_relaxed).ptr()) {
-                        new_node->next[i].store(MarkedPtr<Node>(succs[i]), std::memory_order_relaxed);
+                    // Do not clear a deletion mark that raced with the failed link. Once level 0 is
+                    // visible, erase() may mark every next pointer while this thread is still linking
+                    // the upper levels. A plain store here could resurrect an upper-level pointer and
+                    // leave searches retrying forever on a node deleted at level 0.
+                    next = new_node->next[i].load(std::memory_order_relaxed);
+                    if (next.marked()) {
+                        goto done;
+                    }
+                    if (succs[i] != next.ptr() &&
+                        !new_node->next[i].compare_exchange_strong(next, MarkedPtr<Node>(succs[i]),
+                                                                   std::memory_order_relaxed,
+                                                                   std::memory_order_relaxed) &&
+                        next.marked()) {
+                        goto done;
                     }
                 }
             }
@@ -420,8 +388,14 @@ class concurrent_skiplist {
                         break;
                     }
                     find_insert_position(new_node->key, preds, succs);
-                    if (succs[i] != new_node->next[i].load(std::memory_order_relaxed).ptr()) {
-                        new_node->next[i].store(MarkedPtr<Node>(succs[i]), std::memory_order_relaxed);
+                    next = new_node->next[i].load(std::memory_order_relaxed);
+                    if (next.marked()) goto done2;
+                    if (succs[i] != next.ptr() &&
+                        !new_node->next[i].compare_exchange_strong(next, MarkedPtr<Node>(succs[i]),
+                                                                   std::memory_order_relaxed,
+                                                                   std::memory_order_relaxed) &&
+                        next.marked()) {
+                        goto done2;
                     }
                 }
             }
@@ -542,6 +516,47 @@ class concurrent_skiplist {
     }
 
    private:
+    Node* find_node(const Key& key) const {
+    retry:
+        Node* pred = nullptr;
+        int top = _height.load(std::memory_order_relaxed);
+
+        for (int i = top; i >= 0; --i) {
+            const std::atomic<MarkedPtr<Node>>* pred_next = pred ? &pred->next[i] : &_head[i];
+            MarkedPtr<Node> curr = pred_next->load(std::memory_order_acquire);
+
+            while (curr.ptr()) {
+                // A mark read from pred->next belongs to pred. It may already be unlinked at a lower
+                // level, so descending through its stale next pointers can skip later insertions.
+                if (curr.marked()) goto retry;
+
+                Node* node = curr.ptr();
+                MarkedPtr<Node> next = node->next[i].load(std::memory_order_acquire);
+                if (next.marked()) {
+                    // Keep the last live predecessor while skipping this deleted node.
+                    curr = MarkedPtr<Node>(next.ptr());
+                    continue;
+                }
+
+                if (_cmp(node->key, key)) {
+                    pred = node;
+                    pred_next = &pred->next[i];
+                    curr = next;
+                } else if (!_cmp(key, node->key)) {
+                    // Deletion marks upper levels before level 0. Recheck the authoritative level
+                    // before returning a value that may have been deleted during this traversal.
+                    if (!node->next[0].load(std::memory_order_acquire).marked()) {
+                        return node;
+                    }
+                    goto retry;
+                } else {
+                    break;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     // Find position for insert, returns false if key exists
     bool find_insert_position(const Key& key, Node* preds[], Node* succs[]) {
     retry:
