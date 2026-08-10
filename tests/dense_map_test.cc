@@ -371,6 +371,23 @@ TEST_CASE("dense_map::hash_policy") {
     }
 }
 
+TEST_CASE("dense_map::reserve preallocates contiguous string values") {
+    dense_map<std::string, uint64_t> map;
+    constexpr uint64_t kCount = 256;
+    map.reserve(kCount);
+    map.reserve_values(kCount);
+
+    auto [first, inserted] = map.try_emplace("key-0", 0);
+    REQUIRE(inserted);
+    const auto* first_value = &*first;
+    for (uint64_t i = 1; i < kCount; ++i) {
+        auto [_, added] = map.try_emplace("key-" + std::to_string(i), i);
+        REQUIRE(added);
+    }
+
+    CHECK_EQ(&*map.find("key-0"), first_value);
+}
+
 TEST_CASE("dense_map::stress_test") {
     SUBCASE("large insert and lookup") {
         constexpr int N = 10000;

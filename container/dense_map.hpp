@@ -1439,6 +1439,18 @@ public:
         }
     }
 
+    // Preallocate the contiguous value array used by flat and indirect storage. Unlike reserve(), this explicitly
+    // trades memory for stable value addresses while inserting up to count elements.
+    void reserve_values(size_type count) {
+        if constexpr (!kUseInline) {
+            if (count > values_capacity_) {
+                grow_values_array(normalize_capacity(count));
+            }
+        } else {
+            reserve(count);
+        }
+    }
+
     // Observers
     hasher hash_function() const { return hash_; }
     key_equal key_eq() const { return key_equal_; }
@@ -2034,9 +2046,10 @@ private:
         }
     }
 
-    // Grow values array for indirect storage
-    void grow_values_array() {
-        size_t new_capacity = values_capacity_ == 0 ? 8 : values_capacity_ * 2;
+    // Grow the contiguous values array used by flat and indirect storage.
+    void grow_values_array(size_t minimum_capacity = 0) {
+        size_t new_capacity =
+            std::max(values_capacity_ == 0 ? size_t{8} : values_capacity_ * 2, minimum_capacity);
         SlotAlloc slot_alloc(alloc_);
         value_type* new_values = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, new_capacity);
 
