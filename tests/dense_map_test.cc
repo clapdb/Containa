@@ -388,6 +388,172 @@ TEST_CASE("dense_map::reserve preallocates contiguous string values") {
     CHECK_EQ(&*map.find("key-0"), first_value);
 }
 
+TEST_CASE("dense_map::direct memory footprint supports every storage policy") {
+    constexpr size_t kReservedEntries = 32;
+
+    auto check_policy = [=]<typename Policy>() {
+        using Value = std::pair<int, int>;
+        using Map = dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, Policy>;
+
+        Map map;
+        auto empty = map.direct_memory_footprint();
+        REQUIRE(empty.has_value());
+        CHECK_EQ(empty->bucket_capacity, 0);
+        CHECK_EQ(empty->entry_capacity, 0);
+        CHECK_EQ(empty->value_capacity, 0);
+        CHECK_EQ(empty->direct_allocation_bytes, 0);
+        auto zero_projection = map.projected_direct_memory_footprint(0);
+        REQUIRE(zero_projection.has_value());
+        CHECK(*zero_projection == *empty);
+
+        auto projected = map.projected_direct_memory_footprint(kReservedEntries);
+        REQUIRE(projected.has_value());
+        CHECK_GE(projected->entry_capacity, kReservedEntries);
+        CHECK_GE(projected->value_capacity, kReservedEntries);
+        CHECK_EQ(map.capacity(), 0);
+        CHECK_EQ(map.size(), 0);
+
+        map.reserve(kReservedEntries);
+        map.reserve_values(kReservedEntries);
+        auto current = map.direct_memory_footprint();
+        REQUIRE(current.has_value());
+        CHECK(*current == *projected);
+        CHECK_EQ(map.entry_capacity(), current->entry_capacity);
+        CHECK_EQ(map.value_capacity(), current->value_capacity);
+
+        size_t expected_bytes = 0;
+        if constexpr (std::is_same_v<Policy, force_inline_policy>) {
+            expected_bytes = (map.capacity() + detail::kGroupWidth + 1) * sizeof(int8_t) +
+                             map.capacity() * sizeof(Value);
+        } else if constexpr (std::is_same_v<Policy, force_flat_policy>) {
+            expected_bytes = map.capacity() * sizeof(detail::Bucket) + map.value_capacity() * sizeof(Value);
+        } else {
+            expected_bytes = (map.capacity() + detail::kGroupWidth + 1) * sizeof(int8_t) +
+                             map.capacity() * sizeof(uint32_t) + map.value_capacity() * sizeof(Value);
+        }
+        CHECK_EQ(current->direct_allocation_bytes, expected_bytes);
+
+        const auto bucket_capacity = map.capacity();
+        const auto value_capacity = map.value_capacity();
+        for (size_t i = 0; i < kReservedEntries; ++i) {
+            map.emplace(static_cast<int>(i), static_cast<int>(i));
+        }
+        CHECK_EQ(map.capacity(), bucket_capacity);
+        CHECK_EQ(map.value_capacity(), value_capacity);
+        auto after_insert = map.direct_memory_footprint();
+        REQUIRE(after_insert.has_value());
+        CHECK(*after_insert == *current);
+
+        auto no_growth = map.projected_direct_memory_footprint(kReservedEntries);
+        REQUIRE(no_growth.has_value());
+        CHECK(*no_growth == *current);
+
+        const auto second_growth_count = current->entry_capacity + 1;
+        auto second_projection = map.projected_direct_memory_footprint(second_growth_count);
+        REQUIRE(second_projection.has_value());
+        map.reserve(second_growth_count);
+        map.reserve_values(second_growth_count);
+        auto after_second_growth = map.direct_memory_footprint();
+        REQUIRE(after_second_growth.has_value());
+        CHECK(*after_second_growth == *second_projection);
+    };
+
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
+TEST_CASE("dense_map::memory footprint rejects overflowing projections") {
+    using Value = std::pair<int, int>;
+    using FlatMap = dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, force_flat_policy>;
+    using IndirectMap =
+        dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, force_indirect_policy>;
+
+    if constexpr (std::numeric_limits<size_t>::digits > std::numeric_limits<uint32_t>::digits) {
+        const auto max_entries = static_cast<size_t>(std::numeric_limits<uint32_t>::max());
+        const auto too_many = max_entries + 1;
+        auto check_policy = [=]<typename Policy>() {
+            using Map = dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, Policy>;
+            Map map;
+            CHECK(map.projected_direct_memory_footprint(max_entries).has_value());
+            CHECK_FALSE(map.projected_direct_memory_footprint(too_many).has_value());
+            CHECK_THROWS_AS(map.reserve(too_many), std::length_error);
+            CHECK_THROWS_AS(map.reserve_values(too_many), std::length_error);
+            CHECK_EQ(map.capacity(), 0);
+            CHECK_EQ(map.size(), 0);
+        };
+        check_policy.template operator()<force_flat_policy>();
+        check_policy.template operator()<force_indirect_policy>();
+    }
+
+    CHECK_FALSE(FlatMap{}.projected_direct_memory_footprint(std::numeric_limits<size_t>::max()).has_value());
+    CHECK_FALSE(IndirectMap{}.projected_direct_memory_footprint(std::numeric_limits<size_t>::max()).has_value());
+}
+
+TEST_CASE("dense_map::reserve_values before reserve preserves the value allocation") {
+    constexpr size_t kReservedEntries = 32;
+    auto check_policy = [=]<typename Policy>() {
+        using Value = std::pair<int, int>;
+        using Map = dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, Policy>;
+
+        Map map;
+        map.reserve_values(8);
+        auto values_only = map.direct_memory_footprint();
+        REQUIRE(values_only.has_value());
+        auto zero_projection = map.projected_direct_memory_footprint(0);
+        REQUIRE(zero_projection.has_value());
+        CHECK(*zero_projection == *values_only);
+        if constexpr (std::is_same_v<Policy, force_inline_policy>) {
+            CHECK_NE(values_only->bucket_capacity, 0);
+        } else {
+            CHECK_EQ(values_only->bucket_capacity, 0);
+            CHECK_EQ(values_only->value_capacity, 8);
+            CHECK_GT(values_only->direct_allocation_bytes, 0);
+        }
+
+        auto projected = map.projected_direct_memory_footprint(kReservedEntries);
+        REQUIRE(projected.has_value());
+        map.reserve(kReservedEntries);
+        map.reserve_values(kReservedEntries);
+        auto current = map.direct_memory_footprint();
+        REQUIRE(current.has_value());
+        CHECK(*current == *projected);
+
+        map.emplace(1, 1);
+        auto after_insert = map.direct_memory_footprint();
+        REQUIRE(after_insert.has_value());
+        CHECK(*after_insert == *current);
+    };
+
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
+TEST_CASE("dense_map::reserve_values grows values when buckets already suffice") {
+    constexpr size_t kReservedEntries = 32;
+    auto check_policy = [=]<typename Policy>() {
+        using Value = std::pair<int, int>;
+        using Map = dense_map<int, int, dense_hash<int>, std::equal_to<>, std::allocator<Value>, Policy>;
+
+        Map map(64);
+        const auto bucket_capacity = map.capacity();
+        const auto before = map.direct_memory_footprint();
+        REQUIRE(before.has_value());
+        auto projected = map.projected_direct_memory_footprint(kReservedEntries);
+        REQUIRE(projected.has_value());
+        map.reserve_values(kReservedEntries);
+        auto after = map.direct_memory_footprint();
+        REQUIRE(after.has_value());
+        CHECK_EQ(map.capacity(), bucket_capacity);
+        CHECK(*after == *projected);
+        CHECK_GT(after->value_capacity, before->value_capacity);
+    };
+
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
 TEST_CASE("dense_map::stress_test") {
     SUBCASE("large insert and lookup") {
         constexpr int N = 10000;

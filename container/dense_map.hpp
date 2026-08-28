@@ -31,6 +31,7 @@
 #include <memory>
 #include <memory_resource>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -616,6 +617,21 @@ using flat_storage_policy = force_flat_policy;
 using swiss_table_policy = inline_storage_policy;
 using robin_hood_policy = flat_storage_policy;  // Note: different from tsl::robin_map!
 
+// Direct allocations owned by a dense_map.  This intentionally excludes any memory allocated by a key or
+// mapped value itself (for example, the character buffer owned by a std::string).  bucket_capacity is the
+// capacity used by the storage policy; entry_capacity is the theoretical total entry capacity admitted by that
+// storage policy; value_capacity is the capacity of the contiguous value array, or the inline slot capacity for
+// inline storage.
+struct dense_map_direct_memory_footprint {
+    size_t bucket_capacity = 0;
+    size_t entry_capacity = 0;
+    size_t value_capacity = 0;
+    size_t direct_allocation_bytes = 0;
+
+    friend bool operator==(const dense_map_direct_memory_footprint&, const dense_map_direct_memory_footprint&) =
+        default;
+};
+
 // ============================================================================
 // Bucket for flat storage (ankerl-style Robin Hood)
 // ============================================================================
@@ -697,6 +713,10 @@ private:
     static constexpr size_t kGroupWidth = detail::kGroupWidth;
     static constexpr float kMaxLoadFactor = 0.875f;
     static constexpr size_t kMinCapacity = kUseInline ? kGroupWidth : 8;
+    static constexpr size_t kMaxEntryCount =
+        kUseInline ? std::numeric_limits<size_t>::max() / 2
+                   : std::min(std::numeric_limits<size_t>::max() / 2,
+                              static_cast<size_t>(std::numeric_limits<uint32_t>::max()));
 
     // Helper to extract key from value_type (for map: pair.first, for set: value itself)
     static constexpr const Key& get_key(const value_type& v) {
@@ -1144,8 +1164,71 @@ public:
     // Capacity
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
-    size_type max_size() const noexcept { return std::numeric_limits<size_type>::max() / 2; }
+    size_type max_size() const noexcept { return kMaxEntryCount; }
     size_type capacity() const noexcept { return capacity_; }
+
+    // The two capacities below deliberately distinguish an admissible entry count from the storage policy's
+    // bucket count.  In particular, capacity() is not an insertion guarantee because the table grows at its
+    // maximum load factor. This is a theoretical admissible total capacity; erasing entries does not guarantee
+    // that the same number can be inserted without another growth operation because deleted slots are retained.
+    size_type entry_capacity() const noexcept { return capacity_to_growth(capacity_); }
+    size_type value_capacity() const noexcept {
+        if constexpr (kUseInline) {
+            return capacity_;
+        } else {
+            return values_capacity_;
+        }
+    }
+
+    // Return the bytes of the allocations directly owned by this map. Nested allocations made by Key or T are
+    // intentionally outside this contract. A default map has no direct allocations, while a map whose value
+    // array was reserved before its buckets can report a value-only allocation. Arithmetic overflow is reported
+    // as std::nullopt rather than wrapping the byte count.
+    [[nodiscard]] std::optional<dense_map_direct_memory_footprint> direct_memory_footprint() const noexcept {
+        return make_memory_footprint(capacity_, value_capacity());
+    }
+
+    // Project the direct footprint after reserve(count) followed by reserve_values(count), without mutating or
+    // allocating in this map.  The projection uses the same normalization and growth rules as those operations.
+    [[nodiscard]] std::optional<dense_map_direct_memory_footprint> projected_direct_memory_footprint(
+        size_type count) const noexcept {
+        auto required_entries = required_bucket_capacity(count);
+        if (!required_entries) {
+            return std::nullopt;
+        }
+
+        size_type projected_buckets = capacity_;
+        size_type projected_values = value_capacity();
+        if (*required_entries > projected_buckets) {
+            projected_buckets = *required_entries;
+            if constexpr (kUseInline) {
+                projected_values = projected_buckets;
+            } else if constexpr (kUseFlat) {
+                // rehash_impl allocates a full value array when rehashing an uninitialized flat map.
+                if (capacity_ == 0 && projected_values == 0) {
+                    projected_values = projected_buckets;
+                }
+            }
+        }
+
+        if constexpr (!kUseInline) {
+            if (count > projected_values) {
+                auto normalized_values = try_normalize_capacity(count);
+                if (!normalized_values) {
+                    return std::nullopt;
+                }
+                auto growth_capacity = projected_values == 0
+                                          ? std::optional<size_type>{size_type{8}}
+                                          : checked_multiply(projected_values, 2);
+                if (!growth_capacity) {
+                    return std::nullopt;
+                }
+                projected_values = std::max(*growth_capacity, *normalized_values);
+            }
+        }
+
+        return make_memory_footprint(projected_buckets, projected_values);
+    }
 
     // Modifiers
     void clear() noexcept {
@@ -1422,9 +1505,11 @@ public:
     float max_load_factor() const noexcept { return kMaxLoadFactor; }
 
     void rehash(size_type count) {
-        size_t min_size = static_cast<size_t>(
-            std::ceil(static_cast<float>(size_) / kMaxLoadFactor));
-        count = std::max({count, min_size, kMinCapacity});
+        auto min_size = required_bucket_capacity(size_);
+        if (!min_size) {
+            throw std::length_error("dense_map::rehash: entry count is too large");
+        }
+        count = std::max({count, *min_size, kMinCapacity});
         count = normalize_capacity(count);
         if (count != capacity_) {
             rehash_impl(count);
@@ -1432,16 +1517,21 @@ public:
     }
 
     void reserve(size_type count) {
-        size_t required = static_cast<size_t>(
-            std::ceil(static_cast<float>(count) / kMaxLoadFactor));
-        if (required > capacity_) {
-            rehash(required);
+        auto required = required_bucket_capacity(count);
+        if (!required) {
+            throw std::length_error("dense_map::reserve: entry count is too large");
+        }
+        if (*required > capacity_) {
+            rehash(*required);
         }
     }
 
     // Preallocate the contiguous value array used by flat and indirect storage. Unlike reserve(), this explicitly
     // trades memory for stable value addresses while inserting up to count elements.
     void reserve_values(size_type count) {
+        if (count > kMaxEntryCount) {
+            throw std::length_error("dense_map::reserve_values: entry count is too large");
+        }
         if constexpr (!kUseInline) {
             if (count > values_capacity_) {
                 grow_values_array(normalize_capacity(count));
@@ -1458,14 +1548,132 @@ public:
 
 private:
     // Round up to power of 2, minimum kGroupWidth
+    static std::optional<size_type> checked_add(size_type lhs, size_type rhs) noexcept {
+        if (rhs > std::numeric_limits<size_type>::max() - lhs) {
+            return std::nullopt;
+        }
+        return lhs + rhs;
+    }
+
+    static std::optional<size_type> checked_multiply(size_type lhs, size_type rhs) noexcept {
+        if (lhs != 0 && rhs > std::numeric_limits<size_type>::max() / lhs) {
+            return std::nullopt;
+        }
+        return lhs * rhs;
+    }
+
+    static std::optional<size_type> try_normalize_capacity(size_type n) noexcept {
+        if (n < kMinCapacity) {
+            return kMinCapacity;
+        }
+
+        const size_type bits = std::numeric_limits<size_type>::digits - std::countl_zero(n - 1);
+        if (bits >= std::numeric_limits<size_type>::digits) {
+            return std::nullopt;
+        }
+        return size_type{1} << bits;
+    }
+
+    // ceil(count / 0.875), expressed with integers so projection and reserve have identical behavior even for
+    // counts larger than the exactly representable range of float.
+    static std::optional<size_type> required_bucket_capacity(size_type count) noexcept {
+        if (count > kMaxEntryCount) {
+            return std::nullopt;
+        }
+        const size_type quotient = count / 7;
+        const size_type remainder = count % 7;
+        const size_type remainder_capacity = (remainder * 8 + 6) / 7;
+        if (quotient > (std::numeric_limits<size_type>::max() - remainder_capacity) / 8) {
+            return std::nullopt;
+        }
+        const size_type required = quotient * 8 + remainder_capacity;
+        if (required == 0) {
+            return size_type{0};
+        }
+        return try_normalize_capacity(required);
+    }
+
+    static std::optional<dense_map_direct_memory_footprint> make_memory_footprint(size_type bucket_capacity,
+                                                                                   size_type value_capacity) noexcept {
+        if (bucket_capacity == 0 && value_capacity == 0) {
+            return dense_map_direct_memory_footprint{};
+        }
+
+        dense_map_direct_memory_footprint result{
+            .bucket_capacity = bucket_capacity,
+            .entry_capacity = capacity_to_growth_for(bucket_capacity),
+            .value_capacity = value_capacity,
+            .direct_allocation_bytes = 0,
+        };
+
+        std::optional<size_type> bytes;
+        if constexpr (kUseInline) {
+            std::optional<size_type> ctrl_bytes;
+            if (bucket_capacity != 0) {
+                auto ctrl_count = checked_add(bucket_capacity, kGroupWidth);
+                if (!ctrl_count) {
+                    return std::nullopt;
+                }
+                ctrl_count = checked_add(*ctrl_count, 1);
+                ctrl_bytes = checked_multiply(*ctrl_count, sizeof(int8_t));
+            }
+            auto slot_bytes = checked_multiply(bucket_capacity, sizeof(value_type));
+            if (!ctrl_bytes) ctrl_bytes = size_type{0};
+            if (!slot_bytes) return std::nullopt;
+            bytes = checked_add(*ctrl_bytes, *slot_bytes);
+        } else if constexpr (kUseFlat) {
+            auto bucket_bytes = checked_multiply(bucket_capacity, sizeof(detail::Bucket));
+            auto value_bytes = checked_multiply(value_capacity, sizeof(value_type));
+            if (!bucket_bytes || !value_bytes) {
+                return std::nullopt;
+            }
+            bytes = checked_add(*bucket_bytes, *value_bytes);
+        } else {
+            std::optional<size_type> ctrl_bytes;
+            std::optional<size_type> index_bytes;
+            if (bucket_capacity != 0) {
+                auto ctrl_count = checked_add(bucket_capacity, kGroupWidth);
+                if (!ctrl_count) {
+                    return std::nullopt;
+                }
+                ctrl_count = checked_add(*ctrl_count, 1);
+                ctrl_bytes = checked_multiply(*ctrl_count, sizeof(int8_t));
+                index_bytes = checked_multiply(bucket_capacity, sizeof(uint32_t));
+            }
+            auto value_bytes = checked_multiply(value_capacity, sizeof(value_type));
+            if (!ctrl_bytes) ctrl_bytes = size_type{0};
+            if (!index_bytes) index_bytes = size_type{0};
+            if (!value_bytes) {
+                return std::nullopt;
+            }
+            bytes = checked_add(*ctrl_bytes, *index_bytes);
+            if (bytes) {
+                bytes = checked_add(*bytes, *value_bytes);
+            }
+        }
+        if (!bytes) {
+            return std::nullopt;
+        }
+        result.direct_allocation_bytes = *bytes;
+        return result;
+    }
+
+    static size_type capacity_to_growth_for(size_type cap) noexcept {
+        const auto load_factor_capacity = (cap / 8) * 7 + ((cap % 8) * 7) / 8;
+        return std::min(load_factor_capacity, kMaxEntryCount);
+    }
+
     static size_t normalize_capacity(size_t n) {
-        if (n < kMinCapacity) return kMinCapacity;
-        return size_t{1} << (64 - std::countl_zero(n - 1));
+        auto normalized = try_normalize_capacity(n);
+        if (!normalized) {
+            throw std::length_error("dense_map: capacity is too large");
+        }
+        return *normalized;
     }
 
     // Calculate how many elements we can insert before rehash
     size_t capacity_to_growth(size_t cap) const {
-        return static_cast<size_t>(cap * kMaxLoadFactor);
+        return capacity_to_growth_for(cap);
     }
 
     void reset_growth() {
@@ -1496,10 +1704,13 @@ private:
             // Initialize all buckets as empty (Bucket is trivially copyable, set_empty() zeros both fields)
             std::memset(buckets_, 0, cap * sizeof(detail::Bucket));
 
-            // Allocate values array - start smaller, let grow_values_array handle growth
-            values_capacity_ = std::min(cap, size_t(8));
-            SlotAlloc slot_alloc(alloc_);
-            values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            // Reuse a value array reserved before the first bucket allocation. Otherwise emplace() after
+            // reserve_values() would orphan that allocation when initialize() creates the first buckets.
+            if (!values_) {
+                values_capacity_ = std::min(cap, size_t(8));
+                SlotAlloc slot_alloc(alloc_);
+                values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            }
         } else {
             // Indirect storage (Swiss Table + Contiguous Values):
             // Allocate control bytes + sentinel group
@@ -1515,10 +1726,13 @@ private:
             // Initialize to avoid undefined behavior when ctrl_ has stale "full" markers
             std::memset(value_indices_, 0, cap * sizeof(uint32_t));
 
-            // Allocate initial values array - start smaller
-            values_capacity_ = std::min(cap, size_t(8));
-            SlotAlloc slot_alloc(alloc_);
-            values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            // Reuse a value array reserved before the first bucket allocation. Otherwise emplace() after
+            // reserve_values() would orphan that allocation when initialize() creates the first buckets.
+            if (!values_) {
+                values_capacity_ = std::min(cap, size_t(8));
+                SlotAlloc slot_alloc(alloc_);
+                values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
+            }
         }
 
         reset_growth();
@@ -1612,6 +1826,8 @@ private:
                 }
                 BucketAlloc bucket_alloc(alloc_);
                 std::allocator_traits<BucketAlloc>::deallocate(bucket_alloc, buckets_, capacity_);
+            }
+            if (values_) {
                 SlotAlloc slot_alloc(alloc_);
                 std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
             }
@@ -1629,6 +1845,8 @@ private:
                     ctrl_alloc, ctrl_, capacity_ + kGroupWidth + 1);
                 IndexAlloc index_alloc(alloc_);
                 std::allocator_traits<IndexAlloc>::deallocate(index_alloc, value_indices_, capacity_);
+            }
+            if (values_) {
                 SlotAlloc slot_alloc(alloc_);
                 std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, values_, values_capacity_);
             }
@@ -2048,8 +2266,13 @@ private:
 
     // Grow the contiguous values array used by flat and indirect storage.
     void grow_values_array(size_t minimum_capacity = 0) {
-        size_t new_capacity =
-            std::max(values_capacity_ == 0 ? size_t{8} : values_capacity_ * 2, minimum_capacity);
+        auto growth_capacity = values_capacity_ == 0
+                                 ? std::optional<size_t>{size_t{8}}
+                                 : checked_multiply(values_capacity_, 2);
+        if (!growth_capacity) {
+            throw std::length_error("dense_map::reserve_values: value capacity is too large");
+        }
+        size_t new_capacity = std::max(*growth_capacity, minimum_capacity);
         SlotAlloc slot_alloc(alloc_);
         value_type* new_values = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, new_capacity);
 
