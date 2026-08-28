@@ -104,6 +104,7 @@ using ::stdb::container::string_like;
 using ::stdb::container::dense_hash;
 using ::stdb::container::dense_map;
 using ::stdb::container::dense_set;
+using ::stdb::container::dense_map_direct_memory_footprint;
 using ::stdb::container::fast_map;
 // `default_memory_policy` is the default template argument of dense_map/dense_set, so anyone who
 // spells those templates' later parameters explicitly needs it; `flat_storage_tag` completes the
