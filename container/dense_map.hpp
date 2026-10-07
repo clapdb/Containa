@@ -1167,6 +1167,22 @@ public:
     size_type max_size() const noexcept { return kMaxEntryCount; }
     size_type capacity() const noexcept { return capacity_; }
 
+    /// Best-effort prefetch for the initial probe location of a key. This does not guarantee that a later
+    /// collision probe will use the prefetched slot. Unsupported storage layouts and unallocated inline tables
+    /// are no-ops. It does not allocate or change the container's logical contents, size, or capacity; a const
+    /// hasher may still have mutable side effects or throw.
+    void prefetch_key(const Key& key) const
+      noexcept(noexcept(std::declval<const Hash&>()(std::declval<const Key&>()))) {
+        (void)key;
+        if constexpr (kUseInline) {
+            if (capacity_ == 0) return;
+
+            const auto position = hash_(key) & (capacity_ - 1);
+            DENSE_MAP_PREFETCH(ctrl_ + position);
+            DENSE_MAP_PREFETCH(slots_ + position);
+        }
+    }
+
     // The two capacities below deliberately distinguish an admissible entry count from the storage policy's
     // bucket count.  In particular, capacity() is not an insertion guarantee because the table grows at its
     // maximum load factor. This is a theoretical admissible total capacity; erasing entries does not guarantee
