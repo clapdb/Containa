@@ -20,6 +20,7 @@
 #include <memory_resource>
 #include <array>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -40,7 +41,177 @@ struct CountingIntHash {
     }
 };
 
+struct ThrowingIntHash
+{
+    auto operator()(int value) const -> size_t { return dense_hash<int>{}(value); }
+};
+
+struct ThrowingSizeConversion {
+    operator size_t() const { throw std::runtime_error("hash conversion failed"); }
+};
+
+struct NoexceptProxyHash {
+    auto operator()(int) const noexcept -> ThrowingSizeConversion { return {}; }
+};
+
+#if defined(__SIZEOF_INT128__)
+struct CountingCollisionHash
+{
+    size_t* calls{nullptr};
+
+    auto operator()(unsigned __int128) const noexcept -> size_t {
+        ++*calls;
+        return 0;
+    }
+};
+#endif
+
 }  // namespace
+
+TEST_CASE("dense_map::prefetch_key") {
+    static_assert(noexcept(std::declval<const dense_map<int, int, CountingIntHash>&>().prefetch_key(0)));
+    static_assert(!noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_key(0)));
+    static_assert(!noexcept(std::declval<const dense_map<int, int, NoexceptProxyHash>&>().prefetch_key(0)));
+    static_assert(!noexcept(std::declval<const dense_set<int, NoexceptProxyHash>&>().prefetch_key(0)));
+
+    SUBCASE("inline table hashes and prefetches without changing contents or capacity") {
+        size_t hash_calls = 0;
+        dense_map<int, int, CountingIntHash, std::equal_to<int>, std::allocator<std::pair<int, int>>,
+                  force_inline_policy>
+          map(64, CountingIntHash{&hash_calls});
+        map.emplace(1, 10);
+        map.emplace(2, 20);
+        hash_calls = 0;
+
+        const auto size = map.size();
+        const auto capacity = map.capacity();
+        map.prefetch_key(2);
+
+        CHECK_EQ(hash_calls, 1);
+        CHECK_EQ(map.size(), size);
+        CHECK_EQ(map.capacity(), capacity);
+        REQUIRE(map.contains(1));
+        REQUIRE(map.contains(2));
+        CHECK_EQ(map.at(1), 10);
+        CHECK_EQ(map.at(2), 20);
+    }
+
+    SUBCASE("unallocated inline table returns before hashing") {
+        size_t hash_calls = 0;
+        dense_map<int, int, CountingIntHash, std::equal_to<int>, std::allocator<std::pair<int, int>>,
+                  force_inline_policy>
+          map(0, CountingIntHash{&hash_calls});
+
+        map.prefetch_key(7);
+
+        CHECK_EQ(hash_calls, 0);
+        CHECK(map.empty());
+        CHECK_EQ(map.capacity(), 0);
+    }
+
+    SUBCASE("throwing hash result conversion propagates for maps and sets") {
+        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>,
+                              std::allocator<std::pair<int, int>>, force_inline_policy>;
+        using Set = dense_set<int, NoexceptProxyHash, std::equal_to<int>, std::allocator<int>, force_inline_policy>;
+        Map map(64);
+        Set set(64);
+
+        CHECK_THROWS_AS(map.prefetch_key(1), std::runtime_error);
+        CHECK_THROWS_AS(set.prefetch_key(1), std::runtime_error);
+    }
+
+    SUBCASE("prefetch remains safe after reserve, move, and clear") {
+        size_t hash_calls = 0;
+        dense_map<int, int, CountingIntHash, std::equal_to<int>, std::allocator<std::pair<int, int>>,
+                  force_inline_policy>
+          map(64, CountingIntHash{&hash_calls});
+        map.emplace(9, 90);
+        map.reserve(128);
+        const auto reserved_capacity = map.capacity();
+        hash_calls = 0;
+        map.prefetch_key(9);
+        CHECK_EQ(hash_calls, 1);
+
+        auto moved = std::move(map);
+        CHECK_EQ(map.capacity(), 0);
+        hash_calls = 0;
+        map.prefetch_key(9);
+        CHECK_EQ(hash_calls, 0);
+
+        moved.clear();
+        hash_calls = 0;
+        const auto size = moved.size();
+        const auto capacity = moved.capacity();
+        moved.prefetch_key(9);
+
+        CHECK_EQ(hash_calls, 1);
+        CHECK(moved.empty());
+        CHECK_EQ(size, 0);
+        CHECK_EQ(capacity, reserved_capacity);
+        CHECK_EQ(moved.capacity(), capacity);
+    }
+
+#if defined(__SIZEOF_INT128__)
+    SUBCASE("inline uint128 set prefetch handles colliding full-width keys") {
+        using Key = unsigned __int128;
+        using Set = dense_set<Key, CountingCollisionHash, std::equal_to<>, std::allocator<Key>, force_inline_policy>;
+
+        size_t hash_calls = 0;
+        Set empty(0, CountingCollisionHash{&hash_calls});
+        empty.prefetch_key(Key{7});
+        CHECK_EQ(hash_calls, 0);
+
+        Set set(64, CountingCollisionHash{&hash_calls});
+        const Key low_key = 7;
+        const Key high_key = (static_cast<Key>(1) << 64) | 7;
+        const Key other_low_key = 8;
+        CHECK(set.insert(low_key).second);
+        CHECK(set.insert(high_key).second);
+        CHECK(set.insert(other_low_key).second);
+
+        hash_calls = 0;
+        const auto size = set.size();
+        const auto capacity = set.capacity();
+        const auto entry_capacity = set.entry_capacity();
+        set.prefetch_key(low_key);
+        set.prefetch_key(high_key);
+        set.prefetch_key(other_low_key);
+
+        CHECK_EQ(hash_calls, 3);
+        CHECK_EQ(set.size(), size);
+        CHECK_EQ(set.capacity(), capacity);
+        CHECK_EQ(set.entry_capacity(), entry_capacity);
+        CHECK_FALSE(set.insert(high_key).second);
+        CHECK(set.contains(low_key));
+        CHECK(set.contains(high_key));
+        CHECK(set.contains(other_low_key));
+        CHECK_EQ(set.size(), 3);
+    }
+#endif
+
+    SUBCASE("unsupported storage layouts return before hashing") {
+        auto check_policy = []<typename Policy>() {
+            size_t hash_calls = 0;
+            dense_map<int, int, CountingIntHash, std::equal_to<int>, std::allocator<std::pair<int, int>>, Policy> map(
+              64, CountingIntHash{&hash_calls});
+            map.emplace(1, 10);
+            hash_calls = 0;
+            const auto size = map.size();
+            const auto capacity = map.capacity();
+
+            map.prefetch_key(1);
+
+            CHECK_EQ(hash_calls, 0);
+            CHECK_EQ(map.size(), size);
+            CHECK_EQ(map.capacity(), capacity);
+            REQUIRE(map.contains(1));
+            CHECK_EQ(map.at(1), 10);
+        };
+
+        check_policy.template operator()<force_flat_policy>();
+        check_policy.template operator()<force_indirect_policy>();
+    }
+}
 
 TEST_CASE("dense_map::basic") {
     SUBCASE("default constructor") {
