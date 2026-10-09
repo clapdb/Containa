@@ -1172,12 +1172,13 @@ public:
     /// are no-ops. It does not allocate or change the container's logical contents, size, or capacity; a const
     /// hasher may still have mutable side effects or throw.
     void prefetch_key(const Key& key) const
-      noexcept(noexcept(std::declval<const Hash&>()(std::declval<const Key&>()))) {
+      noexcept(noexcept(static_cast<size_type>(std::declval<const Hash&>()(std::declval<const Key&>())))) {
         (void)key;
         if constexpr (kUseInline) {
             if (capacity_ == 0) return;
 
-            const auto position = hash_(key) & (capacity_ - 1);
+            const size_type hash = static_cast<size_type>(hash_(key));
+            const auto position = hash & (capacity_ - 1);
             DENSE_MAP_PREFETCH(ctrl_ + position);
             DENSE_MAP_PREFETCH(slots_ + position);
         }

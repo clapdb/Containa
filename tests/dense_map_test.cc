@@ -20,6 +20,7 @@
 #include <memory_resource>
 #include <array>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -45,6 +46,14 @@ struct ThrowingIntHash
     auto operator()(int value) const -> size_t { return dense_hash<int>{}(value); }
 };
 
+struct ThrowingSizeConversion {
+    operator size_t() const { throw std::runtime_error("hash conversion failed"); }
+};
+
+struct NoexceptProxyHash {
+    auto operator()(int) const noexcept -> ThrowingSizeConversion { return {}; }
+};
+
 #if defined(__SIZEOF_INT128__)
 struct CountingCollisionHash
 {
@@ -62,6 +71,8 @@ struct CountingCollisionHash
 TEST_CASE("dense_map::prefetch_key") {
     static_assert(noexcept(std::declval<const dense_map<int, int, CountingIntHash>&>().prefetch_key(0)));
     static_assert(!noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_key(0)));
+    static_assert(!noexcept(std::declval<const dense_map<int, int, NoexceptProxyHash>&>().prefetch_key(0)));
+    static_assert(!noexcept(std::declval<const dense_set<int, NoexceptProxyHash>&>().prefetch_key(0)));
 
     SUBCASE("inline table hashes and prefetches without changing contents or capacity") {
         size_t hash_calls = 0;
@@ -96,6 +107,17 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK_EQ(hash_calls, 0);
         CHECK(map.empty());
         CHECK_EQ(map.capacity(), 0);
+    }
+
+    SUBCASE("throwing hash result conversion propagates for maps and sets") {
+        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>,
+                              std::allocator<std::pair<int, int>>, force_inline_policy>;
+        using Set = dense_set<int, NoexceptProxyHash, std::equal_to<int>, std::allocator<int>, force_inline_policy>;
+        Map map(64);
+        Set set(64);
+
+        CHECK_THROWS_AS(map.prefetch_key(1), std::runtime_error);
+        CHECK_THROWS_AS(set.prefetch_key(1), std::runtime_error);
     }
 
     SUBCASE("prefetch remains safe after reserve, move, and clear") {
