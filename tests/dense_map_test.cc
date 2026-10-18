@@ -106,6 +106,22 @@ TEST_CASE("dense_map::inline_allocation_failure_preserves_storage") {
                                 std::pmr::polymorphic_allocator<uint64_t>{&resource}}), std::bad_alloc);
             CHECK_EQ(resource.live_bytes, 0);
         }
+        {
+            FailingInlineResource resource;
+            {
+                Set set{std::pmr::polymorphic_allocator<uint64_t>{&resource}};
+                resource.fail_on = failed_buffer;
+                CHECK_THROWS_AS(set.emplace(777), std::bad_alloc);
+                CHECK(set.empty());
+                CHECK_EQ(set.capacity(), 0);
+                CHECK_FALSE(set.contains(777));
+                CHECK_EQ(resource.live_bytes, 0);
+                resource.fail_on = 0;
+                CHECK(set.emplace(777).second);
+                CHECK(set.contains(777));
+            }
+            CHECK_EQ(resource.live_bytes, 0);
+        }
         for (size_t count : {size_t{0}, size_t{23}}) {
             FailingInlineResource resource;
             {
