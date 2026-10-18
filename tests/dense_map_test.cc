@@ -18,6 +18,7 @@
 #include "container/dense_set.hpp"
 
 #include <memory_resource>
+#include <new>
 #include <array>
 #include <random>
 #include <stdexcept>
@@ -67,6 +68,67 @@ struct CountingCollisionHash
 #endif
 
 }  // namespace
+
+namespace {
+
+class FailingInlineResource : public std::pmr::memory_resource {
+public:
+    size_t calls = 0;
+    size_t fail_on = 0;
+    size_t live_bytes = 0;
+
+private:
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        if (++calls == fail_on) throw std::bad_alloc{};
+        auto* result = std::pmr::new_delete_resource()->allocate(bytes, alignment);
+        live_bytes += bytes;
+        return result;
+    }
+    void do_deallocate(void* ptr, size_t bytes, size_t alignment) override {
+        std::pmr::new_delete_resource()->deallocate(ptr, bytes, alignment);
+        live_bytes -= bytes;
+    }
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+        return this == &other;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("dense_map::inline_allocation_failure_preserves_storage") {
+    using Set = dense_set<uint64_t, dense_hash<uint64_t>, std::equal_to<>,
+                          std::pmr::polymorphic_allocator<uint64_t>, force_inline_policy>;
+    for (size_t failed_buffer : {size_t{1}, size_t{2}}) {
+        {
+            FailingInlineResource resource;
+            resource.fail_on = failed_buffer;
+            CHECK_THROWS_AS((Set{64, dense_hash<uint64_t>{}, std::equal_to<>{},
+                                std::pmr::polymorphic_allocator<uint64_t>{&resource}}), std::bad_alloc);
+            CHECK_EQ(resource.live_bytes, 0);
+        }
+        for (size_t count : {size_t{0}, size_t{23}}) {
+            FailingInlineResource resource;
+            {
+                Set set{std::pmr::polymorphic_allocator<uint64_t>{&resource}};
+                for (uint64_t value = 0; value < count; ++value) set.emplace(value);
+                const auto bytes = resource.live_bytes;
+                const auto capacity = set.capacity();
+                resource.fail_on = resource.calls + failed_buffer;
+                CHECK_THROWS_AS(set.reserve(128), std::bad_alloc);
+                CHECK_EQ(set.size(), count);
+                CHECK_EQ(set.capacity(), capacity);
+                CHECK_EQ(resource.live_bytes, bytes);
+                for (uint64_t value = 0; value < count; ++value) CHECK(set.contains(value));
+                resource.fail_on = 0;
+                set.reserve(128);
+                set.emplace(999);
+                CHECK_EQ(set.size(), count + 1);
+                for (uint64_t value = 0; value < count; ++value) CHECK(set.contains(value));
+            }
+            CHECK_EQ(resource.live_bytes, 0);
+        }
+    }
+}
 
 TEST_CASE("dense_map::prefetch_key") {
     static_assert(noexcept(std::declval<const dense_map<int, int, CountingIntHash>&>().prefetch_key(0)));

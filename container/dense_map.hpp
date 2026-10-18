@@ -1712,7 +1712,13 @@ private:
             ctrl_[cap + kGroupWidth] = detail::kSentinel;
 
             SlotAlloc slot_alloc(alloc_);
-            slots_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, cap);
+            try {
+                slots_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, cap);
+            } catch (...) {
+                std::allocator_traits<CtrlAlloc>::deallocate(ctrl_alloc, ctrl_, cap + kGroupWidth + 1);
+                ctrl_ = nullptr;
+                throw;
+            }
         } else if constexpr (kUseFlat) {
             // Flat storage (ankerl/Robin Hood style):
             // Allocate buckets array (fingerprint + value_idx per bucket)
@@ -2484,6 +2490,9 @@ private:
             int8_t* old_ctrl = ctrl_;
             value_type* old_slots = slots_;
             size_t old_capacity = capacity_;
+            size_t old_size = size_;
+            size_t old_growth_left = growth_left_;
+            uint8_t old_shift = shift_;
 
             ctrl_ = nullptr;
             slots_ = nullptr;
@@ -2491,7 +2500,19 @@ private:
             size_ = 0;
             growth_left_ = 0;
 
-            initialize(new_capacity);
+            // Allocate both new buffers before retiring any old storage. A failed allocation
+            // must leave the existing table usable and owned, including on an empty table.
+            try {
+                initialize(new_capacity);
+            } catch (...) {
+                ctrl_ = old_ctrl;
+                slots_ = old_slots;
+                capacity_ = old_capacity;
+                size_ = old_size;
+                growth_left_ = old_growth_left;
+                shift_ = old_shift;
+                throw;
+            }
 
             for (size_t i = 0; i < old_capacity; ++i) {
                 if (detail::is_full(old_ctrl[i])) {
