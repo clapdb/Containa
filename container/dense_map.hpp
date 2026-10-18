@@ -1699,21 +1699,30 @@ private:
 
     void initialize(size_t cap) {
         cap = normalize_capacity(cap);
+        if constexpr (kUseInline) {
+            // Publish the new storage only after both allocations succeed. This also leaves
+            // a default-constructed table usable after its first insertion fails.
+            CtrlAlloc ctrl_alloc(alloc_);
+            auto* new_ctrl = std::allocator_traits<CtrlAlloc>::allocate(
+                ctrl_alloc, cap + kGroupWidth + 1);
+            SlotAlloc slot_alloc(alloc_);
+            value_type* new_slots;
+            try {
+                new_slots = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, cap);
+            } catch (...) {
+                std::allocator_traits<CtrlAlloc>::deallocate(ctrl_alloc, new_ctrl, cap + kGroupWidth + 1);
+                throw;
+            }
+            std::memset(new_ctrl, static_cast<int>(detail::kEmpty), cap + kGroupWidth);
+            new_ctrl[cap + kGroupWidth] = detail::kSentinel;
+            ctrl_ = new_ctrl;
+            slots_ = new_slots;
+        }
         capacity_ = cap;
         // For flat storage: shift_ = 64 - log2(capacity), so hash >> shift_ gives bucket index
         shift_ = static_cast<uint8_t>(64 - std::countr_zero(cap));
 
-        if constexpr (kUseInline) {
-            // Inline storage: allocate control bytes + sentinel group + slots
-            CtrlAlloc ctrl_alloc(alloc_);
-            ctrl_ = std::allocator_traits<CtrlAlloc>::allocate(
-                ctrl_alloc, cap + kGroupWidth + 1);
-            std::memset(ctrl_, static_cast<int>(detail::kEmpty), cap + kGroupWidth);
-            ctrl_[cap + kGroupWidth] = detail::kSentinel;
-
-            SlotAlloc slot_alloc(alloc_);
-            slots_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, cap);
-        } else if constexpr (kUseFlat) {
+        if constexpr (kUseFlat) {
             // Flat storage (ankerl/Robin Hood style):
             // Allocate buckets array (fingerprint + value_idx per bucket)
             BucketAlloc bucket_alloc(alloc_);
@@ -1728,7 +1737,7 @@ private:
                 SlotAlloc slot_alloc(alloc_);
                 values_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, values_capacity_);
             }
-        } else {
+        } else if constexpr (!kUseInline) {
             // Indirect storage (Swiss Table + Contiguous Values):
             // Allocate control bytes + sentinel group
             CtrlAlloc ctrl_alloc(alloc_);
@@ -2484,6 +2493,9 @@ private:
             int8_t* old_ctrl = ctrl_;
             value_type* old_slots = slots_;
             size_t old_capacity = capacity_;
+            size_t old_size = size_;
+            size_t old_growth_left = growth_left_;
+            uint8_t old_shift = shift_;
 
             ctrl_ = nullptr;
             slots_ = nullptr;
@@ -2491,7 +2503,19 @@ private:
             size_ = 0;
             growth_left_ = 0;
 
-            initialize(new_capacity);
+            // Allocate both new buffers before retiring any old storage. A failed allocation
+            // must leave the existing table usable and owned, including on an empty table.
+            try {
+                initialize(new_capacity);
+            } catch (...) {
+                ctrl_ = old_ctrl;
+                slots_ = old_slots;
+                capacity_ = old_capacity;
+                size_ = old_size;
+                growth_left_ = old_growth_left;
+                shift_ = old_shift;
+                throw;
+            }
 
             for (size_t i = 0; i < old_capacity; ++i) {
                 if (detail::is_full(old_ctrl[i])) {
