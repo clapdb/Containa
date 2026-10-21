@@ -42,6 +42,32 @@ struct CountingIntHash {
     }
 };
 
+struct ConstructionTrackedString {
+    inline static size_t constructions = 0;
+    std::string value;
+
+    explicit ConstructionTrackedString(std::string_view bytes) : value(bytes) { ++constructions; }
+};
+
+struct TrackedStringHash {
+    size_t* calls;
+    bool collide;
+
+    auto operator()(const ConstructionTrackedString& key) const -> size_t {
+        ++*calls;
+        return collide ? 0 : dense_hash<std::string_view>{}(key.value);
+    }
+};
+
+struct TrackedStringEqual {
+    auto operator()(std::string_view lhs, const ConstructionTrackedString& rhs) const -> bool {
+        return lhs == rhs.value;
+    }
+    auto operator()(const ConstructionTrackedString& lhs, const ConstructionTrackedString& rhs) const -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
 struct ThrowingIntHash
 {
     auto operator()(int value) const -> size_t { return dense_hash<int>{}(value); }
@@ -413,6 +439,45 @@ TEST_CASE("dense_map::emplace") {
         check_policy.template operator()<force_inline_policy>();
         check_policy.template operator()<force_flat_policy>();
         check_policy.template operator()<force_indirect_policy>();
+    }
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_keys_construct_only_on_insert") {
+    auto check_policy = []<typename Policy>(bool collide) {
+        using Value = std::pair<ConstructionTrackedString, int>;
+        size_t hash_calls = 0;
+        ConstructionTrackedString::constructions = 0;
+        dense_map<ConstructionTrackedString, int, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<Value>, Policy> map(512, TrackedStringHash{&hash_calls, collide});
+        std::vector<std::string> keys{"", "short", std::string("binary\0key", 10)};
+        for (int i = 3; i < 128; ++i) keys.push_back("borrowed-key-that-exceeds-sso-" + std::to_string(i));
+        const auto hash_of = [collide](std::string_view key) {
+            return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+        };
+        for (size_t i = 0; i < keys.size(); ++i) {
+            std::string buffer = keys[i];
+            auto [it, inserted] = map.try_emplace_prehashed(hash_of(buffer), std::string_view{buffer}, int(i));
+            REQUIRE(inserted);
+            CHECK_EQ(it->first.value, keys[i]);
+            buffer.assign(buffer.size(), 'x');
+            CHECK_EQ(it->first.value, keys[i]);
+        }
+        CHECK_EQ(ConstructionTrackedString::constructions, keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            const std::string_view lookup{keys[i]};
+            auto [it, inserted] = map.try_emplace_prehashed(hash_of(lookup), lookup, -1);
+            CHECK_FALSE(inserted);
+            CHECK_EQ(it->second, int(i));
+        }
+        CHECK_EQ(ConstructionTrackedString::constructions, keys.size());
+        CHECK_EQ(hash_calls, 0);
+        CHECK_EQ(map.size(), keys.size());
+        for (const auto& [key, value] : map) CHECK_EQ(key.value, keys[size_t(value)]);
+    };
+    for (bool collide : {false, true}) {
+        check_policy.template operator()<force_inline_policy>(collide);
+        check_policy.template operator()<force_flat_policy>(collide);
+        check_policy.template operator()<force_indirect_policy>(collide);
     }
 }
 
