@@ -1368,9 +1368,12 @@ public:
                 auto existing = find_prehashed_impl(hash, key);
                 if (existing != end()) return {existing, false};
             }
-            // The borrowed key can refer to our own key storage, invalidated by either kind of growth.
-            Key owned(std::forward<K>(key));
-            return try_emplace_prehashed_impl(hash, std::move_if_noexcept(owned), std::forward<Args>(args)...);
+            // Both the key and mapped constructor arguments can refer to storage invalidated by growth.
+            auto owned = std::make_obj_using_allocator<value_type>(alloc_, std::piecewise_construct,
+                                                                   std::forward_as_tuple(std::forward<K>(key)),
+                                                                   std::forward_as_tuple(std::forward<Args>(args)...));
+            return try_emplace_prehashed_impl(hash, std::move_if_noexcept(owned.first),
+                                              std::move_if_noexcept(owned.second));
         }
         return try_emplace_prehashed_impl(hash, std::forward<K>(key), std::forward<Args>(args)...);
     }
