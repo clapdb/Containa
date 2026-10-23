@@ -68,6 +68,51 @@ struct TrackedStringEqual {
     }
 };
 
+struct ThrowingBorrowedKeyView
+{
+    int value;
+    bool fail;
+};
+
+struct ThrowingOwnedKey
+{
+    inline static int live = 0;
+    int value;
+
+    explicit ThrowingOwnedKey(ThrowingBorrowedKeyView key) : value(key.value) {
+        if (key.fail) throw std::bad_alloc{};
+        ++live;
+    }
+    ThrowingOwnedKey(const ThrowingOwnedKey& key) : value(key.value) { ++live; }
+    ThrowingOwnedKey(ThrowingOwnedKey&& key) noexcept : value(key.value) { ++live; }
+    auto operator=(const ThrowingOwnedKey&) -> ThrowingOwnedKey& = default;
+    auto operator=(ThrowingOwnedKey&&) noexcept -> ThrowingOwnedKey& = default;
+    ~ThrowingOwnedKey() { --live; }
+};
+
+struct ThrowingOwnedKeyHash
+{
+    auto operator()(const ThrowingOwnedKey&) const noexcept -> size_t { return 0; }
+};
+
+struct ThrowingOwnedKeyEqual
+{
+    auto operator()(ThrowingBorrowedKeyView lhs, const ThrowingOwnedKey& rhs) const noexcept -> bool {
+        return lhs.value == rhs.value;
+    }
+    auto operator()(const ThrowingOwnedKey& lhs, const ThrowingOwnedKey& rhs) const noexcept -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
+struct ThrowingMappedValue
+{
+    int value;
+    explicit ThrowingMappedValue(int input, bool fail) : value(input) {
+        if (fail) throw std::runtime_error("mapped construction failed");
+    }
+};
+
 struct ThrowingIntHash
 {
     auto operator()(int value) const -> size_t { return dense_hash<int>{}(value); }
@@ -479,6 +524,65 @@ TEST_CASE("dense_map::prehashed_borrowed_keys_construct_only_on_insert") {
         check_policy.template operator()<force_flat_policy>(collide);
         check_policy.template operator()<force_indirect_policy>(collide);
     }
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_key_construction_failure_preserves_slots") {
+    auto check_policy = []<typename Policy>() {
+        using Value = std::pair<ThrowingOwnedKey, ThrowingMappedValue>;
+        using Map = dense_map<ThrowingOwnedKey, ThrowingMappedValue, ThrowingOwnedKeyHash, ThrowingOwnedKeyEqual,
+                              std::allocator<Value>, Policy>;
+        for (int existing : {0, 3}) {
+            for (bool fail_key : {false, true}) {
+                CHECK_EQ(ThrowingOwnedKey::live, 0);
+                {
+                    Map map(128);
+                    for (int key = 1; key <= existing; ++key) {
+                        REQUIRE(
+                          map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{key, false}, key * 10, false).second);
+                    }
+                    if (existing != 0) {
+                        auto erased = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{2, false}, 0, false).first;
+                        map.erase(erased);
+                    }
+                    const auto expected = map.size();
+                    if (fail_key) {
+                        CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, true}, 90, false)),
+                                        std::bad_alloc);
+                    } else {
+                        CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 90, true)),
+                                        std::runtime_error);
+                    }
+                    CHECK_EQ(map.size(), expected);
+                    REQUIRE_EQ(std::distance(map.begin(), map.end()), expected);
+                    CHECK_EQ(ThrowingOwnedKey::live, expected);
+                    if (existing != 0) {
+                        const auto duplicate = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{1, true}, 0, true);
+                        CHECK_FALSE(duplicate.second);
+                        CHECK_EQ(duplicate.first->second.value, 10);
+                    }
+                    auto inserted = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 90, false);
+                    REQUIRE(inserted.second);
+                    CHECK_EQ(inserted.first->second.value, 90);
+                    map.erase(inserted.first);
+                    REQUIRE(map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 91, false).second);
+                    for (int key = 10; key < 180; ++key) {
+                        REQUIRE(
+                          map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{key, false}, key * 10, false).second);
+                    }
+                    CHECK_EQ(map.size(), expected + 171);
+                    CHECK_EQ(std::distance(map.begin(), map.end()), map.size());
+                    CHECK_EQ(ThrowingOwnedKey::live, map.size());
+                    for (const auto& [key, value] : map) {
+                        CHECK_EQ(value.value, key.value == 9 ? 91 : key.value * 10);
+                    }
+                }
+                CHECK_EQ(ThrowingOwnedKey::live, 0);
+            }
+        }
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
 }
 
 TEST_CASE("dense_map::erase") {

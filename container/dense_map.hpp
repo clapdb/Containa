@@ -2187,15 +2187,16 @@ private:
 
             const bool was_deleted = detail::is_deleted(ctrl_[idx]);
             const int8_t h2_val = detail::h2(hash);
-            ctrl_[idx] = h2_val;
-            if (idx < kGroupWidth) {
-                ctrl_[capacity_ + idx] = h2_val;
-            }
-
             AllocTraits::construct(alloc_, slots_ + idx,
                                    std::piecewise_construct,
                                    std::forward_as_tuple(std::forward<K>(key)),
                                    std::forward_as_tuple(std::forward<Args>(args)...));
+
+            // Publish only a fully constructed value, preserving empty/deleted slots on exceptions.
+            ctrl_[idx] = h2_val;
+            if (idx < kGroupWidth) {
+                ctrl_[capacity_ + idx] = h2_val;
+            }
 
             ++size_;
             growth_left_ -= !was_deleted;
