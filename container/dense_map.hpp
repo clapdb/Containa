@@ -1359,6 +1359,19 @@ public:
                   std::is_constructible_v<Key, K&&> &&
                   std::is_invocable_r_v<bool, const KeyEqual&, const std::remove_reference_t<K>&, const Key&>)
     std::pair<iterator, bool> try_emplace_prehashed(size_t hash, K&& key, Args&&... args) {
+        bool relocates_keys = growth_left_ == 0;
+        if constexpr (!kUseInline) {
+            relocates_keys = relocates_keys || size_ == values_capacity_;
+        }
+        if (DENSE_MAP_UNLIKELY(relocates_keys)) {
+            if (size_ != 0) {
+                auto existing = find_prehashed_impl(hash, key);
+                if (existing != end()) return {existing, false};
+            }
+            // The borrowed key can refer to our own key storage, invalidated by either kind of growth.
+            Key owned(std::forward<K>(key));
+            return try_emplace_prehashed_impl(hash, std::move_if_noexcept(owned), std::forward<Args>(args)...);
+        }
         return try_emplace_prehashed_impl(hash, std::forward<K>(key), std::forward<Args>(args)...);
     }
 
@@ -1913,9 +1926,13 @@ private:
 
     template <typename K>
     DENSE_MAP_ALWAYS_INLINE iterator find_impl(const K& key) {
+        return find_prehashed_impl(hash_(key), key);
+    }
+
+    template <typename K>
+    DENSE_MAP_ALWAYS_INLINE iterator find_prehashed_impl(size_t hash, const K& key) {
         if constexpr (kUseInline) {
             // Swiss Table: SIMD probing
-            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
             const size_t mask = capacity_ - 1;
 
@@ -1936,7 +1953,6 @@ private:
         } else if constexpr (kUseFlat) {
             // Flat storage: Robin Hood linear probing (ankerl-style optimized)
             // Use HIGH bits for bucket index, LOW 8 bits for fingerprint (independent bits!)
-            const size_t hash = hash_(key);
             const size_t mask = capacity_ - 1;
             size_t bucket_idx = hash >> shift_;  // HIGH bits for bucket index
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
@@ -1972,7 +1988,6 @@ private:
             return end();
         } else {
             // Swiss Table + Indirect: SIMD probing with value_indices lookup
-            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
             const size_t mask = capacity_ - 1;
 
