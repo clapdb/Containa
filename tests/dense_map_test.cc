@@ -33,12 +33,113 @@ namespace stdb::container {
 
 namespace {
 
+struct PmrStringCollisionHash
+{
+    auto operator()(const std::pmr::string&) const noexcept -> size_t { return 0; }
+};
+
 struct CountingIntHash {
     size_t* calls{nullptr};
 
     auto operator()(int value) const noexcept -> size_t {
         ++*calls;
         return dense_hash<int>{}(value);
+    }
+};
+
+struct ConstructionTrackedString {
+    inline static size_t constructions = 0;
+    std::string value;
+
+    explicit ConstructionTrackedString(std::string_view bytes) : value(bytes) { ++constructions; }
+};
+
+struct ImplicitTrackedString : ConstructionTrackedString
+{
+    ImplicitTrackedString(std::string_view bytes) : ConstructionTrackedString(bytes) {}
+    friend auto operator==(const ImplicitTrackedString& lhs, const ImplicitTrackedString& rhs) -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
+template <typename Map, typename K>
+concept HasBorrowedPrehashedOverload = requires {
+    static_cast<std::pair<typename Map::iterator, bool> (Map::*)(size_t, K&&, int&&)>(
+      &Map::template try_emplace_prehashed<K, int>);
+};
+
+struct CopyOnlyTrackedString : ConstructionTrackedString
+{
+    using ConstructionTrackedString::ConstructionTrackedString;
+    CopyOnlyTrackedString(const CopyOnlyTrackedString&) = default;
+    CopyOnlyTrackedString(CopyOnlyTrackedString&&) = delete;
+};
+
+struct TrackedStringHash {
+    size_t* calls;
+    bool collide;
+
+    auto operator()(const ConstructionTrackedString& key) const -> size_t {
+        ++*calls;
+        return collide ? 0 : dense_hash<std::string_view>{}(key.value);
+    }
+};
+
+struct TrackedStringEqual {
+    using is_transparent = void;
+
+    auto operator()(std::string_view lhs, const ConstructionTrackedString& rhs) const -> bool {
+        return lhs == rhs.value;
+    }
+    auto operator()(const ConstructionTrackedString& lhs, const ConstructionTrackedString& rhs) const -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
+struct ThrowingBorrowedKeyView
+{
+    int value;
+    bool fail;
+};
+
+struct ThrowingOwnedKey
+{
+    inline static int live = 0;
+    int value;
+
+    explicit ThrowingOwnedKey(ThrowingBorrowedKeyView key) : value(key.value) {
+        if (key.fail) throw std::bad_alloc{};
+        ++live;
+    }
+    ThrowingOwnedKey(const ThrowingOwnedKey& key) : value(key.value) { ++live; }
+    ThrowingOwnedKey(ThrowingOwnedKey&& key) noexcept : value(key.value) { ++live; }
+    auto operator=(const ThrowingOwnedKey&) -> ThrowingOwnedKey& = default;
+    auto operator=(ThrowingOwnedKey&&) noexcept -> ThrowingOwnedKey& = default;
+    ~ThrowingOwnedKey() { --live; }
+};
+
+struct ThrowingOwnedKeyHash
+{
+    auto operator()(const ThrowingOwnedKey&) const noexcept -> size_t { return 0; }
+};
+
+struct ThrowingOwnedKeyEqual
+{
+    using is_transparent = void;
+
+    auto operator()(ThrowingBorrowedKeyView lhs, const ThrowingOwnedKey& rhs) const noexcept -> bool {
+        return lhs.value == rhs.value;
+    }
+    auto operator()(const ThrowingOwnedKey& lhs, const ThrowingOwnedKey& rhs) const noexcept -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
+struct ThrowingMappedValue
+{
+    int value;
+    explicit ThrowingMappedValue(int input, bool fail) : value(input) {
+        if (fail) throw std::runtime_error("mapped construction failed");
     }
 };
 
@@ -414,6 +515,373 @@ TEST_CASE("dense_map::emplace") {
         check_policy.template operator()<force_flat_policy>();
         check_policy.template operator()<force_indirect_policy>();
     }
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_keys_construct_only_on_insert") {
+    auto check_policy = []<typename Policy>(bool collide) {
+        using Value = std::pair<ConstructionTrackedString, int>;
+        size_t hash_calls = 0;
+        ConstructionTrackedString::constructions = 0;
+        dense_map<ConstructionTrackedString, int, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<Value>, Policy> map(512, TrackedStringHash{&hash_calls, collide});
+        std::vector<std::string> keys{"", "short", std::string("binary\0key", 10)};
+        for (int i = 3; i < 128; ++i) keys.push_back("borrowed-key-that-exceeds-sso-" + std::to_string(i));
+        const auto hash_of = [collide](std::string_view key) {
+            return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+        };
+        for (size_t i = 0; i < keys.size(); ++i) {
+            std::string buffer = keys[i];
+            auto [it, inserted] = map.try_emplace_prehashed(hash_of(buffer), std::string_view{buffer}, int(i));
+            REQUIRE(inserted);
+            CHECK_EQ(it->first.value, keys[i]);
+            buffer.assign(buffer.size(), 'x');
+            CHECK_EQ(it->first.value, keys[i]);
+        }
+        CHECK_EQ(ConstructionTrackedString::constructions, keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            const std::string_view lookup{keys[i]};
+            auto [it, inserted] = map.try_emplace_prehashed(hash_of(lookup), lookup, -1);
+            CHECK_FALSE(inserted);
+            CHECK_EQ(it->second, int(i));
+        }
+        CHECK_EQ(ConstructionTrackedString::constructions, keys.size());
+        CHECK_EQ(hash_calls, 0);
+        CHECK_EQ(map.size(), keys.size());
+        for (const auto& [key, value] : map) CHECK_EQ(key.value, keys[size_t(value)]);
+    };
+    for (bool collide : {false, true}) {
+        check_policy.template operator()<force_inline_policy>(collide);
+        check_policy.template operator()<force_flat_policy>(collide);
+        check_policy.template operator()<force_indirect_policy>(collide);
+    }
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_keys_require_transparent_equality") {
+    using Key = ImplicitTrackedString;
+    using Value = std::pair<Key, int>;
+    using TypedMap =
+      dense_map<Key, int, TrackedStringHash, std::equal_to<Key>, std::allocator<Value>, force_inline_policy>;
+    using TransparentMap =
+      dense_map<Key, int, TrackedStringHash, TrackedStringEqual, std::allocator<Value>, force_inline_policy>;
+    using StandardMap = dense_map<std::string, int, dense_hash<std::string>, std::equal_to<>>;
+    CHECK_FALSE((HasBorrowedPrehashedOverload<TypedMap, std::string_view>));
+    CHECK_FALSE((HasBorrowedPrehashedOverload<TypedMap, const std::string_view&>));
+    CHECK((HasBorrowedPrehashedOverload<TransparentMap, std::string_view>));
+    CHECK((HasBorrowedPrehashedOverload<TransparentMap, const std::string_view&>));
+    CHECK((HasBorrowedPrehashedOverload<StandardMap, std::string_view>));
+    size_t hashes = 0;
+    ConstructionTrackedString::constructions = 0;
+    TypedMap typed(64, TrackedStringHash{&hashes, true});
+    TransparentMap transparent(64, TrackedStringHash{&hashes, true});
+    for (int index = 0; index < 4; ++index) {
+        Key key{"key" + std::to_string(index)};
+        REQUIRE(typed.try_emplace_prehashed(0, key, int(index)).second);
+        REQUIRE(transparent.try_emplace_prehashed(0, key, int(index)).second);
+    }
+    const std::string_view borrowed{"key3"};
+    const auto before_typed = ConstructionTrackedString::constructions;
+    const auto existing_typed = typed.try_emplace_prehashed(0, borrowed, -1);
+    CHECK_FALSE(existing_typed.second);
+    CHECK_EQ(existing_typed.first->second, 3);
+    // Only the legacy Key overload remains: its implicit argument conversion constructs exactly one Key.
+    CHECK_EQ(ConstructionTrackedString::constructions, before_typed + 1);
+    const auto before_transparent = ConstructionTrackedString::constructions;
+    const auto existing_transparent = transparent.try_emplace_prehashed(0, borrowed, -1);
+    CHECK_FALSE(existing_transparent.second);
+    CHECK_EQ(existing_transparent.first->second, 3);
+    CHECK_EQ(ConstructionTrackedString::constructions, before_transparent);
+    CHECK_EQ(hashes, 0);
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_keys_survive_storage_growth") {
+    auto check_policy = []<typename Policy, typename Key = ConstructionTrackedString>() {
+        using Value = std::pair<Key, int>;
+        using Map = dense_map<Key, int, TrackedStringHash, TrackedStringEqual, std::allocator<Value>, Policy>;
+        for (bool collide : {false, true}) {
+            for (bool bucket_growth : {true, false}) {
+                if constexpr (std::is_same_v<Policy, force_inline_policy>) {
+                    if (!bucket_growth) continue;
+                }
+                size_t hash_calls = 0;
+                ConstructionTrackedString::constructions = 0;
+                Map map(bucket_growth ? 16 : 64, TrackedStringHash{&hash_calls, collide});
+                const auto hash_of = [collide](std::string_view key) {
+                    return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+                };
+                // SSO keys alias the storage that relocates; a copy-only long key also loses its heap buffer.
+                const std::string first = std::is_same_v<Key, CopyOnlyTrackedString>
+                                            ? "key0-owned-buffer-that-exceeds-the-small-string-capacity"
+                                            : "key0-suffix";
+                const auto count = bucket_growth ? map.entry_capacity() : map.value_capacity();
+                for (size_t index = 0; index < count; ++index) {
+                    const auto key = index == 0 ? first : "k" + std::to_string(index);
+                    REQUIRE(map.try_emplace_prehashed(hash_of(key), std::string_view{key}, int(index)).second);
+                }
+                const auto position =
+                  std::find_if(map.begin(), map.end(), [&](const auto& entry) { return entry.first.value == first; });
+                REQUIRE(position != map.end());
+                const std::string_view borrowed = position->first.value;
+                const auto constructions = ConstructionTrackedString::constructions;
+                const auto hashes = hash_calls;
+                const auto capacity = map.capacity();
+                const auto values_capacity = map.value_capacity();
+                const auto duplicate = map.try_emplace_prehashed(hash_of(borrowed), borrowed, -1);
+                CHECK_FALSE(duplicate.second);
+                CHECK_EQ(duplicate.first->second, 0);
+                CHECK_EQ(ConstructionTrackedString::constructions, constructions);
+                CHECK_EQ(hash_calls, hashes);
+                CHECK_EQ(map.capacity(), capacity);
+                CHECK_EQ(map.value_capacity(), values_capacity);
+
+                const auto prefix = borrowed.substr(0, 4);
+                const auto inserted = map.try_emplace_prehashed(hash_of(prefix), prefix, 99);
+                REQUIRE(inserted.second);
+                CHECK_EQ(inserted.first->first.value, "key0");
+                CHECK_EQ(inserted.first->second, 99);
+                CHECK_EQ(map.size(), count + 1);
+                for (size_t index = 0; index < count; ++index) {
+                    const auto key = index == 0 ? first : "k" + std::to_string(index);
+                    const auto existing = map.try_emplace_prehashed(hash_of(key), std::string_view{key}, -1);
+                    CHECK_FALSE(existing.second);
+                    CHECK_EQ(existing.first->second, int(index));
+                }
+            }
+        }
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+    check_policy.template operator()<force_inline_policy, CopyOnlyTrackedString>();
+}
+
+TEST_CASE("dense_map::prehashed_growth_preserves_aliased_mapped_arguments") {
+    auto check_policy = []<typename Policy>() {
+        using Value = std::pair<ConstructionTrackedString, std::string>;
+        using Map = dense_map<ConstructionTrackedString, std::string, TrackedStringHash, TrackedStringEqual,
+                              std::allocator<Value>, Policy>;
+        for (bool collide : {false, true}) {
+            for (bool bucket_growth : {true, false}) {
+                if constexpr (std::is_same_v<Policy, force_inline_policy>) {
+                    if (!bucket_growth) continue;
+                }
+                for (bool slice : {false, true}) {
+                    size_t hash_calls = 0;
+                    Map map(bucket_growth ? 16 : 64, TrackedStringHash{&hash_calls, collide});
+                    const auto hash_of = [collide](std::string_view key) {
+                        return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+                    };
+                    const auto count = bucket_growth ? map.entry_capacity() : map.value_capacity();
+                    for (size_t index = 0; index < count; ++index) {
+                        const auto key = index == 0 ? std::string{"key0-suffix"} : "k" + std::to_string(index);
+                        REQUIRE(map
+                                  .try_emplace_prehashed(hash_of(key), std::string_view{key},
+                                                         "payload" + std::to_string(index))
+                                  .second);
+                    }
+                    const auto first = std::find_if(
+                      map.begin(), map.end(), [](const auto& entry) { return entry.first.value == "key0-suffix"; });
+                    REQUIRE(first != map.end());
+                    const std::string_view borrowed = first->first.value;
+                    CHECK_FALSE(
+                      map.try_emplace_prehashed(hash_of(borrowed), borrowed, std::move(first->second)).second);
+                    CHECK_EQ(first->second, "payload0");
+                    const auto prefix = borrowed.substr(0, 4);
+                    const auto inserted = [&] {
+                        if (slice) {
+                            return map.try_emplace_prehashed(hash_of(prefix), prefix, first->second.data() + 1,
+                                                             first->second.size() - 1);
+                        }
+                        return map.try_emplace_prehashed(hash_of(prefix), prefix, first->second);
+                    }();
+                    REQUIRE(inserted.second);
+                    CHECK_EQ(inserted.first->first.value, "key0");
+                    CHECK_EQ(inserted.first->second, slice ? "ayload0" : "payload0");
+                    CHECK_EQ(map.size(), count + 1);
+                    for (size_t index = 0; index < count; ++index) {
+                        const auto key = index == 0 ? std::string{"key0-suffix"} : "k" + std::to_string(index);
+                        const auto existing = map.try_emplace_prehashed(hash_of(key), std::string_view{key}, "unused");
+                        CHECK_FALSE(existing.second);
+                        CHECK_EQ(existing.first->second, "payload" + std::to_string(index));
+                    }
+                }
+            }
+        }
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
+TEST_CASE("dense_map::prehashed_growth_preserves_aliased_move_only_mapped_values") {
+    auto check_policy = []<typename Policy>() {
+        using Value = std::pair<ConstructionTrackedString, std::unique_ptr<int>>;
+        using Map = dense_map<ConstructionTrackedString, std::unique_ptr<int>, TrackedStringHash, TrackedStringEqual,
+                              std::allocator<Value>, Policy>;
+        for (bool bucket_growth : {true, false}) {
+            if constexpr (std::is_same_v<Policy, force_inline_policy>) {
+                if (!bucket_growth) continue;
+            }
+            size_t hash_calls = 0;
+            Map map(bucket_growth ? 16 : 64, TrackedStringHash{&hash_calls, true});
+            const auto count = bucket_growth ? map.entry_capacity() : map.value_capacity();
+            for (size_t index = 0; index < count; ++index) {
+                const auto key = index == 0 ? std::string{"key0-suffix"} : "k" + std::to_string(index);
+                REQUIRE(map.try_emplace_prehashed(0, std::string_view{key}, std::make_unique<int>(int(index))).second);
+            }
+            const auto first = std::find_if(map.begin(), map.end(),
+                                            [](const auto& entry) { return entry.first.value == "key0-suffix"; });
+            REQUIRE(first != map.end());
+            const std::string_view borrowed = first->first.value;
+            CHECK_FALSE(map.try_emplace_prehashed(0, borrowed, std::move(first->second)).second);
+            REQUIRE(first->second != nullptr);
+            CHECK_EQ(*first->second, 0);
+            const auto inserted = map.try_emplace_prehashed(0, borrowed.substr(0, 4), std::move(first->second));
+            REQUIRE(inserted.second);
+            REQUIRE(inserted.first->second != nullptr);
+            CHECK_EQ(*inserted.first->second, 0);
+            const auto original = map.try_emplace_prehashed(0, std::string_view{"key0-suffix"}, nullptr);
+            CHECK_FALSE(original.second);
+            CHECK(original.first->second == nullptr);
+            CHECK_EQ(map.size(), count + 1);
+        }
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
+TEST_CASE("dense_map::prehashed_growth_stages_values_with_map_allocator") {
+    auto check_policy = []<typename Policy>() {
+        using Value = std::pair<std::pmr::string, std::pmr::string>;
+        using Allocator = std::pmr::polymorphic_allocator<Value>;
+        using Map =
+          dense_map<std::pmr::string, std::pmr::string, PmrStringCollisionHash, std::equal_to<>, Allocator, Policy>;
+        FailingInlineResource resource;
+        {
+            Map map(16, PmrStringCollisionHash{}, std::equal_to<>{}, Allocator{&resource});
+            const std::string first_key = "key0-long-owned-key-exceeding-the-small-string-capacity";
+            const std::string payload(64, 'v');
+            const auto count = map.entry_capacity();
+            for (size_t index = 0; index < count; ++index) {
+                const auto key = index == 0 ? first_key : "k" + std::to_string(index);
+                REQUIRE(map.try_emplace_prehashed(0, std::string_view{key}, std::string_view{payload}).second);
+            }
+            const auto first = std::find_if(map.begin(), map.end(), [&](const auto& entry) {
+                return std::string_view{entry.first} == std::string_view{first_key};
+            });
+            REQUIRE(first != map.end());
+            const std::string_view borrowed = first->first;
+            const auto calls = resource.calls;
+            CHECK_FALSE(map.try_emplace_prehashed(0, borrowed, std::move(first->second)).second);
+            CHECK_EQ(resource.calls, calls);
+            CHECK_EQ(std::string_view{first->second}, std::string_view{payload});
+            const auto prefix = borrowed.substr(0, borrowed.size() - 1);
+            const auto capacity = map.capacity();
+            const auto live = resource.live_bytes;
+            for (size_t failed_allocation : {size_t{1}, size_t{2}}) {
+                resource.fail_on = resource.calls + failed_allocation;
+                CHECK_THROWS_AS((map.try_emplace_prehashed(0, prefix, first->second)), std::bad_alloc);
+                CHECK_EQ(map.size(), count);
+                CHECK_EQ(map.capacity(), capacity);
+                CHECK_EQ(resource.live_bytes, live);
+                CHECK_EQ(std::string_view{first->second}, std::string_view{payload});
+            }
+            resource.fail_on = 0;
+            const auto inserted = map.try_emplace_prehashed(0, prefix, first->second);
+            REQUIRE(inserted.second);
+            CHECK_EQ(std::string_view{inserted.first->first},
+                     std::string_view{first_key}.substr(0, first_key.size() - 1));
+            CHECK_EQ(std::string_view{inserted.first->second}, std::string_view{payload});
+            CHECK_EQ(inserted.first->first.get_allocator().resource(), &resource);
+            CHECK_EQ(inserted.first->second.get_allocator().resource(), &resource);
+            CHECK_EQ(map.size(), count + 1);
+        }
+        CHECK_EQ(resource.live_bytes, 0);
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_key_construction_failure_preserves_slots") {
+    auto check_policy = []<typename Policy>() {
+        using Value = std::pair<ThrowingOwnedKey, ThrowingMappedValue>;
+        using Map = dense_map<ThrowingOwnedKey, ThrowingMappedValue, ThrowingOwnedKeyHash, ThrowingOwnedKeyEqual,
+                              std::allocator<Value>, Policy>;
+        for (bool allocated : {false, true}) {
+            {
+                Map map(allocated ? 16 : 0);
+                const auto count = allocated ? map.entry_capacity() : 0;
+                for (size_t index = 0; index < count; ++index) {
+                    REQUIRE(map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{int(index), false}, 0, false).second);
+                }
+                const auto capacity = map.capacity();
+                CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{999, false}, 0, true)),
+                                std::runtime_error);
+                CHECK_EQ(map.capacity(), capacity);
+                CHECK_EQ(map.size(), count);
+                CHECK_EQ(ThrowingOwnedKey::live, count);
+                CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{999, true}, 0, false)),
+                                std::bad_alloc);
+                CHECK_EQ(map.capacity(), capacity);
+                CHECK_EQ(map.size(), count);
+                CHECK_EQ(std::distance(map.begin(), map.end()), count);
+                CHECK_EQ(ThrowingOwnedKey::live, count);
+            }
+            CHECK_EQ(ThrowingOwnedKey::live, 0);
+        }
+        for (int existing : {0, 3}) {
+            for (bool fail_key : {false, true}) {
+                CHECK_EQ(ThrowingOwnedKey::live, 0);
+                {
+                    Map map(128);
+                    for (int key = 1; key <= existing; ++key) {
+                        REQUIRE(
+                          map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{key, false}, key * 10, false).second);
+                    }
+                    if (existing != 0) {
+                        auto erased = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{2, false}, 0, false).first;
+                        map.erase(erased);
+                    }
+                    const auto expected = map.size();
+                    if (fail_key) {
+                        CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, true}, 90, false)),
+                                        std::bad_alloc);
+                    } else {
+                        CHECK_THROWS_AS((map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 90, true)),
+                                        std::runtime_error);
+                    }
+                    CHECK_EQ(map.size(), expected);
+                    REQUIRE_EQ(std::distance(map.begin(), map.end()), expected);
+                    CHECK_EQ(ThrowingOwnedKey::live, expected);
+                    if (existing != 0) {
+                        const auto duplicate = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{1, true}, 0, true);
+                        CHECK_FALSE(duplicate.second);
+                        CHECK_EQ(duplicate.first->second.value, 10);
+                    }
+                    auto inserted = map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 90, false);
+                    REQUIRE(inserted.second);
+                    CHECK_EQ(inserted.first->second.value, 90);
+                    map.erase(inserted.first);
+                    REQUIRE(map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{9, false}, 91, false).second);
+                    for (int key = 10; key < 180; ++key) {
+                        REQUIRE(
+                          map.try_emplace_prehashed(0, ThrowingBorrowedKeyView{key, false}, key * 10, false).second);
+                    }
+                    CHECK_EQ(map.size(), expected + 171);
+                    CHECK_EQ(std::distance(map.begin(), map.end()), map.size());
+                    CHECK_EQ(ThrowingOwnedKey::live, map.size());
+                    for (const auto& [key, value] : map) {
+                        CHECK_EQ(value.value, key.value == 9 ? 91 : key.value * 10);
+                    }
+                }
+                CHECK_EQ(ThrowingOwnedKey::live, 0);
+            }
+        }
+    };
+    check_policy.template operator()<force_inline_policy>();
+    check_policy.template operator()<force_flat_policy>();
+    check_policy.template operator()<force_indirect_policy>();
 }
 
 TEST_CASE("dense_map::erase") {
