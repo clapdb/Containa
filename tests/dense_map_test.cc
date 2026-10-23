@@ -49,6 +49,20 @@ struct ConstructionTrackedString {
     explicit ConstructionTrackedString(std::string_view bytes) : value(bytes) { ++constructions; }
 };
 
+struct ImplicitTrackedString : ConstructionTrackedString
+{
+    ImplicitTrackedString(std::string_view bytes) : ConstructionTrackedString(bytes) {}
+    friend auto operator==(const ImplicitTrackedString& lhs, const ImplicitTrackedString& rhs) -> bool {
+        return lhs.value == rhs.value;
+    }
+};
+
+template <typename Map, typename K>
+concept HasBorrowedPrehashedOverload = requires {
+    static_cast<std::pair<typename Map::iterator, bool> (Map::*)(size_t, K&&, int&&)>(
+      &Map::template try_emplace_prehashed<K, int>);
+};
+
 struct CopyOnlyTrackedString : ConstructionTrackedString
 {
     using ConstructionTrackedString::ConstructionTrackedString;
@@ -67,6 +81,8 @@ struct TrackedStringHash {
 };
 
 struct TrackedStringEqual {
+    using is_transparent = void;
+
     auto operator()(std::string_view lhs, const ConstructionTrackedString& rhs) const -> bool {
         return lhs == rhs.value;
     }
@@ -104,6 +120,8 @@ struct ThrowingOwnedKeyHash
 
 struct ThrowingOwnedKeyEqual
 {
+    using is_transparent = void;
+
     auto operator()(ThrowingBorrowedKeyView lhs, const ThrowingOwnedKey& rhs) const noexcept -> bool {
         return lhs.value == rhs.value;
     }
@@ -531,6 +549,43 @@ TEST_CASE("dense_map::prehashed_borrowed_keys_construct_only_on_insert") {
         check_policy.template operator()<force_flat_policy>(collide);
         check_policy.template operator()<force_indirect_policy>(collide);
     }
+}
+
+TEST_CASE("dense_map::prehashed_borrowed_keys_require_transparent_equality") {
+    using Key = ImplicitTrackedString;
+    using Value = std::pair<Key, int>;
+    using TypedMap =
+      dense_map<Key, int, TrackedStringHash, std::equal_to<Key>, std::allocator<Value>, force_inline_policy>;
+    using TransparentMap =
+      dense_map<Key, int, TrackedStringHash, TrackedStringEqual, std::allocator<Value>, force_inline_policy>;
+    using StandardMap = dense_map<std::string, int, dense_hash<std::string>, std::equal_to<>>;
+    CHECK_FALSE((HasBorrowedPrehashedOverload<TypedMap, std::string_view>));
+    CHECK_FALSE((HasBorrowedPrehashedOverload<TypedMap, const std::string_view&>));
+    CHECK((HasBorrowedPrehashedOverload<TransparentMap, std::string_view>));
+    CHECK((HasBorrowedPrehashedOverload<TransparentMap, const std::string_view&>));
+    CHECK((HasBorrowedPrehashedOverload<StandardMap, std::string_view>));
+    size_t hashes = 0;
+    ConstructionTrackedString::constructions = 0;
+    TypedMap typed(64, TrackedStringHash{&hashes, true});
+    TransparentMap transparent(64, TrackedStringHash{&hashes, true});
+    for (int index = 0; index < 4; ++index) {
+        Key key{"key" + std::to_string(index)};
+        REQUIRE(typed.try_emplace_prehashed(0, key, int(index)).second);
+        REQUIRE(transparent.try_emplace_prehashed(0, key, int(index)).second);
+    }
+    const std::string_view borrowed{"key3"};
+    const auto before_typed = ConstructionTrackedString::constructions;
+    const auto existing_typed = typed.try_emplace_prehashed(0, borrowed, -1);
+    CHECK_FALSE(existing_typed.second);
+    CHECK_EQ(existing_typed.first->second, 3);
+    // Only the legacy Key overload remains: its implicit argument conversion constructs exactly one Key.
+    CHECK_EQ(ConstructionTrackedString::constructions, before_typed + 1);
+    const auto before_transparent = ConstructionTrackedString::constructions;
+    const auto existing_transparent = transparent.try_emplace_prehashed(0, borrowed, -1);
+    CHECK_FALSE(existing_transparent.second);
+    CHECK_EQ(existing_transparent.first->second, 3);
+    CHECK_EQ(ConstructionTrackedString::constructions, before_transparent);
+    CHECK_EQ(hashes, 0);
 }
 
 TEST_CASE("dense_map::prehashed_borrowed_keys_survive_storage_growth") {

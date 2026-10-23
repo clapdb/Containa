@@ -1353,11 +1353,11 @@ public:
         return try_emplace_prehashed_impl(hash, std::move(key), std::forward<Args>(args)...);
     }
 
-    /// Compares a borrowed lookup key before constructing the owned Key on insertion.
+    /// Compares a borrowed key with a transparent predicate before constructing the owned Key on insertion.
     template <typename K, typename... Args>
-        requires (!std::is_void_v<T> && !std::is_same_v<std::remove_cvref_t<K>, Key> &&
-                  std::is_constructible_v<Key, K&&> &&
-                  std::is_invocable_r_v<bool, const KeyEqual&, const std::remove_reference_t<K>&, const Key&>)
+    requires(requires { typename KeyEqual::is_transparent; } && !std::is_void_v<T> &&
+             !std::is_same_v<std::remove_cvref_t<K>, Key> && std::is_constructible_v<Key, K &&> &&
+             std::is_invocable_r_v<bool, const KeyEqual&, const std::remove_reference_t<K>&, const Key&>)
     std::pair<iterator, bool> try_emplace_prehashed(size_t hash, K&& key, Args&&... args) {
         bool relocates_keys = growth_left_ == 0;
         if constexpr (!kUseInline) {
