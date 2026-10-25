@@ -3107,4 +3107,85 @@ TEST_CASE("dense_map::regression::erase_swap_and_pop") {
     }
 }
 
+TEST_CASE("dense_set::lazy_prehashed_constructs_only_missing_owned_keys") {
+    auto check = []<typename Policy>(bool collide) {
+        size_t hashes = 0;
+        size_t factories = 0;
+        dense_set<ConstructionTrackedString, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<ConstructionTrackedString>, Policy> set(16, TrackedStringHash{&hashes, collide});
+        const auto hash_of = [collide](std::string_view key) {
+            return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+        };
+        for (size_t row = 0; row < 128; ++row) {
+            std::string text = row == 0 ? std::string("binary\0key", 10)
+                                       : "long-owned-set-key-" + std::to_string(row);
+            const auto hash = hash_of(text);
+            const auto inserted = set.lazy_emplace_prehashed(hash, std::string_view{text}, [&] {
+                ++factories;
+                return ConstructionTrackedString{text};
+            });
+            REQUIRE(inserted.second);
+            CHECK_EQ(inserted.first->value, text);
+            const auto before_hashes = hashes;
+            const auto duplicate = set.lazy_emplace_prehashed(hash, std::string_view{text}, [&]() -> ConstructionTrackedString {
+                ++factories;
+                throw std::runtime_error("duplicate must not invoke factory");
+            });
+            CHECK_FALSE(duplicate.second);
+            CHECK_EQ(hashes, before_hashes);
+            text.assign(text.size(), 'x');
+        }
+        CHECK_EQ(factories, 128);
+        CHECK_GT(hashes, 0);
+        CHECK_EQ(set.size(), 128);
+    };
+    for (bool collide : {false, true}) {
+        check.template operator()<force_inline_policy>(collide);
+        check.template operator()<force_flat_policy>(collide);
+        check.template operator()<force_indirect_policy>(collide);
+    }
+}
+
+TEST_CASE("dense_set::lazy_prehashed_preserves_borrowed_growth_and_factory_failures") {
+    auto check = []<typename Policy>() {
+        size_t hashes = 0;
+        dense_set<ConstructionTrackedString, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<ConstructionTrackedString>, Policy> set(16, TrackedStringHash{&hashes, true});
+        const auto count = set.entry_capacity();
+        for (size_t row = 0; row < count; ++row) {
+            auto text = row == 0 ? std::string{"key0-suffix"} : "key" + std::to_string(row);
+            REQUIRE(set.lazy_emplace_prehashed(0, std::string_view{text}, [&] {
+                return ConstructionTrackedString{text};
+            }).second);
+        }
+        auto first = std::find_if(set.begin(), set.end(), [](const auto& key) { return key.value == "key0-suffix"; });
+        REQUIRE(first != set.end());
+        const std::string_view borrowed{first->value};
+        const auto capacity = set.capacity();
+        size_t called = 0;
+        CHECK_FALSE(set.lazy_emplace_prehashed(0, borrowed, [&] {
+            ++called;
+            return ConstructionTrackedString{borrowed};
+        }).second);
+        CHECK_EQ(called, 0);
+        CHECK_EQ(set.capacity(), capacity);
+        const auto prefix = borrowed.substr(0, 4);
+        CHECK_THROWS_AS((set.lazy_emplace_prehashed(0, prefix, []() -> ConstructionTrackedString {
+            throw std::bad_alloc{};
+        })), std::bad_alloc);
+        CHECK_EQ(set.size(), count);
+        CHECK_EQ(first->value, "key0-suffix");
+        const auto inserted = set.lazy_emplace_prehashed(0, prefix, [&] {
+            return ConstructionTrackedString{prefix};
+        });
+        REQUIRE(inserted.second);
+        CHECK_EQ(inserted.first->value, "key0");
+        CHECK_EQ(set.size(), count + 1);
+        CHECK_GT(hashes, 0);
+    };
+    check.template operator()<force_inline_policy>();
+    check.template operator()<force_flat_policy>();
+    check.template operator()<force_indirect_policy>();
+}
+
 }  // namespace stdb::container
