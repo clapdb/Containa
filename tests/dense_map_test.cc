@@ -297,12 +297,14 @@ TEST_CASE("dense_map::prefetch_key") {
     }
 
     SUBCASE("throwing hash result conversion propagates for maps and sets") {
-        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>,
-                              std::allocator<std::pair<int, int>>, force_inline_policy>;
+        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>, std::allocator<std::pair<int, int>>,
+                              force_inline_policy>;
         using Set = dense_set<int, NoexceptProxyHash, std::equal_to<int>, std::allocator<int>, force_inline_policy>;
         Map map(64);
         Set set(64);
 
+        map.prefetch_prehashed(1);
+        set.prefetch_prehashed(1);
         CHECK_THROWS_AS(map.prefetch_key(1), std::runtime_error);
         CHECK_THROWS_AS(set.prefetch_key(1), std::runtime_error);
     }
@@ -377,6 +379,54 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK(set.contains(high_key));
         CHECK(set.contains(other_low_key));
         CHECK_EQ(set.size(), 3);
+    }
+
+    SUBCASE("prehashed prefetch composes with lazy insertion without rehashing") {
+        using Key = unsigned __int128;
+        using Set = dense_set<Key, CountingCollisionHash, std::equal_to<>, std::allocator<Key>, force_inline_policy>;
+
+        size_t hash_calls = 0;
+        Set set(64, CountingCollisionHash{&hash_calls});
+        const Key low_key = 7;
+        const Key high_key = (static_cast<Key>(1) << 64) | 7;
+        const Key duplicate_key = high_key;
+
+        const auto low_hash = set.hash_function()(low_key);
+        set.prefetch_prehashed(low_hash);
+        auto [low, low_inserted] = set.lazy_emplace_prehashed(low_hash, low_key, [low_key] { return low_key; });
+        CHECK(low_inserted);
+        CHECK(static_cast<bool>(*low == low_key));
+        CHECK_EQ(hash_calls, 1);
+
+        const auto high_hash = set.hash_function()(high_key);
+        set.prefetch_prehashed(high_hash);
+        auto [high, high_inserted] = set.lazy_emplace_prehashed(high_hash, high_key, [high_key] { return high_key; });
+        CHECK(high_inserted);
+        CHECK(static_cast<bool>(*high == high_key));
+        CHECK_EQ(hash_calls, 2);
+
+        size_t duplicate_factory_calls = 0;
+        const auto duplicate_hash = set.hash_function()(duplicate_key);
+        set.prefetch_prehashed(duplicate_hash);
+        auto [duplicate, duplicate_inserted] = set.lazy_emplace_prehashed(duplicate_hash, duplicate_key, [&] {
+            ++duplicate_factory_calls;
+            return duplicate_key;
+        });
+        CHECK_FALSE(duplicate_inserted);
+        CHECK(static_cast<bool>(*duplicate == duplicate_key));
+        CHECK_EQ(duplicate_factory_calls, 0);
+        CHECK_EQ(hash_calls, 3);
+        CHECK_EQ(set.size(), 2);
+
+        const Key legacy_key = 9;
+        hash_calls = 0;
+        set.prefetch_key(legacy_key);
+        CHECK_EQ(hash_calls, 1);
+        CHECK(set.insert(legacy_key).second);
+        CHECK_EQ(hash_calls, 2);
+        CHECK(set.contains(low_key));
+        CHECK(set.contains(high_key));
+        CHECK(set.contains(legacy_key));
     }
 #endif
 
