@@ -1353,6 +1353,31 @@ public:
         return try_emplace_prehashed_impl(hash, std::move(key), std::forward<Args>(args)...);
     }
 
+    /// Compares a borrowed key with a transparent predicate before constructing the owned Key on insertion.
+    template <typename K, typename... Args>
+    requires(requires { typename KeyEqual::is_transparent; } && !std::is_void_v<T> &&
+             !std::is_same_v<std::remove_cvref_t<K>, Key> && std::is_constructible_v<Key, K &&> &&
+             std::is_invocable_r_v<bool, const KeyEqual&, const std::remove_reference_t<K>&, const Key&>)
+    std::pair<iterator, bool> try_emplace_prehashed(size_t hash, K&& key, Args&&... args) {
+        bool relocates_keys = growth_left_ == 0;
+        if constexpr (!kUseInline) {
+            relocates_keys = relocates_keys || size_ == values_capacity_;
+        }
+        if (DENSE_MAP_UNLIKELY(relocates_keys)) {
+            if (size_ != 0) {
+                auto existing = find_prehashed_impl(hash, key);
+                if (existing != end()) return {existing, false};
+            }
+            // Both the key and mapped constructor arguments can refer to storage invalidated by growth.
+            auto owned = std::make_obj_using_allocator<value_type>(alloc_, std::piecewise_construct,
+                                                                   std::forward_as_tuple(std::forward<K>(key)),
+                                                                   std::forward_as_tuple(std::forward<Args>(args)...));
+            return try_emplace_prehashed_impl(hash, std::move_if_noexcept(owned.first),
+                                              std::move_if_noexcept(owned.second));
+        }
+        return try_emplace_prehashed_impl(hash, std::forward<K>(key), std::forward<Args>(args)...);
+    }
+
     iterator erase(const_iterator pos) {
         if constexpr (kUseInline) {
             assert(pos.ctrl_ != nullptr);
@@ -1904,9 +1929,13 @@ private:
 
     template <typename K>
     DENSE_MAP_ALWAYS_INLINE iterator find_impl(const K& key) {
+        return find_prehashed_impl(hash_(key), key);
+    }
+
+    template <typename K>
+    DENSE_MAP_ALWAYS_INLINE iterator find_prehashed_impl(size_t hash, const K& key) {
         if constexpr (kUseInline) {
             // Swiss Table: SIMD probing
-            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
             const size_t mask = capacity_ - 1;
 
@@ -1927,7 +1956,6 @@ private:
         } else if constexpr (kUseFlat) {
             // Flat storage: Robin Hood linear probing (ankerl-style optimized)
             // Use HIGH bits for bucket index, LOW 8 bits for fingerprint (independent bits!)
-            const size_t hash = hash_(key);
             const size_t mask = capacity_ - 1;
             size_t bucket_idx = hash >> shift_;  // HIGH bits for bucket index
             auto dist_and_fp = detail::Bucket::make_dist_and_fingerprint(hash);
@@ -1963,7 +1991,6 @@ private:
             return end();
         } else {
             // Swiss Table + Indirect: SIMD probing with value_indices lookup
-            const size_t hash = hash_(key);
             const int8_t h2_val = detail::h2(hash);
             const size_t mask = capacity_ - 1;
 
@@ -2178,15 +2205,16 @@ private:
 
             const bool was_deleted = detail::is_deleted(ctrl_[idx]);
             const int8_t h2_val = detail::h2(hash);
-            ctrl_[idx] = h2_val;
-            if (idx < kGroupWidth) {
-                ctrl_[capacity_ + idx] = h2_val;
-            }
-
             AllocTraits::construct(alloc_, slots_ + idx,
                                    std::piecewise_construct,
                                    std::forward_as_tuple(std::forward<K>(key)),
                                    std::forward_as_tuple(std::forward<Args>(args)...));
+
+            // Publish only a fully constructed value, preserving empty/deleted slots on exceptions.
+            ctrl_[idx] = h2_val;
+            if (idx < kGroupWidth) {
+                ctrl_[capacity_ + idx] = h2_val;
+            }
 
             ++size_;
             growth_left_ -= !was_deleted;
