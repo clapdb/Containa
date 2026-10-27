@@ -250,6 +250,7 @@ TEST_CASE("dense_map::inline_allocation_failure_preserves_storage") {
 TEST_CASE("dense_map::prefetch_key") {
     static_assert(noexcept(std::declval<const dense_map<int, int, CountingIntHash>&>().prefetch_key(0)));
     static_assert(!noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_key(0)));
+    static_assert(noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_prehashed(0)));
     static_assert(!noexcept(std::declval<const dense_map<int, int, NoexceptProxyHash>&>().prefetch_key(0)));
     static_assert(!noexcept(std::declval<const dense_set<int, NoexceptProxyHash>&>().prefetch_key(0)));
 
@@ -269,6 +270,12 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK_EQ(hash_calls, 1);
         CHECK_EQ(map.size(), size);
         CHECK_EQ(map.capacity(), capacity);
+
+        map.prefetch_prehashed(dense_hash<int>{}(2));
+
+        CHECK_EQ(hash_calls, 1);
+        CHECK_EQ(map.size(), size);
+        CHECK_EQ(map.capacity(), capacity);
         REQUIRE(map.contains(1));
         REQUIRE(map.contains(2));
         CHECK_EQ(map.at(1), 10);
@@ -282,6 +289,7 @@ TEST_CASE("dense_map::prefetch_key") {
           map(0, CountingIntHash{&hash_calls});
 
         map.prefetch_key(7);
+        map.prefetch_prehashed(7);
 
         CHECK_EQ(hash_calls, 0);
         CHECK(map.empty());
@@ -315,6 +323,7 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK_EQ(map.capacity(), 0);
         hash_calls = 0;
         map.prefetch_key(9);
+        map.prefetch_prehashed(dense_hash<int>{}(9));
         CHECK_EQ(hash_calls, 0);
 
         moved.clear();
@@ -322,6 +331,7 @@ TEST_CASE("dense_map::prefetch_key") {
         const auto size = moved.size();
         const auto capacity = moved.capacity();
         moved.prefetch_key(9);
+        moved.prefetch_prehashed(dense_hash<int>{}(9));
 
         CHECK_EQ(hash_calls, 1);
         CHECK(moved.empty());
@@ -352,6 +362,8 @@ TEST_CASE("dense_map::prefetch_key") {
         const auto size = set.size();
         const auto capacity = set.capacity();
         const auto entry_capacity = set.entry_capacity();
+        set.prefetch_prehashed(0);
+        CHECK_EQ(hash_calls, 0);
         set.prefetch_key(low_key);
         set.prefetch_key(high_key);
         set.prefetch_key(other_low_key);
@@ -379,6 +391,7 @@ TEST_CASE("dense_map::prefetch_key") {
             const auto capacity = map.capacity();
 
             map.prefetch_key(1);
+            map.prefetch_prehashed(dense_hash<int>{}(1));
 
             CHECK_EQ(hash_calls, 0);
             CHECK_EQ(map.size(), size);
