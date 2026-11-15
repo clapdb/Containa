@@ -60,6 +60,7 @@ jobs:
     - name: Configure
       run: |
         cmake -S . -B build \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
           -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}"
@@ -117,6 +118,7 @@ jobs:
     - name: Configure
       run: |
         cmake -S . -B build \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCONTAINA_MARCH_NATIVE=OFF \
