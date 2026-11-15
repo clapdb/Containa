@@ -17,6 +17,7 @@
 #pragma once
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <memory_resource>
 
 #include "container_base.hpp"
@@ -818,6 +819,15 @@ public:
     void resize(size_type count, const value_type& value) {
         if (count > size()) {
             if (count > capacity()) {
+                // Relocation can move from or destroy the element supplying value.
+                // Snapshot aliases only on growth, leaving the other paths unchanged.
+                const auto* source = std::addressof(value);
+                const std::less<const value_type*> less;
+                if (!less(source, _start) && less(source, _finish)) {
+                    value_type snapshot(value);
+                    resize(count, snapshot);
+                    return;
+                }
                 realloc_with_old_data(count);
             }
             T* old_finish = _finish;
