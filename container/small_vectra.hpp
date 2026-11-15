@@ -907,6 +907,13 @@ public:
     // Insert operations
     template <Safety safety = Safety::Safe>
     auto insert(const_iterator pos, const value_type& value) -> iterator {
+        // Preserve self-references before either relocation or shifting elements.
+        const auto* source = std::addressof(value);
+        const std::less<const value_type*> less;
+        if (!less(source, _start) && less(source, _finish)) {
+            value_type snapshot(value);
+            return insert<safety>(pos, snapshot);
+        }
         T* pos_ptr = const_cast<T*>(pos.operator->());
         if constexpr (safety == Safety::Safe) {
             if (_finish == _edge) [[unlikely]] {
@@ -935,6 +942,13 @@ public:
 
     template <Safety safety = Safety::Safe>
     auto insert(const_iterator pos, value_type&& value) -> iterator {
+        // Preserve self-references before either relocation or shifting elements.
+        const auto* source = std::addressof(value);
+        const std::less<const value_type*> less;
+        if (!less(source, _start) && less(source, _finish)) {
+            value_type snapshot(std::move(value));
+            return insert<safety>(pos, std::move(snapshot));
+        }
         T* pos_ptr = const_cast<T*>(pos.operator->());
         if constexpr (safety == Safety::Safe) {
             if (_finish == _edge) [[unlikely]] {
