@@ -1178,7 +1178,19 @@ public:
         if constexpr (kUseInline) {
             if (capacity_ == 0) return;
 
-            const size_type hash = static_cast<size_type>(hash_(key));
+            prefetch_prehashed(static_cast<size_type>(hash_(key)));
+        }
+    }
+
+    /// Best-effort prefetch for the initial probe location from an already computed hash. The hash must be the
+    /// same size_type value that this map's hasher would return. Unsupported storage layouts and unallocated
+    /// inline tables are no-ops. This does not allocate or change the container's logical contents, size, or
+    /// capacity.
+    void prefetch_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseInline) {
+            if (capacity_ == 0) return;
+
             const auto position = hash & (capacity_ - 1);
             DENSE_MAP_PREFETCH(ctrl_ + position);
             DENSE_MAP_PREFETCH(slots_ + position);
