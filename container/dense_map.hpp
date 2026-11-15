@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -1177,10 +1178,45 @@ public:
         if constexpr (kUseInline) {
             if (capacity_ == 0) return;
 
-            const size_type hash = static_cast<size_type>(hash_(key));
+            prefetch_prehashed(static_cast<size_type>(hash_(key)));
+        }
+    }
+
+    /// Best-effort prefetch for the initial probe location from an already computed hash. The hash must be the
+    /// same size_type value that this map's hasher would return. Unsupported storage layouts and unallocated
+    /// inline tables are no-ops. This does not allocate or change the container's logical contents, size, or
+    /// capacity.
+    void prefetch_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseInline) {
+            if (capacity_ == 0) return;
+
             const auto position = hash & (capacity_ - 1);
             DENSE_MAP_PREFETCH(ctrl_ + position);
             DENSE_MAP_PREFETCH(slots_ + position);
+        }
+    }
+
+    /// Prefetch the initial flat bucket using this map's own precomputed hash, without hashing or mutation.
+    void prefetch_bucket_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseFlat) {
+            if (capacity_ == 0) return;
+            DENSE_MAP_PREFETCH(buckets_ + (hash >> shift_));
+        }
+    }
+
+    /// Prefetch the initial flat bucket's candidate value after prefetch_bucket_prehashed() has warmed its metadata.
+    /// Collisions may select another value; this is a hint only, with no allocation, hashing or mutation.
+    void prefetch_value_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseFlat) {
+            if (capacity_ == 0) return;
+
+            const auto& bucket = buckets_[hash >> shift_];
+            if (bucket.dist_and_fingerprint != 0) {
+                DENSE_MAP_PREFETCH(values_ + bucket.value_idx);
+            }
         }
     }
 
@@ -1376,6 +1412,30 @@ public:
                                               std::move_if_noexcept(owned.second));
         }
         return try_emplace_prehashed_impl(hash, std::forward<K>(key), std::forward<Args>(args)...);
+    }
+
+    /// Set-only borrowed lookup. factory() returns a Key by value only on a miss. The supplied hash must be
+    /// hash_function()(the constructed Key), and that Key must compare equal to lookup. The factory must
+    /// not mutate this container. A duplicate neither invokes the factory nor relocates existing keys.
+    template <typename K, typename Factory>
+    requires(std::is_void_v<T> && requires { typename KeyEqual::is_transparent; } && std::is_invocable_v<Factory&> &&
+             std::is_same_v<std::remove_cv_t<std::invoke_result_t<Factory&>>, Key> &&
+             std::is_invocable_r_v<bool, const KeyEqual&, const K&, const Key&>)
+    std::pair<iterator, bool> lazy_emplace_prehashed(size_t hash, const K& lookup, Factory factory) {
+        bool relocates_keys = growth_left_ == 0;
+        if constexpr (!kUseInline) {
+            relocates_keys = relocates_keys || size_ == values_capacity_;
+        }
+        if (DENSE_MAP_UNLIKELY(relocates_keys)) {
+            if (size_ != 0) {
+                auto existing = find_prehashed_impl(hash, lookup);
+                if (existing != end()) return {existing, false};
+            }
+            // The lookup and the factory can borrow a key that growth is about to relocate.
+            Key owned = std::invoke(factory);
+            return try_emplace_prehashed_impl(hash, owned, [&owned]() -> Key { return std::move_if_noexcept(owned); });
+        }
+        return try_emplace_prehashed_impl(hash, lookup, std::move(factory));
     }
 
     iterator erase(const_iterator pos) {
@@ -2205,10 +2265,15 @@ private:
 
             const bool was_deleted = detail::is_deleted(ctrl_[idx]);
             const int8_t h2_val = detail::h2(hash);
-            AllocTraits::construct(alloc_, slots_ + idx,
-                                   std::piecewise_construct,
-                                   std::forward_as_tuple(std::forward<K>(key)),
-                                   std::forward_as_tuple(std::forward<Args>(args)...));
+            if constexpr (std::is_void_v<T>) {
+                static_assert(sizeof...(Args) == 1);
+                Key owned = std::invoke(std::get<0>(std::forward_as_tuple(args...)));
+                AllocTraits::construct(alloc_, slots_ + idx, std::move_if_noexcept(owned));
+            } else {
+                AllocTraits::construct(alloc_, slots_ + idx, std::piecewise_construct,
+                                       std::forward_as_tuple(std::forward<K>(key)),
+                                       std::forward_as_tuple(std::forward<Args>(args)...));
+            }
 
             // Publish only a fully constructed value, preserving empty/deleted slots on exceptions.
             ctrl_[idx] = h2_val;
@@ -2246,10 +2311,15 @@ private:
 
             // Construct new value at end of values array
             const uint32_t new_value_idx = static_cast<uint32_t>(size_);
-            AllocTraits::construct(alloc_, values_ + new_value_idx,
-                                   std::piecewise_construct,
-                                   std::forward_as_tuple(std::forward<K>(key)),
-                                   std::forward_as_tuple(std::forward<Args>(args)...));
+            if constexpr (std::is_void_v<T>) {
+                static_assert(sizeof...(Args) == 1);
+                Key owned = std::invoke(std::get<0>(std::forward_as_tuple(args...)));
+                AllocTraits::construct(alloc_, values_ + new_value_idx, std::move_if_noexcept(owned));
+            } else {
+                AllocTraits::construct(alloc_, values_ + new_value_idx, std::piecewise_construct,
+                                       std::forward_as_tuple(std::forward<K>(key)),
+                                       std::forward_as_tuple(std::forward<Args>(args)...));
+            }
             ++size_;
             --growth_left_;
 
@@ -2298,10 +2368,15 @@ private:
 
             // Construct new value at end of values array
             const uint32_t new_value_idx = static_cast<uint32_t>(size_);
-            AllocTraits::construct(alloc_, values_ + new_value_idx,
-                                   std::piecewise_construct,
-                                   std::forward_as_tuple(std::forward<K>(key)),
-                                   std::forward_as_tuple(std::forward<Args>(args)...));
+            if constexpr (std::is_void_v<T>) {
+                static_assert(sizeof...(Args) == 1);
+                Key owned = std::invoke(std::get<0>(std::forward_as_tuple(args...)));
+                AllocTraits::construct(alloc_, values_ + new_value_idx, std::move_if_noexcept(owned));
+            } else {
+                AllocTraits::construct(alloc_, values_ + new_value_idx, std::piecewise_construct,
+                                       std::forward_as_tuple(std::forward<K>(key)),
+                                       std::forward_as_tuple(std::forward<Args>(args)...));
+            }
 
             // Insert into slot
             const bool was_deleted = detail::is_deleted(ctrl_[insert_slot]);

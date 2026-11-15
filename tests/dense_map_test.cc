@@ -250,6 +250,7 @@ TEST_CASE("dense_map::inline_allocation_failure_preserves_storage") {
 TEST_CASE("dense_map::prefetch_key") {
     static_assert(noexcept(std::declval<const dense_map<int, int, CountingIntHash>&>().prefetch_key(0)));
     static_assert(!noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_key(0)));
+    static_assert(noexcept(std::declval<const dense_map<int, int, ThrowingIntHash>&>().prefetch_prehashed(0)));
     static_assert(!noexcept(std::declval<const dense_map<int, int, NoexceptProxyHash>&>().prefetch_key(0)));
     static_assert(!noexcept(std::declval<const dense_set<int, NoexceptProxyHash>&>().prefetch_key(0)));
 
@@ -269,6 +270,12 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK_EQ(hash_calls, 1);
         CHECK_EQ(map.size(), size);
         CHECK_EQ(map.capacity(), capacity);
+
+        map.prefetch_prehashed(dense_hash<int>{}(2));
+
+        CHECK_EQ(hash_calls, 1);
+        CHECK_EQ(map.size(), size);
+        CHECK_EQ(map.capacity(), capacity);
         REQUIRE(map.contains(1));
         REQUIRE(map.contains(2));
         CHECK_EQ(map.at(1), 10);
@@ -282,6 +289,7 @@ TEST_CASE("dense_map::prefetch_key") {
           map(0, CountingIntHash{&hash_calls});
 
         map.prefetch_key(7);
+        map.prefetch_prehashed(7);
 
         CHECK_EQ(hash_calls, 0);
         CHECK(map.empty());
@@ -289,12 +297,14 @@ TEST_CASE("dense_map::prefetch_key") {
     }
 
     SUBCASE("throwing hash result conversion propagates for maps and sets") {
-        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>,
-                              std::allocator<std::pair<int, int>>, force_inline_policy>;
+        using Map = dense_map<int, int, NoexceptProxyHash, std::equal_to<int>, std::allocator<std::pair<int, int>>,
+                              force_inline_policy>;
         using Set = dense_set<int, NoexceptProxyHash, std::equal_to<int>, std::allocator<int>, force_inline_policy>;
         Map map(64);
         Set set(64);
 
+        map.prefetch_prehashed(1);
+        set.prefetch_prehashed(1);
         CHECK_THROWS_AS(map.prefetch_key(1), std::runtime_error);
         CHECK_THROWS_AS(set.prefetch_key(1), std::runtime_error);
     }
@@ -315,6 +325,7 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK_EQ(map.capacity(), 0);
         hash_calls = 0;
         map.prefetch_key(9);
+        map.prefetch_prehashed(dense_hash<int>{}(9));
         CHECK_EQ(hash_calls, 0);
 
         moved.clear();
@@ -322,6 +333,7 @@ TEST_CASE("dense_map::prefetch_key") {
         const auto size = moved.size();
         const auto capacity = moved.capacity();
         moved.prefetch_key(9);
+        moved.prefetch_prehashed(dense_hash<int>{}(9));
 
         CHECK_EQ(hash_calls, 1);
         CHECK(moved.empty());
@@ -352,6 +364,8 @@ TEST_CASE("dense_map::prefetch_key") {
         const auto size = set.size();
         const auto capacity = set.capacity();
         const auto entry_capacity = set.entry_capacity();
+        set.prefetch_prehashed(0);
+        CHECK_EQ(hash_calls, 0);
         set.prefetch_key(low_key);
         set.prefetch_key(high_key);
         set.prefetch_key(other_low_key);
@@ -366,7 +380,95 @@ TEST_CASE("dense_map::prefetch_key") {
         CHECK(set.contains(other_low_key));
         CHECK_EQ(set.size(), 3);
     }
+
+    SUBCASE("prehashed prefetch composes with lazy insertion without rehashing") {
+        using Key = unsigned __int128;
+        using Set = dense_set<Key, CountingCollisionHash, std::equal_to<>, std::allocator<Key>, force_inline_policy>;
+
+        size_t hash_calls = 0;
+        Set set(64, CountingCollisionHash{&hash_calls});
+        const Key low_key = 7;
+        const Key high_key = (static_cast<Key>(1) << 64) | 7;
+        const Key duplicate_key = high_key;
+
+        const auto low_hash = set.hash_function()(low_key);
+        set.prefetch_prehashed(low_hash);
+        auto [low, low_inserted] = set.lazy_emplace_prehashed(low_hash, low_key, [low_key] { return low_key; });
+        CHECK(low_inserted);
+        CHECK(static_cast<bool>(*low == low_key));
+        CHECK_EQ(hash_calls, 1);
+
+        const auto high_hash = set.hash_function()(high_key);
+        set.prefetch_prehashed(high_hash);
+        auto [high, high_inserted] = set.lazy_emplace_prehashed(high_hash, high_key, [high_key] { return high_key; });
+        CHECK(high_inserted);
+        CHECK(static_cast<bool>(*high == high_key));
+        CHECK_EQ(hash_calls, 2);
+
+        size_t duplicate_factory_calls = 0;
+        const auto duplicate_hash = set.hash_function()(duplicate_key);
+        set.prefetch_prehashed(duplicate_hash);
+        auto [duplicate, duplicate_inserted] = set.lazy_emplace_prehashed(duplicate_hash, duplicate_key, [&] {
+            ++duplicate_factory_calls;
+            return duplicate_key;
+        });
+        CHECK_FALSE(duplicate_inserted);
+        CHECK(static_cast<bool>(*duplicate == duplicate_key));
+        CHECK_EQ(duplicate_factory_calls, 0);
+        CHECK_EQ(hash_calls, 3);
+        CHECK_EQ(set.size(), 2);
+
+        const Key legacy_key = 9;
+        hash_calls = 0;
+        set.prefetch_key(legacy_key);
+        CHECK_EQ(hash_calls, 1);
+        CHECK(set.insert(legacy_key).second);
+        CHECK_EQ(hash_calls, 2);
+        CHECK(set.contains(low_key));
+        CHECK(set.contains(high_key));
+        CHECK(set.contains(legacy_key));
+    }
 #endif
+
+    SUBCASE("flat bucket and value prefetch preserve contents across lifecycle changes") {
+        using Map = dense_map<int, int, CountingIntHash, std::equal_to<int>,
+                              std::allocator<std::pair<int, int>>, force_flat_policy>;
+        static_assert(noexcept(std::declval<const Map&>().prefetch_value_prehashed(0)));
+        size_t hash_calls = 0;
+        Map map(0, CountingIntHash{&hash_calls});
+        map.prefetch_key(9);
+        map.prefetch_bucket_prehashed(0);
+        map.prefetch_value_prehashed(0);
+        CHECK_EQ(hash_calls, 0);
+        CHECK(map.empty());
+        map.reserve_values(128);
+        map.reserve(128);
+        for (int key = 0; key < 100; ++key) map.emplace(key, key * 3);
+        map.erase(7);
+        const auto footprint = map.direct_memory_footprint();
+        const auto capacity = map.capacity();
+        hash_calls = 0;
+        map.prefetch_key(9);
+        CHECK_EQ(hash_calls, 0);
+        for (int key = 0; key < 200; ++key) {
+            const auto hash = dense_hash<int>{}(key);
+            map.prefetch_bucket_prehashed(hash);
+            map.prefetch_value_prehashed(hash);
+        }
+        CHECK_EQ(hash_calls, 0);
+        CHECK_EQ(map.direct_memory_footprint(), footprint);
+        CHECK_EQ(map.capacity(), capacity);
+        CHECK_EQ(map.size(), 99);
+        CHECK_EQ(map.at(9), 27);
+        auto moved = std::move(map);
+        map.prefetch_bucket_prehashed(0);
+        map.prefetch_value_prehashed(0);
+        moved.clear();
+        moved.prefetch_bucket_prehashed(0);
+        moved.prefetch_value_prehashed(0);
+        CHECK(moved.empty());
+        CHECK_EQ(moved.capacity(), capacity);
+    }
 
     SUBCASE("unsupported storage layouts return before hashing") {
         auto check_policy = []<typename Policy>() {
@@ -379,6 +481,7 @@ TEST_CASE("dense_map::prefetch_key") {
             const auto capacity = map.capacity();
 
             map.prefetch_key(1);
+            map.prefetch_prehashed(dense_hash<int>{}(1));
 
             CHECK_EQ(hash_calls, 0);
             CHECK_EQ(map.size(), size);
@@ -3105,6 +3208,87 @@ TEST_CASE("dense_map::regression::erase_swap_and_pop") {
 
         CHECK(map.empty());
     }
+}
+
+TEST_CASE("dense_set::lazy_prehashed_constructs_only_missing_owned_keys") {
+    auto check = []<typename Policy>(bool collide) {
+        size_t hashes = 0;
+        size_t factories = 0;
+        dense_set<ConstructionTrackedString, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<ConstructionTrackedString>, Policy> set(16, TrackedStringHash{&hashes, collide});
+        const auto hash_of = [collide](std::string_view key) {
+            return collide ? size_t{0} : dense_hash<std::string_view>{}(key);
+        };
+        for (size_t row = 0; row < 128; ++row) {
+            std::string text = row == 0 ? std::string("binary\0key", 10)
+                                       : "long-owned-set-key-" + std::to_string(row);
+            const auto hash = hash_of(text);
+            const auto inserted = set.lazy_emplace_prehashed(hash, std::string_view{text}, [&] {
+                ++factories;
+                return ConstructionTrackedString{text};
+            });
+            REQUIRE(inserted.second);
+            CHECK_EQ(inserted.first->value, text);
+            const auto before_hashes = hashes;
+            const auto duplicate = set.lazy_emplace_prehashed(hash, std::string_view{text}, [&]() -> ConstructionTrackedString {
+                ++factories;
+                throw std::runtime_error("duplicate must not invoke factory");
+            });
+            CHECK_FALSE(duplicate.second);
+            CHECK_EQ(hashes, before_hashes);
+            text.assign(text.size(), 'x');
+        }
+        CHECK_EQ(factories, 128);
+        CHECK_GT(hashes, 0);
+        CHECK_EQ(set.size(), 128);
+    };
+    for (bool collide : {false, true}) {
+        check.template operator()<force_inline_policy>(collide);
+        check.template operator()<force_flat_policy>(collide);
+        check.template operator()<force_indirect_policy>(collide);
+    }
+}
+
+TEST_CASE("dense_set::lazy_prehashed_preserves_borrowed_growth_and_factory_failures") {
+    auto check = []<typename Policy>() {
+        size_t hashes = 0;
+        dense_set<ConstructionTrackedString, TrackedStringHash, TrackedStringEqual,
+                  std::allocator<ConstructionTrackedString>, Policy> set(16, TrackedStringHash{&hashes, true});
+        const auto count = set.entry_capacity();
+        for (size_t row = 0; row < count; ++row) {
+            auto text = row == 0 ? std::string{"key0-suffix"} : "key" + std::to_string(row);
+            REQUIRE(set.lazy_emplace_prehashed(0, std::string_view{text}, [&] {
+                return ConstructionTrackedString{text};
+            }).second);
+        }
+        auto first = std::find_if(set.begin(), set.end(), [](const auto& key) { return key.value == "key0-suffix"; });
+        REQUIRE(first != set.end());
+        const std::string_view borrowed{first->value};
+        const auto capacity = set.capacity();
+        size_t called = 0;
+        CHECK_FALSE(set.lazy_emplace_prehashed(0, borrowed, [&] {
+            ++called;
+            return ConstructionTrackedString{borrowed};
+        }).second);
+        CHECK_EQ(called, 0);
+        CHECK_EQ(set.capacity(), capacity);
+        const auto prefix = borrowed.substr(0, 4);
+        CHECK_THROWS_AS((set.lazy_emplace_prehashed(0, prefix, []() -> ConstructionTrackedString {
+            throw std::bad_alloc{};
+        })), std::bad_alloc);
+        CHECK_EQ(set.size(), count);
+        CHECK_EQ(first->value, "key0-suffix");
+        const auto inserted = set.lazy_emplace_prehashed(0, prefix, [&] {
+            return ConstructionTrackedString{prefix};
+        });
+        REQUIRE(inserted.second);
+        CHECK_EQ(inserted.first->value, "key0");
+        CHECK_EQ(set.size(), count + 1);
+        CHECK_GT(hashes, 0);
+    };
+    check.template operator()<force_inline_policy>();
+    check.template operator()<force_flat_policy>();
+    check.template operator()<force_indirect_policy>();
 }
 
 }  // namespace stdb::container
