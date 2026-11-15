@@ -841,6 +841,16 @@ public:
     }
 
     void assign(size_type count, const value_type& value) {
+        // Destruction invalidates aliased values even when capacity is sufficient.
+        if (count > 0) {
+            const auto* source = std::addressof(value);
+            const std::less<const value_type*> less;
+            if (!less(source, _start) && less(source, _finish)) {
+                value_type snapshot(value);
+                assign(count, snapshot);
+                return;
+            }
+        }
         destroy_range(_start, _finish);
         if (count > capacity()) {
             free_heap();
