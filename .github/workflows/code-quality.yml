@@ -19,17 +19,16 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        wget https://apt.llvm.org/llvm.sh
-        chmod +x llvm.sh
-        sudo ./llvm.sh 20
-        sudo apt-get install -y cmake clang-20 clang-tidy-20
-        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-20 100
+        sudo apt-get install -y cmake clang clang-tidy build-essential
 
     - name: Configure CMake
       run: |
         mkdir -p build.analysis
         cd build.analysis
         cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                 -DCMAKE_CXX_COMPILER=clang++ \
+                 -DUSE_LIBCXX_DEFAULT=OFF \
                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
     - name: Run clang-tidy on core library
@@ -119,6 +118,7 @@ jobs:
     - name: Configure
       run: |
         cmake -S . -B build.sanitizer \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DUSE_LIBCXX_DEFAULT=OFF \
