@@ -430,6 +430,46 @@ TEST_CASE("dense_map::prefetch_key") {
     }
 #endif
 
+    SUBCASE("flat bucket and value prefetch preserve contents across lifecycle changes") {
+        using Map = dense_map<int, int, CountingIntHash, std::equal_to<int>,
+                              std::allocator<std::pair<int, int>>, force_flat_policy>;
+        static_assert(noexcept(std::declval<const Map&>().prefetch_value_prehashed(0)));
+        size_t hash_calls = 0;
+        Map map(0, CountingIntHash{&hash_calls});
+        map.prefetch_key(9);
+        map.prefetch_bucket_prehashed(0);
+        map.prefetch_value_prehashed(0);
+        CHECK_EQ(hash_calls, 0);
+        CHECK(map.empty());
+        map.reserve_values(128);
+        map.reserve(128);
+        for (int key = 0; key < 100; ++key) map.emplace(key, key * 3);
+        map.erase(7);
+        const auto footprint = map.direct_memory_footprint();
+        const auto capacity = map.capacity();
+        hash_calls = 0;
+        map.prefetch_key(9);
+        CHECK_EQ(hash_calls, 0);
+        for (int key = 0; key < 200; ++key) {
+            const auto hash = dense_hash<int>{}(key);
+            map.prefetch_bucket_prehashed(hash);
+            map.prefetch_value_prehashed(hash);
+        }
+        CHECK_EQ(hash_calls, 0);
+        CHECK_EQ(map.direct_memory_footprint(), footprint);
+        CHECK_EQ(map.capacity(), capacity);
+        CHECK_EQ(map.size(), 99);
+        CHECK_EQ(map.at(9), 27);
+        auto moved = std::move(map);
+        map.prefetch_bucket_prehashed(0);
+        map.prefetch_value_prehashed(0);
+        moved.clear();
+        moved.prefetch_bucket_prehashed(0);
+        moved.prefetch_value_prehashed(0);
+        CHECK(moved.empty());
+        CHECK_EQ(moved.capacity(), capacity);
+    }
+
     SUBCASE("unsupported storage layouts return before hashing") {
         auto check_policy = []<typename Policy>() {
             size_t hash_calls = 0;

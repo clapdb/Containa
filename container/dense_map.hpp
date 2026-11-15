@@ -1197,6 +1197,29 @@ public:
         }
     }
 
+    /// Prefetch the initial flat bucket using this map's own precomputed hash, without hashing or mutation.
+    void prefetch_bucket_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseFlat) {
+            if (capacity_ == 0) return;
+            DENSE_MAP_PREFETCH(buckets_ + (hash >> shift_));
+        }
+    }
+
+    /// Prefetch the initial flat bucket's candidate value after prefetch_bucket_prehashed() has warmed its metadata.
+    /// Collisions may select another value; this is a hint only, with no allocation, hashing or mutation.
+    void prefetch_value_prehashed(size_type hash) const noexcept {
+        (void)hash;
+        if constexpr (kUseFlat) {
+            if (capacity_ == 0) return;
+
+            const auto& bucket = buckets_[hash >> shift_];
+            if (bucket.dist_and_fingerprint != 0) {
+                DENSE_MAP_PREFETCH(values_ + bucket.value_idx);
+            }
+        }
+    }
+
     // The two capacities below deliberately distinguish an admissible entry count from the storage policy's
     // bucket count.  In particular, capacity() is not an insertion guarantee because the table grows at its
     // maximum load factor. This is a theoretical admissible total capacity; erasing entries does not guarantee
