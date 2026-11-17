@@ -495,6 +495,65 @@ TEST_CASE("dense_map::prefetch_key") {
     }
 }
 
+TEST_CASE("dense_map::inline_candidate_prefetch_is_read_only_across_collisions_and_growth") {
+    struct HintHash
+    {
+        size_t* calls;
+        size_t value;
+        auto operator()(int) const noexcept -> size_t {
+            ++*calls;
+            return value;
+        }
+    };
+    using Map = dense_map<int, int, HintHash, std::equal_to<int>, std::pmr::polymorphic_allocator<std::pair<int, int>>,
+                          force_inline_policy>;
+    static_assert(noexcept(std::declval<const Map&>().prefetch_value_prehashed(0)));
+    for (const size_t hash : {size_t{0}, size_t{255}, std::numeric_limits<size_t>::max()}) {
+        size_t hash_calls = 0;
+        FailingInlineResource resource;
+        Map map{0, HintHash{&hash_calls, hash}, std::equal_to<int>{},
+                std::pmr::polymorphic_allocator<std::pair<int, int>>{&resource}};
+        map.prefetch_value_prehashed(hash);
+        CHECK_EQ(resource.calls, 0);
+        CHECK_EQ(hash_calls, 0);
+        map.reserve(128);
+        // Fill the initial SIMD group, including a wraparound group at the end of the table.
+        for (int key = 0; key < 120; ++key) map.emplace(key, key * 3);
+        map.prefetch_value_prehashed(hash);
+        for (int key = 0; key < 120; key += 3) map.erase(key);
+        const auto footprint = map.direct_memory_footprint();
+        const auto allocation_calls = resource.calls;
+        hash_calls = 0;
+        resource.fail_on = resource.calls + 1;
+        for (int i = 0; i < 200; ++i) {
+            map.prefetch_prehashed(hash);
+            map.prefetch_value_prehashed(hash);
+            map.prefetch_value_prehashed(hash ^ 0x8000000000000000ULL);
+        }
+        CHECK_EQ(resource.calls, allocation_calls);
+        CHECK_EQ(hash_calls, 0);
+        CHECK_EQ(map.direct_memory_footprint(), footprint);
+        CHECK_EQ(map.size(), 80);
+        resource.fail_on = 0;
+        map.reserve(512);
+        for (int key = 120; key < 300; ++key) {
+            map.prefetch_value_prehashed(hash);
+            CHECK(map.try_emplace_prehashed(hash, key, key * 3).second);
+        }
+        for (int key = 0; key < 300; ++key) {
+            if (key < 120 && key % 3 == 0)
+                CHECK_FALSE(map.contains(key));
+            else
+                CHECK_EQ(map.at(key), key * 3);
+        }
+        auto moved = std::move(map);
+        map.prefetch_value_prehashed(hash);
+        moved.clear();
+        moved.prefetch_value_prehashed(hash);
+        CHECK(moved.empty());
+    }
+}
+
 TEST_CASE("dense_map::basic") {
     SUBCASE("default constructor") {
         dense_map<int, int> map;
