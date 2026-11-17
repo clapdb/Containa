@@ -1206,11 +1206,22 @@ public:
         }
     }
 
-    /// Prefetch the initial flat bucket's candidate value after prefetch_bucket_prehashed() has warmed its metadata.
-    /// Collisions may select another value; this is a hint only, with no allocation, hashing or mutation.
+    /// Warm candidate values after prefetching probe metadata. Inline tables hint the first fingerprint match
+    /// and first writable slot in the initial group; flat tables hint the initial bucket's value. Collisions
+    /// and intervening inserts may select other slots. This never allocates, hashes, compares keys or mutates.
     void prefetch_value_prehashed(size_type hash) const noexcept {
         (void)hash;
-        if constexpr (kUseFlat) {
+        if constexpr (kUseInline) {
+            if (capacity_ == 0) return;
+            const detail::ProbeSeq seq(hash, capacity_ - 1);
+            const detail::Group group(ctrl_ + seq.offset());
+            if (auto matches = group.match(detail::h2(hash))) {
+                DENSE_MAP_PREFETCH(slots_ + seq.offset(matches.lowest_set_bit()));
+            }
+            if (auto available = group.match_empty_or_deleted()) {
+                DENSE_MAP_PREFETCH(slots_ + seq.offset(available.lowest_set_bit()));
+            }
+        } else if constexpr (kUseFlat) {
             if (capacity_ == 0) return;
 
             const auto& bucket = buckets_[hash >> shift_];
