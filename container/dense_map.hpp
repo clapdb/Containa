@@ -1197,10 +1197,14 @@ public:
         }
     }
 
-    /// Prefetch the initial flat bucket using this map's own precomputed hash, without hashing or mutation.
+    /// Prefetch initial probe metadata using this map's own hash: inline control bytes or a flat bucket.
+    /// Candidate value hints are separate so a two-stage caller can avoid warming an unused initial value slot.
     void prefetch_bucket_prehashed(size_type hash) const noexcept {
         (void)hash;
-        if constexpr (kUseFlat) {
+        if constexpr (kUseInline) {
+            if (capacity_ == 0) return;
+            DENSE_MAP_PREFETCH(ctrl_ + (hash & (capacity_ - 1)));
+        } else if constexpr (kUseFlat) {
             if (capacity_ == 0) return;
             DENSE_MAP_PREFETCH(buckets_ + (hash >> shift_));
         }

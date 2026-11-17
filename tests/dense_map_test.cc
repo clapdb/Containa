@@ -513,6 +513,7 @@ TEST_CASE("dense_map::inline_candidate_prefetch_is_read_only_across_collisions_a
         FailingInlineResource resource;
         Map map{0, HintHash{&hash_calls, hash}, std::equal_to<int>{},
                 std::pmr::polymorphic_allocator<std::pair<int, int>>{&resource}};
+        map.prefetch_bucket_prehashed(hash);
         map.prefetch_value_prehashed(hash);
         CHECK_EQ(resource.calls, 0);
         CHECK_EQ(hash_calls, 0);
@@ -526,7 +527,7 @@ TEST_CASE("dense_map::inline_candidate_prefetch_is_read_only_across_collisions_a
         hash_calls = 0;
         resource.fail_on = resource.calls + 1;
         for (int i = 0; i < 200; ++i) {
-            map.prefetch_prehashed(hash);
+            map.prefetch_bucket_prehashed(hash);
             map.prefetch_value_prehashed(hash);
             map.prefetch_value_prehashed(hash ^ 0x8000000000000000ULL);
         }
@@ -547,8 +548,10 @@ TEST_CASE("dense_map::inline_candidate_prefetch_is_read_only_across_collisions_a
                 CHECK_EQ(map.at(key), key * 3);
         }
         auto moved = std::move(map);
+        map.prefetch_bucket_prehashed(hash);
         map.prefetch_value_prehashed(hash);
         moved.clear();
+        moved.prefetch_bucket_prehashed(hash);
         moved.prefetch_value_prehashed(hash);
         CHECK(moved.empty());
     }
